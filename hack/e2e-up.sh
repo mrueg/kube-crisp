@@ -422,6 +422,65 @@ if [[ -z "${bundle:-}" ]]; then
   exit 1
 fi
 
+# The configuration existing is not the webhook working. The kube-apiserver
+# caches webhook configurations, the Service needs endpoints, and the policy is
+# Ignore — so until all of that lines up a projection that should be refused is
+# quietly accepted instead, which reads as a test failure rather than as a race
+# with startup.
+#
+# So this waits for a refusal rather than for an object. The projection below is
+# structurally valid and asks for a table that does not exist, which is the
+# webhook's whole purpose and something only it can object to; a server-side dry
+# run reaches admission and writes nothing. Requiring "admission webhook" in the
+# message is what separates a refusal by the webhook from one by the CRD's own
+# schema.
+#
+# Not a Secret that is missing the opt-in label, which would look like the more
+# direct probe: the webhook resolves the data source and fails open when it
+# cannot, so a Secret that does not exist at all is allowed through.
+echo "==> waiting for the projection webhook to start refusing"
+webhook_refuses() {
+  # Captured rather than piped: a denied create exits non-zero, which is the
+  # point, and under pipefail that status propagates through the pipe however
+  # the grep went. The first version of this reported a working webhook as
+  # broken for exactly that reason.
+  local refusal
+  refusal="$(kubectl create --dry-run=server -f - 2>&1 <<'PROBE'
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: e2e-webhook-probe
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: WebhookProbe
+    plural: webhookprobes
+    scope: Namespaced
+    schema: {type: object}
+  queries:
+    list: {sql: "SELECT id, tenant FROM no_such_table_for_the_probe WHERE tenant = :namespace"}
+  mapping: {name: id, namespace: tenant}
+PROBE
+)" || true
+  [[ "${refusal}" == *"admission webhook"* ]]
+}
+for _ in $(seq 1 60); do
+  if webhook_refuses; then
+    break
+  fi
+  sleep 2
+done
+if ! webhook_refuses; then
+  echo "!! the projection webhook never refused anything, so it is not in force" >&2
+  kubectl get validatingwebhookconfiguration kube-crisp-projections -o yaml >&2 || true
+  kubectl -n kube-crisp logs deploy/kube-crisp-apiserver --tail=40 >&2 || true
+  exit 1
+fi
+
 echo "==> waiting for the projected API to be registered and become available"
 for _ in $(seq 1 60); do
   status="$(kubectl get apiservice v1alpha1.store.example.com \

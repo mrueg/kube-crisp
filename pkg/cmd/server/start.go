@@ -243,7 +243,7 @@ func NewCommandStartCrispServer(ctx context.Context, defaults *CrispServerOption
 	flags.BoolVar(&o.ProjectionWebhook.Enabled, "enable-projection-webhook", o.ProjectionWebhook.Enabled,
 		"Serve an admission webhook that checks a CustomResourceProjection against its database before the cluster accepts it, so SQL the database cannot run is refused at kubectl apply rather than reported afterwards in the projection's status. Needs the RBAC in manifests/80-webhook-rbac.yaml.")
 	flags.BoolVar(&o.ProjectionWebhook.Manage, "manage-projection-webhook", o.ProjectionWebhook.Manage,
-		"Create and correct the ValidatingWebhookConfiguration that points the cluster at this server. Only a configuration labelled as managed by kube-crisp is ever modified.")
+		"Create and correct the ValidatingWebhookConfiguration that points the cluster at this server, and keep correcting it: a generated certificate belongs to the pod that generated it, so a rolling update can otherwise leave the cluster trusting one nothing serves. Only a configuration labelled as managed by kube-crisp is ever modified. With more than one replica and no --projection-webhook-ca-bundle-file, every replica signs its own certificate and the configuration can name only one, so give them a shared certificate or run the webhook on a single replica.")
 	flags.StringVar(&o.ProjectionWebhook.Name, "projection-webhook-name", o.ProjectionWebhook.Name,
 		"Name of the ValidatingWebhookConfiguration.")
 	flags.StringVar(&o.ProjectionWebhookCABundleFile, "projection-webhook-ca-bundle-file", o.ProjectionWebhookCABundleFile,

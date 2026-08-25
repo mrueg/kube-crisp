@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/wait"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/healthz"
 	dynamicclient "k8s.io/client-go/dynamic"
@@ -129,6 +130,11 @@ type CrispServer struct {
 }
 
 // New builds the server and installs the projected API surface.
+// webhookReconcileInterval is how often the projection webhook configuration is
+// checked against what this server serves. Short, because until the two agree
+// the webhook is being skipped rather than failing loudly.
+const webhookReconcileInterval = 30 * time.Second
+
 func (c CompletedConfig) New() (*CrispServer, error) {
 	genericServer, err := c.GenericConfig.New("kube-crisp-apiserver", genericapiserver.NewEmptyDelegate())
 	if err != nil {
@@ -210,7 +216,29 @@ func (c CompletedConfig) New() (*CrispServer, error) {
 					}
 					opts.CABundle = cert
 				}
-				return reconcileWebhookConfiguration(hookCtx.Context, client, opts)
+				if err := reconcileWebhookConfiguration(hookCtx.Context, client, opts); err != nil {
+					return err
+				}
+
+				// And kept reconciled, not registered once.
+				//
+				// The configuration can name one CA, and a server that was not
+				// given one signs its own — so during a rolling update the pod
+				// on its way out can write its certificate after its
+				// replacement wrote theirs, leaving the cluster told to trust a
+				// certificate nothing serves any more. Because the policy is
+				// Ignore, that is silent: admission is skipped, and a
+				// projection this server would have refused is accepted.
+				//
+				// A no-op almost always: a read and a comparison, writing only
+				// when the configuration has drifted from what this server can
+				// actually answer.
+				go wait.UntilWithContext(hookCtx.Context, func(ctx context.Context) {
+					if err := reconcileWebhookConfiguration(ctx, client, opts); err != nil {
+						klog.V(2).InfoS("could not reconcile the projection webhook configuration", "err", err)
+					}
+				}, webhookReconcileInterval)
+				return nil
 			})
 	}
 

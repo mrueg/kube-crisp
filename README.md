@@ -283,6 +283,10 @@ attaches build provenance.
 
 ## Limitations
 
+- **The table has to exist.** kube-crisp projects rows; it does not create or migrate tables. A
+  projection whose table is missing reports `CompilationFailed` with the database's own message and
+  keeps retrying, so it starts serving once the table appears — and `status.requiredSchema` says what
+  the table would have to contain, for handing to whatever manages the schema.
 - **No subresource beyond `/status` and `/scale`.**
 - **Watch history is bounded** by `watch.historySize` and lives in memory, so it is lost on restart
   and not shared between replicas — but a projection that maps a `resourceVersion` and has a

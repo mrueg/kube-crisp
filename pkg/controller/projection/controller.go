@@ -885,6 +885,10 @@ func (c *Controller) updateStatus(
 		ObservedGeneration: generation,
 		Conditions:         conditions,
 		ServedPaths:        servedPaths,
+		// Reported whatever the projection's serving state, because a
+		// projection that failed to compile because its table is missing is
+		// exactly the one whose required schema someone wants to read.
+		RequiredSchema: projection.RequiredSchema(p.Spec),
 	}
 
 	// Against what this controller last wrote when it has written one, and only
@@ -955,7 +959,12 @@ func statusUnchanged(old, new crispv1alpha1.CustomResourceProjectionStatus) bool
 			return false
 		}
 	}
-	return true
+
+	// Compared too, or a projection whose schema changed under an unchanged
+	// generation would go on reporting the old one. Both sides are built in a
+	// fixed order, so equality here is a comparison of content rather than of
+	// whichever order a map happened to produce.
+	return apiequality.Semantic.DeepEqual(old.RequiredSchema, new.RequiredSchema)
 }
 
 // warnAboutUnversionedProjections reports projections that cannot safely be

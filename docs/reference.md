@@ -956,6 +956,56 @@ That mistake is easy to make and silent, so it is checked rather than left to do
 
 `kube_crisp_watch_polls_total{mode}` shows whether a projection really is polling incrementally.
 
+## What a projection needs from the database
+
+kube-crisp does not create tables. A projection whose table is missing compiles against the database
+and reports `Ready=False` with reason `CompilationFailed`, carrying the database's own message —
+naming the query and the column. It keeps retrying, so the projection starts serving on its own once
+the table appears; nothing has to be reapplied.
+
+The other half is in `status.requiredSchema`: what the table would have to contain, gathered from the
+queries and the mapping so nobody has to read the SQL to find out.
+
+```console
+$ kubectl get crp orders -o jsonpath='{.status.requiredSchema}' | jq
+{
+  "tables": ["orders"],
+  "columns": [
+    {"name": "customer",    "type": "string",  "usedFor": "field"},
+    {"name": "id",          "type": "string",  "usedFor": "identity"},
+    {"name": "status",      "type": "string",  "usedFor": "label"},
+    {"name": "tenant",      "type": "string",  "usedFor": "identity"},
+    {"name": "total_cents", "type": "integer", "usedFor": "field"},
+    {"name": "updated_at",  "type": "string",  "usedFor": "metadata"}
+  ]
+}
+```
+
+`usedFor` separates the columns a row cannot become an object without — `identity` — from the ones
+that fill in metadata, labels, or fields.
+
+Two things it deliberately is not:
+
+- **A schema.** These are *result* columns. A list query that computes one, `SELECT total_cents AS
+  observed`, requires `observed` in its results and no such column in any table.
+- **Complete.** Table names are read out of the statement text, so a name inside a string literal or
+  a comment is not one — but a common table expression is listed alongside the tables it reads, and a
+  table reached only through a view is not listed at all, because nothing in the statement says so.
+
+### Creating the table
+
+Use a schema tool and let the two converge. [SchemaHero](https://schemahero.io) and the
+[Atlas Operator](https://atlasgo.io/integrations/kubernetes/operator) both manage database schema
+through custom resources; either can own the table while a `CustomResourceProjection` projects it.
+Apply both together — ordering does not matter, because a projection whose table is not there yet
+retries until it is.
+
+Owning DDL is deliberately out of scope here. Migration ordering, drift, and what to do about a
+destructive change are a separate problem with mature answers, and a table outlives the projection
+over it: several projections may read one table, and deleting a projection must never drop it. The
+credentials are the other reason — the Secret a projection reads is one that opted in to being
+projected, and giving it rights to drop tables would hand that to every projection sharing it.
+
 ## Everything else
 
 The prose above covers the fields worth explaining. These are the rest — real,

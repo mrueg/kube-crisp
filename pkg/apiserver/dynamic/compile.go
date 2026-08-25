@@ -3,6 +3,7 @@ package dynamic
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	goerrors "errors"
@@ -117,11 +118,52 @@ func (c *Compiler) Prepare(ctx context.Context, p *crispv1alpha1.CustomResourceP
 // either way; refusing on it would make every projection unapplyable while a
 // database was down, including the ones that would fix it.
 func (c *Compiler) Check(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) error {
+	err := c.check(ctx, p)
+
+	// A pool closed underneath the check is this server's bookkeeping, not
+	// anything about the projection.
+	//
+	// Pools are shared and released when no installed projection references
+	// them any more — and a projection being admitted is not installed, so a
+	// sync landing mid-check can close the very pool the check is using. That
+	// came back as "sql: database is closed" and was reported as SQL the
+	// database could not run, which refused a perfectly good projection.
+	//
+	// The closed pool is still the one the cache would hand out, so it is
+	// dropped before trying again. Once: if it happens twice something other
+	// than a race is going on, and the check gives way rather than objecting to
+	// a projection on grounds that are not about the projection.
+	if isClosedPool(err) {
+		klog.V(2).InfoS("the data source pool was closed while checking a projection; retrying",
+			"projection", p.Name)
+		if prepared, prepErr := c.Prepare(ctx, p); prepErr == nil {
+			c.Pools.Evict(prepared.PoolKey)
+			if prepared.ReadPoolKey != "" {
+				c.Pools.Evict(prepared.ReadPoolKey)
+			}
+		}
+		if err = c.check(ctx, p); isClosedPool(err) {
+			klog.V(2).InfoS("the data source pool was closed again while checking a projection; not objecting",
+				"projection", p.Name)
+			return nil
+		}
+	}
+	return err
+}
+
+// check is one attempt at Check.
+func (c *Compiler) check(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) error {
 	prepared, err := c.Prepare(ctx, p)
 	if err != nil {
 		return err
 	}
 	if err := prepared.Pool.Ping(ctx); err != nil {
+		// A closed pool is not an unreachable database, and treating it as one
+		// would quietly skip the check. Returned so the caller can drop it and
+		// try again with a live one.
+		if isClosedPool(err) {
+			return err
+		}
 		klog.V(2).InfoS("data source unreachable while checking a projection; not objecting",
 			"projection", p.Name, "err", err)
 		return nil
@@ -135,6 +177,18 @@ func (c *Compiler) Check(ctx context.Context, p *crispv1alpha1.CustomResourcePro
 		return err
 	}
 	return nil
+}
+
+// isClosedPool reports whether an error is a pool that was closed while it was
+// being used, rather than anything the database said about a statement.
+func isClosedPool(err error) bool {
+	if err == nil {
+		return false
+	}
+	// database/sql answers a closed pool with this sentinel, and wraps it in
+	// nothing — but the message travels through the query error this package
+	// builds, so the string is checked too.
+	return goerrors.Is(err, sql.ErrConnDone) || strings.Contains(err.Error(), "sql: database is closed")
 }
 
 // Compile validates a projection, connects its data source, and builds the

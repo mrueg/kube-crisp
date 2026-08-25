@@ -79,6 +79,20 @@ own certificate is used, which is correct for a self-signed one and pins the web
 certificate otherwise. `--projection-webhook-name` names the configuration, for a cluster running
 more than one kube-crisp.
 
+The configuration is kept reconciled rather than registered once, because a generated certificate
+belongs to the pod that generated it. During a rolling update the pod on its way out can write its
+certificate after its replacement wrote theirs, leaving the cluster told to trust a certificate
+nothing serves — and since the policy is `Ignore`, that is silent: admission is skipped and a
+projection the server would have refused is accepted. The reconcile runs every 30 seconds and writes
+only when the configuration disagrees with what the server can actually answer.
+
+**More than one replica needs a real certificate.** With a generated one every replica signs its
+own, and the configuration can name only one CA — so the replicas take turns correcting it to
+theirs, and whichever the Service picks for a given request may be one the cluster does not trust.
+Give every replica the same certificate and pass its CA with
+`--projection-webhook-ca-bundle-file`, or run the webhook on a single replica.
+`kube_crisp_projections` does not show this, because from the server's side nothing failed.
+
 Its failure policy is `Ignore`, deliberately. This server is what serves the webhook, so `Fail`
 would mean that while it is down or rolling nobody can create or edit a projection — including the
 edit that would fix it. Nothing depends on the webhook having run: the server refuses to serve a
@@ -128,6 +142,10 @@ $ kubectl get crp orders -o jsonpath='{.status}' | jq
 {
   "observedGeneration": 3,
   "servedPaths": ["/apis/store.example.com/v1alpha1/orders"],
+  "requiredSchema": {
+    "tables": ["orders"],
+    "columns": [{"name": "id", "type": "string", "usedFor": "identity"}]
+  },
   "conditions": [
     {"type": "Ready", "status": "True", "reason": "Serving"},
     {"type": "Registered", "status": "True", "reason": "Routed"},
@@ -140,6 +158,14 @@ $ kubectl get crp orders -o jsonpath='{.status}' | jq
 `servedPaths` is what the projection is actually answering on, one entry per
 served version — which is how you tell an extra version that is installed from
 one that is only declared.
+
+`requiredSchema` is what the projection reads from the database, gathered from
+its queries and its mapping. kube-crisp creates nothing, so this is what to hand
+to whatever does — see
+[the reference](reference.md#what-a-projection-needs-from-the-database). It is
+reported whether or not the projection is serving, which matters because a
+projection that failed to compile because its table is missing is exactly the
+one whose required schema someone wants to read.
 
 The four conditions say different things and are worth reading separately.
 `SchemaResolved` covers the shape, including a schema borrowed with

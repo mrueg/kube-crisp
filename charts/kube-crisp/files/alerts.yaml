@@ -1,0 +1,292 @@
+# The alert rules kube-crisp ships, and the single source for both the chart's
+# PrometheusRule and manifests/optional/prometheusrule.yaml.
+#
+# Loaded verbatim with .Files.Get rather than rendered as a template, so the
+# {{ $value }} and {{ $labels.x }} expressions below reach Prometheus instead of
+# being eaten by Helm.
+#
+# The slow-query threshold below is substituted on the way out: by the chart from
+# prometheusRule.slowQuerySeconds, and by hack/update-codegen.sh with the same
+# default when it writes the static manifest. It is the one threshold here that
+# cannot be right by default.
+  groups:
+    - name: kube-crisp.serving
+      rules:
+        - alert: KubeCrispProjectionFailed
+          expr: max by (state) (kube_crisp_projections{state="failed"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A CustomResourceProjection is defined but not being served.
+            description: >-
+              {{ $value }} projection(s) could not be compiled. The API group they
+              declare is not installed, so clients get "the server could not find
+              the requested resource". Each projection's status conditions say why.
+
+        - alert: KubeCrispProjectionStale
+          expr: max by (state) (kube_crisp_projections{state="stale"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A projection is serving configuration it can no longer recompile.
+            description: >-
+              {{ $value }} projection(s) failed to compile and are still answering
+              from what they compiled to last time. Requests succeed, so nothing
+              else looks wrong — but the spec being served is not the spec in the
+              cluster. Usually a data source Secret that has gone away or a
+              borrowed schema that no longer resolves.
+
+        - alert: KubeCrispRowsUnmappable
+          expr: sum by (projection, resource) (rate(kube_crisp_query_rows_unmappable_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Rows are being skipped for {{ $labels.resource }}.
+            description: >-
+              Rows that cannot be mapped onto objects are skipped rather than
+              failing the whole collection, so clients see fewer objects than the
+              table holds and cannot tell. Usually a name that is not a valid
+              object name, or a NULL where the mapping needs a value.
+
+    - name: kube-crisp.watch
+      rules:
+        - alert: KubeCrispWatchPollFailing
+          expr: sum by (resource, reason) (rate(kube_crisp_watch_poll_errors_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Watch polling is failing for {{ $labels.resource }} ({{ $labels.reason }}).
+            description: >-
+              A watch that stops advancing is indistinguishable from a projection
+              where nothing is changing, so watchers see no events and no error.
+              reason="shed" points at this server's own maxConcurrentQueries
+              rather than at the database.
+
+        - alert: KubeCrispNotificationListenerDown
+          expr: max by (datasource, channel) (kube_crisp_watch_listener_connected) == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: The change-notification subscription on {{ $labels.channel }} is down.
+            description: >-
+              A projection configured for LISTEN/NOTIFY is not subscribed, so its
+              watches have fallen back to the poll interval they were configured
+              to escape. Nothing else reports this: reads and watches both keep
+              working, and kube_crisp_watch_notifications_total is a counter, so
+              a dead subscription leaves it flat — which is what a table nobody
+              writes to also looks like. Alert on this rather than on the counter.
+
+        - alert: KubeCrispNotificationListenerFlapping
+          expr: sum by (datasource, channel) (rate(kube_crisp_watch_listener_reconnects_total[15m])) * 900 > 3
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The subscription on {{ $labels.channel }} keeps dropping.
+            description: >-
+              A database restart is one reconnect and is unremarkable. Repeated
+              ones mean the subscription cannot stay up — an idle-connection
+              reaper, a connection-limited pooler, or a network that drops long
+              lived sessions — and between each drop and its retry the watches
+              are back on the timer. KubeCrispNotificationListenerDown will not
+              fire for this, because the gauge is 1 whenever anybody looks.
+
+        - alert: KubeCrispWatchMissingEvents
+          expr: sum by (resource) (rate(kube_crisp_watch_missed_events_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Incremental polling is missing changes for {{ $labels.resource }}.
+            description: >-
+              A full resync found changes an incremental poll should have seen,
+              which means the mapped resourceVersion column is not moving forward
+              on every write. Watchers are relying on the resync to notice
+              changes, so they lag by fullResyncInterval rather than pollInterval.
+
+        - alert: KubeCrispNoPollingLeader
+          expr: max by (lease) (kube_crisp_poll_leader) == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: No replica holds the polling lease {{ $labels.lease }}.
+            description: >-
+              Every replica has fallen back to watch.followerPollInterval, so
+              every watch on every projection is lagging by that much instead of
+              by its configured interval. Usually the Lease permissions are
+              missing, or no replica is healthy.
+
+        - alert: KubeCrispSplitPollingLeader
+          expr: sum by (lease) (kube_crisp_poll_leader) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: More than one replica holds the polling lease {{ $labels.lease }}.
+            description: >-
+              A split brain: every watched projection is being polled more than
+              once, multiplying the query load leader election exists to avoid.
+
+    - name: kube-crisp.reads
+      rules:
+        # Three alerts rather than one on result!="success", because the answers
+        # point at different people. Splitting them here is the whole reason the
+        # result label distinguishes them.
+        - alert: KubeCrispDatabaseUnreachable
+          expr: sum by (projection, resource) (rate(kube_crisp_query_duration_seconds_count{result="unavailable"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: The database behind {{ $labels.resource }} cannot be reached.
+            description: >-
+              Requests are failing with 503 because the connection was refused or
+              dropped. The resource stays installed and discovery still lists it,
+              so to a client this is an API that exists and does not work. Look at
+              the database and at the network to it, not at the projection.
+
+        - alert: KubeCrispQueriesTimingOut
+          expr: sum by (projection, resource) (rate(kube_crisp_query_duration_seconds_count{result="timeout"}[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Queries for {{ $labels.resource }} are timing out.
+            description: >-
+              The database is reachable and answering too slowly for the query's
+              own timeout. Usually a plan that stopped being good — a missing
+              index, or a table that grew past what the query assumed — rather
+              than anything about this server. Each attempt costs the database
+              the whole timeout before it gives up.
+
+        - alert: KubeCrispQueriesRejected
+          expr: sum by (projection, resource) (rate(kube_crisp_query_duration_seconds_count{result="error"}[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: The database is refusing statements for {{ $labels.resource }}.
+            description: >-
+              Not a timeout and not an outage: the database rejected the
+              statement. This is the projection's own SQL against the schema it
+              is pointed at — a renamed column, a dropped table, a type that
+              stopped matching. Retrying will not help and no amount of database
+              capacity will either.
+
+    - name: kube-crisp.datasource
+      rules:
+        - alert: KubeCrispQueriesShed
+          expr: sum by (projection, resource) (rate(kube_crisp_query_shed_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Requests are being shed for {{ $labels.resource }}.
+            description: >-
+              The projection is at its query concurrency limit and rejecting
+              requests with 429. Either the database is too slow for the load or
+              maxConcurrentQueries is set below what the projection needs.
+
+        - alert: KubeCrispConnectionPoolContended
+          expr: sum by (datasource) (rate(kube_crisp_datasource_wait_seconds_total[5m])) > 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Requests are queueing for a connection to {{ $labels.datasource }}.
+            description: >-
+              More than one request is waiting for a connection at any moment, on
+              average. The pool is the bottleneck rather than merely busy: raise
+              maxOpenConns, or reduce what the projection asks of the database.
+
+        - alert: KubeCrispConnectionsChurning
+          # Half of a projection's queries paying for a new connection. The
+          # pool's own gauges cannot show this — open, in_use and idle all look
+          # healthy while every one of those connections is a fresh dial and, on
+          # an encrypted link, a fresh handshake.
+          expr: >-
+            sum by (datasource) (rate(kube_crisp_datasource_connections_closed_total{reason="max_idle"}[5m]))
+              /
+            sum by (datasource) (rate(kube_crisp_query_duration_seconds_count[5m])) > 0.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The pool for {{ $labels.datasource }} is reconnecting on most queries.
+            description: >-
+              More than half of the queries against this data source are closing
+              their connection instead of returning it to the pool, which means
+              the next one has to dial and authenticate again. maxIdleConns is
+              below the concurrency the projection actually serves; it defaults
+              to maxOpenConns, so this is a pool that has had it lowered.
+
+        - alert: KubeCrispProjectionNotRouted
+          # Compiled and installed here, and unreachable from outside: the
+          # aggregation layer is not sending requests for it. Ready is false
+          # too, but this says which half is broken.
+          expr: max (kube_crisp_projections{state="unrouted"}) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: A projected API group is not reachable through the aggregation layer.
+            description: >-
+              {{ $value }} projected group version(s) compiled and installed here,
+              but their APIService is not available, so requests for them never
+              arrive. The projection's Registered condition carries the
+              aggregator's own message: usually a Service with no endpoints, a CA
+              bundle that no longer matches the serving certificate, or a
+              certificate that does not name the Service.
+
+        - alert: KubeCrispReplicaUnused
+          expr: sum by (projection, resource) (rate(kube_crisp_query_replica_fallback_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Reads for {{ $labels.resource }} are falling back to the primary.
+            description: >-
+              The read replica is unreachable, so the primary is answering reads
+              it was configured not to answer. Requests still succeed, which is
+              why this is otherwise invisible — the only other sign is
+              kube_crisp_query_routed_total{role="replica"} falling to nothing.
+
+        - alert: KubeCrispCacheTooSmall
+          expr: sum by (resource) (rate(kube_crisp_cache_evictions_total{reason="full"}[5m])) > 0
+          for: 15m
+          labels:
+            severity: info
+          annotations:
+            summary: The read cache for {{ $labels.resource }} is evicting live entries.
+            description: >-
+              Entries are being dropped before they expire, so the key space is
+              larger than the cache. A client paging through a large collection is
+              the usual cause, since every continue token is a key of its own —
+              in which case the cache is adding staleness without saving reads.
+
+    - name: kube-crisp.latency
+      rules:
+        # The one threshold here that cannot be right by default. Set it to what
+        # your slowest projection is allowed to take.
+        - alert: KubeCrispSlowQueries
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, projection, resource, verb) (
+                rate(kube_crisp_query_duration_seconds_bucket[5m])
+              )
+            ) > __SLOW_QUERY_SECONDS__
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: p99 for {{ $labels.verb }} on {{ $labels.resource }} is above the configured threshold.
+            description: >-
+              The database round trip, not the API request: comparing the two
+              shows how much of a request kube-crisp itself costs.
+              kube_crisp_query_rows usually explains it — a list that grew.

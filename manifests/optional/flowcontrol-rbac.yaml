@@ -1,0 +1,33 @@
+# Extra permissions for --enable-priority-and-fairness.
+#
+# Fair queueing means reading the objects that describe the queues: FlowSchemas
+# say which requests belong together, PriorityLevelConfigurations say how much
+# capacity each group gets. Both are cluster-wide reads of configuration rather
+# than data, so they are kept out of the base RBAC and applied only when the
+# filter is enabled.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-crisp:flowcontrol
+rules:
+  - apiGroups: ["flowcontrol.apiserver.k8s.io"]
+    resources: ["flowschemas", "prioritylevelconfigurations"]
+    verbs: ["get", "list", "watch"]
+  # The filter reports what it is doing to the objects it queues by, which is
+  # how a saturated priority level becomes visible rather than merely slow.
+  - apiGroups: ["flowcontrol.apiserver.k8s.io"]
+    resources: ["flowschemas/status", "prioritylevelconfigurations/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-crisp:flowcontrol
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-crisp:flowcontrol
+subjects:
+  - kind: ServiceAccount
+    name: kube-crisp-apiserver
+    namespace: kube-crisp

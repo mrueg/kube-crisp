@@ -1,0 +1,220 @@
+# Default values for kube-crisp.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/mrueg/kube-crisp
+  # Overrides Chart.appVersion. Pin to a digest in production: releases are
+  # signed with cosign and carry SBOMs and build provenance.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  # The port the aggregation layer reaches this server on. The APIServices the
+  # server creates for itself use it too.
+  port: 443
+  annotations: {}
+
+# Verbosity of the server's own logs.
+logLevel: 2
+
+crisp:
+  # Watch CustomResourceProjection objects and install or remove projected API
+  # groups while running. This is how projections are served in a cluster.
+  watchProjections: true
+
+  # Create and remove the APIService objects that delegate projected groups to
+  # this server. Only APIServices it labelled as its own are ever modified.
+  manageAPIServices: true
+
+  # Namespaces a projection may take its data source Secret from. Empty means
+  # the release namespace.
+  dataSourceNamespaces: []
+
+  # Require the crisp.kubecrisp.io/allow-projection=true label on a data source
+  # Secret. Anyone who can create a projection chooses both the Secret and the
+  # SQL, so this keeps the decision to expose a database with whoever owns its
+  # credentials. Turning it off is a real widening of who can reach what.
+  requireDataSourceOptIn: true
+
+  # Fail readiness when any projection cannot be served. Off, a broken
+  # projection is reported by kube_crisp_projections{state="failed"} and in each
+  # projection's status while the rest keep serving.
+  requireAllProjections: false
+
+  # Upper bound on connections to any one database, whatever a projection asks
+  # for. Projections sharing a connection string share the pool.
+  maxOpenConnsPerDataSource: 10
+
+  # Elect one replica to poll watched projections at their configured interval;
+  # the others fall back to watch.followerPollInterval. Polling is the only work
+  # a projection does with no request behind it, so it is the only load several
+  # replicas multiply for nothing.
+  leaderElection: true
+
+  # Run the admission chain for projected writes, so ValidatingAdmissionPolicy,
+  # admission webhooks, and namespace lifecycle apply to them. Adds cluster-wide
+  # watches on webhook configurations, admission policies, and namespaces.
+  admission: false
+
+  # Fair-queue requests by FlowSchema, so one client cannot take a projection's
+  # whole capacity. Adds cluster-wide watches on flowcontrol objects.
+  priorityAndFairness: false
+
+  # Audit logging. Every projected write carries annotations naming the
+  # projection, the data source, the statement, and the rows affected, which is
+  # what ties an API call to the SQL it produced — but only if auditing is
+  # configured, and configuring it takes a Policy as well as a destination.
+  # --audit-log-path alone records nothing.
+  audit:
+    enabled: false
+
+    # "-" is stdout, which goes to the container log and is collected by whatever
+    # already collects logs. A path inside the container would need a writable
+    # volume and would be lost with the Pod.
+    logPath: "-"
+
+    # Writes at RequestResponse, since the bodies are the point: this is the one
+    # API in the cluster whose writes reach a database. Reads at Metadata, which
+    # is enough for the SQL annotations and avoids logging every projected row
+    # that anybody lists. Replace it wholesale for a different policy.
+    policy: |
+      apiVersion: audit.k8s.io/v1
+      kind: Policy
+      omitStages:
+        - RequestReceived
+      rules:
+        - level: RequestResponse
+          verbs: ["create", "update", "patch", "delete", "deletecollection"]
+        - level: Metadata
+          verbs: ["get", "list", "watch"]
+
+    # Any other --audit-* flag, as name: value without the leading dashes.
+    # e.g. audit-log-format: json
+    extraFlags: {}
+
+  # OTLP tracing. Off unless an endpoint is given: a span is opened around every
+  # verb and every statement regardless, but with nothing configured they derive
+  # from a no-op and are never exported. Sampling matters here — a projection
+  # serving a controller's watch loop produces a span per poll — so this starts
+  # at 1% rather than at everything.
+  tracing:
+    enabled: false
+    # host:port of an OTLP gRPC collector, e.g. otel-collector.observability:4317.
+    endpoint: ""
+    samplingRatePerMillion: 10000
+
+  # /debug/pprof. It sits behind delegated authorization, but it is a surface
+  # nothing here needs, and a profile of this server describes the queries it is
+  # running. Turn it on for an investigation rather than leaving it on.
+  profiling: false
+
+  # How long to keep serving after SIGTERM. The aggregation layer and the
+  # Service endpoints each take a moment to stop routing here, and without the
+  # delay a rolling update answers whatever arrives in that window with 503 on
+  # every projected group.
+  shutdownDelayDuration: 15s
+
+  # PEM CA bundle verifying this server's serving certificate, used in the
+  # APIServices it creates. Empty means the created APIServices set
+  # insecureSkipTLSVerify, matching the self-signed certificate generated at
+  # startup. Supply a real certificate and this bundle in production.
+  caBundle: ""
+
+  # Extra flags, for anything this chart does not model.
+  extraArgs: []
+
+# Longer than shutdownDelayDuration, with room for in-flight requests to finish
+# after it elapses.
+terminationGracePeriodSeconds: 60
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+podDisruptionBudget:
+  # An aggregated API server is a single point of failure for every group it
+  # serves: while no replica is reachable, requests for those groups fail rather
+  # than merely being slow.
+  enabled: true
+  minAvailable: 1
+
+serviceMonitor:
+  # Needs the Prometheus Operator's CRDs.
+  enabled: false
+  interval: 30s
+  labels: {}
+  # Metrics come from the aggregated apiserver itself, so a scrape is an
+  # authenticated, authorized request. Without this grant Prometheus gets a 403
+  # and the target shows as down with no other explanation.
+  rbac:
+    create: true
+    serviceAccountName: prometheus-k8s
+    serviceAccountNamespace: monitoring
+
+prometheusRule:
+  # Alerts for the ways a projection goes quietly wrong: a watch that stopped
+  # advancing, rows being skipped, a replica silently taking no load. Needs the
+  # Prometheus Operator's CRDs.
+  enabled: false
+  labels: {}
+  # p99 database round trip, in seconds, above which KubeCrispSlowQueries fires.
+  # The one threshold in these rules that cannot be right by default — set it to
+  # what your slowest projection is allowed to take.
+  slowQuerySeconds: 5
+
+networkPolicy:
+  # Egress is the control worth having here: this server opens connections to
+  # arbitrary databases with credentials from Secrets, and a projection is
+  # cluster-scoped, so whoever can create one chooses the destination.
+  #
+  # DNS and the kube-apiserver are always allowed. Everything else has to be
+  # listed below, or projections will report DataSourceConnected=False.
+  enabled: false
+  # Extra egress rules, in NetworkPolicy syntax. For example:
+  #   - to:
+  #       - ipBlock: {cidr: 10.0.0.0/24}
+  #     ports:
+  #       - {port: 5432, protocol: TCP}
+  databaseEgress: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Left empty, and replicas are still spread across nodes: the chart supplies a
+# soft constraint of its own, with a selector that matches whatever this release
+# is actually named. Set anything here and it replaces that default entirely.
+topologySpreadConstraints: []
+
+# Whether to spread replicas across nodes when topologySpreadConstraints is
+# empty. Two replicas on one node are one replica with extra steps, so this is
+# on — as a preference rather than a requirement, so a single-node cluster still
+# schedules them all instead of leaving one Pending forever.
+spreadReplicasAcrossNodes: true
+priorityClassName: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

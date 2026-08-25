@@ -1,0 +1,59 @@
+{{- if .Values.networkPolicy.enabled }}
+# Egress control. This server opens connections to arbitrary databases with
+# credentials from Secrets, and a CustomResourceProjection is cluster-scoped, so
+# whoever can create one chooses the destination. This is what turns "the SQL is
+# arbitrary" into "the SQL is arbitrary, against these databases".
+#
+# networkPolicy.databaseEgress has to name them. Left empty, projections will
+# report DataSourceConnected=False and answer 503 — which is at least a symptom
+# that says what happened.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kube-crisp.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # The aggregation layer connects from the kube-apiserver, which normally
+    # runs on a control plane node's host network and cannot be selected by pod
+    # or namespace labels. The port is therefore reachable from the cluster, and
+    # delegated authentication rather than the network decides who is served.
+    - ports:
+        - port: https
+          protocol: TCP
+  egress:
+    # DNS. Without this nothing else resolves, including the kube-apiserver.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The kube-apiserver: delegated authentication and authorization on every
+    # request, watching projections and data source Secrets, reconciling
+    # APIServices, and renewing the polling Lease. No `to` selector, because the
+    # API server's address is usually outside the cluster network and not
+    # selectable by label. Narrow it to your control plane's CIDR if you can.
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    {{- with .Values.networkPolicy.databaseEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,26 @@
+apiVersion: v2
+name: kube-crisp
+description: Serve any SQL database as Kubernetes custom resources
+type: application
+
+# The chart tracks the application: there is one thing to release, and a second
+# number to reason about would only be a second thing to get wrong.
+version: 0.1.0
+appVersion: "0.1.0"
+
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/mrueg/kube-crisp
+sources:
+  - https://github.com/mrueg/kube-crisp
+keywords:
+  - sql
+  - postgresql
+  - mysql
+  - sqlite
+  - aggregated-apiserver
+  - custom-resources
+maintainers:
+  - name: mrueg
+    url: https://github.com/mrueg
+annotations:
+  artifacthub.io/license: Apache-2.0

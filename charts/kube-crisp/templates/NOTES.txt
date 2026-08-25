@@ -1,0 +1,52 @@
+kube-crisp is installed as {{ include "kube-crisp.fullname" . }} in {{ .Release.Namespace }}.
+
+Nothing is served yet. A projection is a cluster object, so create one:
+
+  1. A Secret holding the connection string, in {{ include "kube-crisp.dataSourceNamespaces" . }},
+{{- if .Values.crisp.requireDataSourceOptIn }}
+     labelled crisp.kubecrisp.io/allow-projection=true so it may be used:
+{{- else }}
+     (the opt-in label is not required, since crisp.requireDataSourceOptIn is off):
+{{- end }}
+
+       kubectl create secret generic orders-db -n {{ include "kube-crisp.dataSourceNamespaces" . }} \
+         --from-literal=dsn='postgres://user:pass@host:5432/store?sslmode=require'
+{{- if .Values.crisp.requireDataSourceOptIn }}
+       kubectl label secret orders-db -n {{ include "kube-crisp.dataSourceNamespaces" . }} \
+         crisp.kubecrisp.io/allow-projection=true
+{{- end }}
+
+  2. A CustomResourceProjection describing the resource, the queries, and the
+     mapping. See https://github.com/mrueg/kube-crisp for a worked example per
+     driver, or ask the cluster:
+
+       kubectl explain customresourceprojection.spec
+
+  3. Watch it come up. {{ if .Values.crisp.manageAPIServices }}The APIService registers itself.{{ else }}crisp.manageAPIServices is off, so create the
+     APIService for each projected group yourself.{{ end }}
+
+       kubectl get customresourceprojections
+
+Metrics are on the server's own /metrics, alongside the standard apiserver
+request metrics.
+{{- if not .Values.serviceMonitor.enabled }} Set serviceMonitor.enabled=true to
+scrape them with the Prometheus Operator.
+{{- end }}
+
+{{- if not .Values.networkPolicy.enabled }}
+
+This server connects to whatever database a projection names, using credentials
+from a Secret. Set networkPolicy.enabled=true and list your databases under
+networkPolicy.databaseEgress to bound where those connections may go.
+{{- else if not .Values.networkPolicy.databaseEgress }}
+
+WARNING: networkPolicy.enabled is set but networkPolicy.databaseEgress is empty,
+so egress to every database is denied. Projections will report
+DataSourceConnected=False until you list them.
+{{- end }}
+
+{{- if eq (.Values.image.tag | default .Chart.AppVersion) "latest" }}
+
+WARNING: the image tag is "latest". Pin it to a version or a digest — releases
+are signed with cosign and carry SBOMs and build provenance.
+{{- end }}

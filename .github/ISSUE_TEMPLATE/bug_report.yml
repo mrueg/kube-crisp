@@ -1,0 +1,77 @@
+name: Bug report
+description: Something kube-crisp does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security issue, please use [SECURITY.md](../blob/main/SECURITY.md)
+        rather than the issue tracker.
+
+        Almost every bug here is reproducible from a `CustomResourceProjection`
+        and a table, so that is what the form asks for. A report with both is
+        usually enough to reproduce; one without them usually is not.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: projection
+    attributes:
+      label: The projection
+      description: >-
+        The CustomResourceProjection, with credentials removed. The `queries`
+        and `mapping` blocks are the parts that matter most.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: schema
+    attributes:
+      label: The table
+      description: The DDL for the tables the projection reads, including indexes.
+      render: sql
+
+  - type: textarea
+    id: status
+    attributes:
+      label: What the projection reports about itself
+      description: "`kubectl get customresourceprojection <name> -o jsonpath='{.status}'`"
+      render: json
+
+  - type: input
+    id: driver
+    attributes:
+      label: Driver and database version
+      placeholder: postgres, PostgreSQL 17.2
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: kube-crisp version
+      description: The image tag, or `kube-crisp-apiserver --version`.
+    validations:
+      required: true
+
+  - type: input
+    id: kubernetes
+    attributes:
+      label: Kubernetes version
+      placeholder: v1.31.0
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server logs
+      description: >-
+        `kubectl -n kube-crisp logs deploy/kube-crisp-apiserver`. Raising
+        `-v=4` includes the query the server ran.
+      render: text

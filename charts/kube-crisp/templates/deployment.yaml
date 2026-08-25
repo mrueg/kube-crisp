@@ -1,0 +1,187 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kube-crisp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kube-crisp.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kube-crisp.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      # Longer than shutdownDelayDuration, with room for in-flight requests to
+      # finish after it elapses. Too short and the kubelet kills the server
+      # mid-drain, which is what the delay exists to avoid.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: apiserver
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --secure-port=6443
+            # Self-signed serving certificates are written here at startup, so
+            # the directory has to be writable even though the root filesystem
+            # is not. Supply --tls-cert-file instead for real certificates.
+            - --cert-dir=/var/run/kube-crisp/certificates
+            - --watch-projections={{ .Values.crisp.watchProjections }}
+            - --manage-apiservices={{ .Values.crisp.manageAPIServices }}
+            - --apiservice-service-name={{ include "kube-crisp.fullname" . }}
+            - --apiservice-service-port={{ .Values.service.port }}
+            - --datasource-namespaces={{ include "kube-crisp.dataSourceNamespaces" . }}
+            - --require-datasource-optin={{ .Values.crisp.requireDataSourceOptIn }}
+            - --require-all-projections={{ .Values.crisp.requireAllProjections }}
+            - --max-open-conns-per-datasource={{ .Values.crisp.maxOpenConnsPerDataSource }}
+            - --enable-leader-election={{ .Values.crisp.leaderElection }}
+            - --enable-admission={{ .Values.crisp.admission }}
+            - --enable-priority-and-fairness={{ .Values.crisp.priorityAndFairness }}
+            - --profiling={{ .Values.crisp.profiling }}
+            {{- if .Values.crisp.tracing.enabled }}
+            - --tracing-config-file=/etc/kube-crisp/tracing/tracing.yaml
+            {{- end }}
+            {{- if .Values.crisp.audit.enabled }}
+            - --audit-policy-file=/etc/kube-crisp/audit/policy.yaml
+            - --audit-log-path={{ .Values.crisp.audit.logPath }}
+            {{- range $flag, $value := .Values.crisp.audit.extraFlags }}
+            - --{{ $flag }}={{ $value }}
+            {{- end }}
+            {{- end }}
+            # Keep serving for this long after SIGTERM: the aggregation layer
+            # and the Service endpoints each take a moment to stop routing here.
+            - --shutdown-delay-duration={{ .Values.crisp.shutdownDelayDuration }}
+            - --shutdown-send-retry-after=true
+            {{- if .Values.crisp.caBundle }}
+            - --apiservice-ca-bundle-file=/etc/kube-crisp/ca/ca.crt
+            {{- end }}
+            - --v={{ .Values.logLevel }}
+            {{- with .Values.crisp.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # The namespace the APIServices this server creates point at, and
+            # where it takes its leader election Lease.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: https
+              containerPort: 6443
+              protocol: TCP
+          volumeMounts:
+            - name: certificates
+              mountPath: /var/run/kube-crisp/certificates
+            {{- if .Values.crisp.caBundle }}
+            - name: ca-bundle
+              mountPath: /etc/kube-crisp/ca
+              readOnly: true
+            {{- end }}
+            {{- if .Values.crisp.tracing.enabled }}
+            - name: tracing
+              mountPath: /etc/kube-crisp/tracing
+              readOnly: true
+            {{- end }}
+            {{- if .Values.crisp.audit.enabled }}
+            - name: audit
+              mountPath: /etc/kube-crisp/audit
+              readOnly: true
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 15
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: certificates
+          emptyDir: {}
+        {{- if .Values.crisp.caBundle }}
+        - name: ca-bundle
+          configMap:
+            name: {{ include "kube-crisp.fullname" . }}-ca
+        {{- end }}
+        {{- if .Values.crisp.tracing.enabled }}
+        - name: tracing
+          configMap:
+            name: {{ include "kube-crisp.fullname" . }}-tracing
+        {{- end }}
+        {{- if .Values.crisp.audit.enabled }}
+        - name: audit
+          configMap:
+            name: {{ include "kube-crisp.fullname" . }}-audit
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if .Values.spreadReplicasAcrossNodes }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "kube-crisp.selectorLabels" . | nindent 14 }}
+      {{- end }}
+{{- if .Values.crisp.caBundle }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+data:
+  ca.crt: |
+    {{- .Values.crisp.caBundle | nindent 4 }}
+{{- end }}

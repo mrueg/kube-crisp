@@ -1,0 +1,15 @@
+{{- if .Values.crisp.audit.enabled }}
+# The audit Policy. Auditing needs one — --audit-log-path on its own records
+# nothing — so the chart carries a default rather than leaving the flag to
+# produce an empty log.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}-audit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+data:
+  policy.yaml: |
+    {{- .Values.crisp.audit.policy | nindent 4 }}
+{{- end }}

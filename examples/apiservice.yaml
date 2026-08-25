@@ -1,0 +1,32 @@
+# An APIService registering one projected group by hand.
+#
+# You almost certainly do not need this. The server creates, corrects, and
+# removes an APIService for every group it serves, and only ever touches ones it
+# labelled as its own — so applying a static one leaves an object the server
+# will not clean up when the projection goes away. The aggregation layer then
+# reports the group as unavailable, which degrades `kubectl api-resources` for
+# the whole cluster rather than only for this group.
+#
+# It is here for the case where you would rather register groups yourself:
+# start the server with --manage-apiservices=false, drop the
+# apiregistration.k8s.io rule from manifests/20-rbac.yaml, and apply one of
+# these per group. The group and version must match a
+# CustomResourceProjection's spec.resource.group and spec.resource.version.
+#
+# insecureSkipTLSVerify is set because the server generates self-signed
+# certificates by default. In production, supply caBundle instead and mount a
+# certificate issued for kube-crisp-apiserver.kube-crisp.svc.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.store.example.com
+spec:
+  group: store.example.com
+  version: v1alpha1
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  insecureSkipTLSVerify: true
+  service:
+    name: kube-crisp-apiserver
+    namespace: kube-crisp
+    port: 443

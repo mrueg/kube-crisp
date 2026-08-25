@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-crisp-apiserver
+  namespace: kube-crisp
+  labels:
+    app.kubernetes.io/name: kube-crisp-apiserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-crisp-apiserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-crisp-apiserver
+    spec:
+      # Two replicas on one node are one replica with extra steps: the point of
+      # the second is that a node going away does not take the projected API
+      # with it. ScheduleAnyway rather than DoNotSchedule, so a single-node
+      # cluster still runs both instead of leaving one Pending forever — this is
+      # a preference, and the scheduler honours it where it can.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: kube-crisp-apiserver
+
+      serviceAccountName: kube-crisp-apiserver
+      # Longer than --shutdown-delay-duration, with room for in-flight requests
+      # to finish after it elapses. Too short and the kubelet kills the server
+      # mid-drain, which is the outcome the delay exists to avoid.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: apiserver
+          # Published by the release workflow: goreleaser drives ko.
+          image: ghcr.io/mrueg/kube-crisp:latest
+          args:
+            # No --projection-dir: in a cluster, projections are
+            # CustomResourceProjection objects, which the server watches. The
+            # flag exists for bootstrapping and for running without a cluster,
+            # and pointing it at a ConfigMap that has to exist before the Pod
+            # can start is a worse default than not setting it.
+            - --secure-port=6443
+            # Self-signed serving certificates are written here at startup, so
+            # the directory must be writable even though the root filesystem is
+            # not. Supply --tls-cert-file instead when using real certificates.
+            - --cert-dir=/var/run/kube-crisp/certificates
+            # Polling is the only work a projection does with no request behind
+            # it, so it is the only load these two replicas would multiply for
+            # nothing. The lease holder polls at each projection's configured
+            # interval and the other falls back to watch.followerPollInterval.
+            # Needs the Lease permissions in 20-rbac.yaml, which are included.
+            - --enable-leader-election
+            # /debug/pprof is served by default. It sits behind delegated
+            # authorization, so reaching it already takes a grant on the
+            # /debug/pprof/* nonResourceURL — but it is a default-on surface
+            # that nothing here needs, and a heap or CPU profile of this server
+            # describes the queries it is running. Turn it back on for the
+            # duration of an investigation rather than leaving it on.
+            - --profiling=false
+            # Keep serving for this long after SIGTERM. The aggregation layer
+            # and the Service endpoints each take a moment to stop routing here,
+            # and without the delay a rolling update answers whatever arrives in
+            # that window with 503 — on every projected group, on every deploy.
+            # terminationGracePeriodSeconds below has to exceed it.
+            - --shutdown-delay-duration=15s
+            # After the delay elapses, drain rather than cutting connections:
+            # in-flight requests finish and new ones are told to retry.
+            - --shutdown-send-retry-after=true
+            - --v=2
+          env:
+            # Used as the default namespace for the APIServices this server
+            # creates for the groups it serves.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: https
+              containerPort: 6443
+          volumeMounts:
+            - name: certificates
+              mountPath: /var/run/kube-crisp/certificates
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: certificates
+          emptyDir: {}
+---
+# An aggregated API server is a single point of failure for every group it
+# serves: while no replica is reachable, the aggregation layer answers requests
+# for those groups with an error, so `kubectl get orders` fails rather than
+# merely being slow.
+#
+# Without this, draining a node — or two nodes in sequence, faster than a Pod
+# reschedules — can take both replicas at once. One always available is the
+# whole requirement; the projections themselves hold no state.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kube-crisp-apiserver
+  namespace: kube-crisp
+  labels:
+    app.kubernetes.io/name: kube-crisp-apiserver
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-crisp-apiserver

@@ -1,0 +1,17 @@
+{{- if .Values.prometheusRule.enabled }}
+# The rules live in files/alerts.yaml and are loaded verbatim, so Prometheus's
+# own {{`{{ $value }}`}} templating survives Helm's.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+{{ .Files.Get "files/alerts.yaml"
+     | replace "__SLOW_QUERY_SECONDS__" (printf "%v" .Values.prometheusRule.slowQuerySeconds) }}
+{{- end }}

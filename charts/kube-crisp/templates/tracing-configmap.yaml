@@ -1,0 +1,19 @@
+{{- if .Values.crisp.tracing.enabled }}
+# The TracingConfiguration the apiserver reads. Written as a file rather than as
+# flags because that is the only shape --tracing-config-file accepts, and it is
+# the same kind the kube-apiserver takes, so an endpoint that works for one
+# works here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}-tracing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+data:
+  tracing.yaml: |
+    apiVersion: apiserver.config.k8s.io/v1beta1
+    kind: TracingConfiguration
+    endpoint: {{ required "crisp.tracing.endpoint is required when tracing is enabled" .Values.crisp.tracing.endpoint | quote }}
+    samplingRatePerMillion: {{ .Values.crisp.tracing.samplingRatePerMillion }}
+{{- end }}

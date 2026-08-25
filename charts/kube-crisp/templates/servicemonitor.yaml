@@ -1,0 +1,74 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- if .Values.serviceMonitor.rbac.create }}
+# Metrics are served by the aggregated apiserver itself, so a scrape is an
+# authenticated, authorized request like any other. Without this the scrape gets
+# a 403 and the target shows as down with no other explanation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}:metrics-reader
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}:metrics-reader
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-crisp.fullname" . }}:metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceMonitor.rbac.serviceAccountName }}
+    namespace: {{ .Values.serviceMonitor.rbac.serviceAccountNamespace }}
+---
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "kube-crisp.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: https
+      scheme: https
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      # Prometheus's own service account token, which is what the ClusterRole
+      # above is granted to. This is how kube-prometheus scrapes the
+      # kube-apiserver, and an aggregated apiserver is the same shape of target.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        {{- if .Values.crisp.caBundle }}
+        serverName: {{ include "kube-crisp.fullname" . }}.{{ .Release.Namespace }}.svc
+        {{- else }}
+        # Matches the self-signed certificate the server generates when none is
+        # supplied. Set crisp.caBundle and a real serving certificate to verify.
+        insecureSkipVerify: true
+        {{- end }}
+      # Replicas serve the same projections, so their series differ only by
+      # instance — which is what makes "one replica is polling, the other is
+      # not" visible rather than averaged away.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: instance
+{{- end }}

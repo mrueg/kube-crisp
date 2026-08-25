@@ -1,0 +1,123 @@
+# Projects rows of the orders table as Order resources in store.example.com.
+#
+# The tenant column becomes the Kubernetes namespace, so `kubectl get orders -n acme`
+# returns only that tenant's rows, and normal RBAC on namespaces applies.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef:
+      name: orders-db
+      namespace: kube-crisp
+    dsnKey: dsn
+    maxOpenConns: 10
+
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: Order
+    plural: orders
+    singular: order
+    shortNames: [ord]
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            totalCents: {type: integer, format: int64}
+            currency: {type: string}
+            lineItems:
+              type: array
+              items:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+        status:
+          type: object
+          properties:
+            phase: {type: string}
+    additionalPrinterColumns:
+      - name: Customer
+        type: string
+        jsonPath: .spec.customer
+      - name: Phase
+        type: string
+        jsonPath: .status.phase
+      - name: Total
+        type: integer
+        jsonPath: .spec.totalCents
+      - name: Age
+        type: date
+        jsonPath: .metadata.creationTimestamp
+
+  queries:
+    # :namespace, :name, :limit, :offset, :user, and :labelSelector are always
+    # available. Values are bound as driver placeholders, never interpolated.
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, currency,
+               line_items, created_at, updated_at
+        FROM orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace)
+        ORDER BY created_at DESC
+        LIMIT COALESCE(:limit, 500) OFFSET COALESCE(:offset, 0)
+      timeout: 10s
+      # This projection is watched, and a watch's periodic full resync reads
+      # the whole collection through this query — so maxRows has to cover the
+      # table, not a page of it. A table that outgrows this fails every resync
+      # and its watchers stop seeing deletions.
+      maxRows: 50000
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, currency,
+               line_items, created_at, updated_at
+        FROM orders
+        WHERE tenant = :namespace AND id = :name
+      timeout: 5s
+    # Defining any write query makes the projection writable. RETURNING lets
+    # the write answer from its own result instead of reading the row back.
+    create:
+      sql: |
+        INSERT INTO orders (id, tenant, customer, status, total_cents, currency, line_items)
+        VALUES (:id, :tenant, :customer, :status, :total_cents, :currency, :line_items::jsonb)
+        RETURNING id, tenant, customer, status, total_cents, currency,
+                  line_items, created_at, updated_at
+      timeout: 5s
+    update:
+      sql: |
+        UPDATE orders
+        SET customer = :customer, status = :status, total_cents = :total_cents,
+            currency = :currency, line_items = :line_items::jsonb, updated_at = now()
+        WHERE tenant = :namespace AND id = :name
+        RETURNING id, tenant, customer, status, total_cents, currency,
+                  line_items, created_at, updated_at
+      timeout: 5s
+    delete:
+      sql: |
+        DELETE FROM orders WHERE tenant = :namespace AND id = :name
+      timeout: 5s
+
+  # Watches poll the list query and diff consecutive snapshots, so informers
+  # work against this projection without any change feed in the database.
+  watch:
+    pollInterval: 5s
+
+  mapping:
+    name: id
+    namespace: tenant
+    uid: id
+    resourceVersion: updated_at
+    creationTimestamp: created_at
+    labels:
+      store.example.com/status: status
+    fields:
+      - {column: customer,    path: spec.customer}
+      - {column: total_cents, path: spec.totalCents, type: integer}
+      - {column: currency,    path: spec.currency}
+      - {column: line_items,  path: spec.lineItems,  type: json}
+      - {column: status,      path: status.phase}

@@ -1,0 +1,79 @@
+# Prometheus scraping for kube-crisp-apiserver.
+#
+# Needs the Prometheus Operator's CRDs, which is why this is not applied by
+# `kubectl apply -f manifests/`: that is not recursive, and a ServiceMonitor in
+# the main directory would fail the whole apply on any cluster without them.
+#
+# EDIT THE BINDING SUBJECT BELOW to name your Prometheus service account.
+#
+#   kubectl apply -f manifests/optional/servicemonitor.yaml
+#
+# The metrics are the standard apiserver request metrics plus everything under
+# kube_crisp_*: query duration and rows by projection and verb, cache hit rate,
+# shed and coalesced reads, connection pool state, watch poll mode and lag, and
+# how many projections are serving, failed, or stale.
+---
+# Metrics are served by the aggregated apiserver itself, so a scrape is an
+# authenticated, authorized request like any other. Without this the scrape gets
+# 403 and the target shows as down with no other explanation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-crisp:metrics-reader
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-crisp:metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-crisp:metrics-reader
+subjects:
+  # EDIT: the service account Prometheus runs as. These are the defaults for
+  # kube-prometheus; a Helm install of kube-prometheus-stack uses a name derived
+  # from the release instead.
+  - kind: ServiceAccount
+    name: prometheus-k8s
+    namespace: monitoring
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-crisp-apiserver
+  namespace: kube-crisp
+  labels:
+    app.kubernetes.io/name: kube-crisp-apiserver
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-crisp-apiserver
+  namespaceSelector:
+    matchNames:
+      - kube-crisp
+  endpoints:
+    - port: https
+      scheme: https
+      path: /metrics
+      interval: 30s
+      # Prometheus's own service account token, which is what the ClusterRole
+      # above is granted to. This is how kube-prometheus scrapes the
+      # kube-apiserver itself, and an aggregated apiserver is the same shape of
+      # target.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        # Matches the self-signed certificate the server generates when none is
+        # supplied. With a real serving certificate, drop this and set `ca` and
+        # `serverName: kube-crisp-apiserver.kube-crisp.svc` instead.
+        insecureSkipVerify: true
+      # Two replicas serve the same projections, so their series differ only by
+      # instance — which is what makes "one replica is polling, the other is
+      # not" visible rather than averaged away.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: instance

@@ -1,0 +1,26 @@
+# A cluster policy that applies to a projected resource exactly as it would to
+# a CustomResourceDefinition. Without the admission chain running inside
+# kube-crisp, this is silently ignored.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: widgets-must-not-be-forbidden
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["store.example.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["widgets"]
+  validations:
+    - expression: "object.spec.colour != 'forbidden'"
+      message: "the colour 'forbidden' is not allowed by cluster policy"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: widgets-must-not-be-forbidden
+spec:
+  policyName: widgets-must-not-be-forbidden
+  validationActions: [Deny]

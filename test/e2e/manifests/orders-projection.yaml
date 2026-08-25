@@ -1,0 +1,187 @@
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef:
+      name: orders-db
+      namespace: kube-crisp
+    dsnKey: dsn
+    maxOpenConns: 20
+    preparedStatements: true
+    keepAliveInterval: 30s
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: Order
+    plural: orders
+    singular: order
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            totalCents: {type: integer, format: int64}
+        status:
+          type: object
+          properties:
+            phase: {type: string}
+    subresources:
+      status: {}
+    # A second version of the same kind. There is no conversion: a request for
+    # v1beta1 maps the same rows through the mapping below it, which puts the
+    # amount somewhere else entirely.
+    versions:
+      - name: v1beta1
+        schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                customer: {type: string}
+                amount:
+                  type: object
+                  properties:
+                    cents: {type: integer, format: int64}
+            status:
+              type: object
+              properties:
+                phase: {type: string}
+        mapping:
+          name: id
+          namespace: tenant
+          resourceVersion: updated_at
+          labels:
+            store.example.com/status: status
+          fields:
+            - {column: customer, path: spec.customer}
+            - {column: total_cents, path: spec.amount.cents, type: integer}
+            - {column: status, path: status.phase}
+    additionalPrinterColumns:
+      - name: Customer
+        type: string
+        jsonPath: .spec.customer
+      - name: Phase
+        type: string
+        jsonPath: .status.phase
+      - name: Total
+        type: integer
+        jsonPath: .spec.totalCents
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at
+        FROM orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace)
+          AND (:after::text IS NULL OR id > :after)
+          -- metadata.name is selectable on every resource, and kube-crisp binds
+          -- the requested value here. Without this the selector still works, by
+          -- reading the collection and filtering it down to one row.
+          AND (:name::text IS NULL OR id = :name)
+          AND (:name_not::text IS NULL OR id <> :name_not)
+          -- status is mapped to a label with a column behind it, so a selector
+          -- on that label can be answered here rather than by filtering the
+          -- collection after every row has been read and mapped.
+          AND (:label_status::text IS NULL OR status = :label_status)
+        ORDER BY id
+        LIMIT COALESCE(:limit, 100000)
+      timeout: 60s
+      maxRows: 50000
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at
+        FROM orders
+        WHERE tenant = :namespace AND id = :name
+      timeout: 10s
+    # RETURNING lets the write answer from its own result instead of costing a
+    # second round trip to read the row back.
+    # updated_at is the projected resourceVersion, so the database owns it: the
+    # client never supplies one and every write stamps a fresh value.
+    create:
+      sql: |
+        INSERT INTO orders (id, tenant, customer, status, total_cents, updated_at)
+        VALUES (:id, :tenant, :customer, :status, :total_cents,
+                (extract(epoch from clock_timestamp()) * 1000000)::bigint::text)
+        RETURNING id, tenant, customer, status, total_cents, updated_at
+      timeout: 10s
+    update:
+      sql: |
+        UPDATE orders
+        SET customer = :customer,
+            status = :status,
+            total_cents = :total_cents,
+            updated_at = (extract(epoch from clock_timestamp()) * 1000000)::bigint::text
+        WHERE tenant = :namespace AND id = :name
+          -- The precondition, enforced by the database rather than by a
+          -- comparison this server made before the write. Without it two
+          -- writers each read the same row, each rewrite every mapped column
+          -- from their own copy, and the second silently reverts the first —
+          -- both answered 200. With it the loser matches no rows and is told
+          -- 409.
+          AND (:resourceVersion::text IS NULL OR updated_at = :resourceVersion)
+        RETURNING id, tenant, customer, status, total_cents, updated_at
+      timeout: 10s
+    delete:
+      sql: |
+        DELETE FROM orders WHERE tenant = :namespace AND id = :name
+      timeout: 10s
+    deleteCollection:
+      sql: |
+        DELETE FROM orders WHERE tenant = :namespace
+      timeout: 30s
+    # Feeds remainingItemCount on a paged list; only runs when a client pages.
+    count:
+      sql: |
+        SELECT COUNT(*) FROM orders WHERE (:namespace::text IS NULL OR tenant = :namespace)
+      timeout: 10s
+    # Status lives in the same row, so the update statement serves both; naming
+    # it here keeps the intent explicit.
+    updateStatus:
+      sql: |
+        UPDATE orders
+        SET status = :status,
+            updated_at = (extract(epoch from clock_timestamp()) * 1000000)::bigint::text
+        WHERE tenant = :namespace AND id = :name
+          -- The status subresource needs the same precondition as the main
+          -- write. Without it a controller owning status and one owning spec
+          -- revert each other, which is the pair most likely to be writing
+          -- concurrently.
+          AND (:resourceVersion::text IS NULL OR updated_at = :resourceVersion)
+        RETURNING id, tenant, customer, status, total_cents, updated_at
+      timeout: 10s
+  # Watches poll this projection's list query and turn the differences between
+  # snapshots into events, so informers work without any change feed in
+  # PostgreSQL. updated_at moves on every write, which is what makes a changed
+  # row detectable.
+  watch:
+    pollInterval: 1s
+    # Deletions are only visible to a full read, so this bounds how long a
+    # watcher waits to hear about one.
+    fullResyncInterval: 10s
+    # Each poll reads only the rows that moved, instead of the whole table.
+    query:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at
+        FROM orders
+        WHERE (:since::text IS NULL OR updated_at > :since)
+        ORDER BY updated_at ASC
+        LIMIT COALESCE(:limit, 50000)
+      timeout: 60s
+      maxRows: 50000
+
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    labels:
+      store.example.com/status: status
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: total_cents, path: spec.totalCents, type: integer}
+      - {column: status, path: status.phase}

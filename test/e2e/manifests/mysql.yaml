@@ -1,0 +1,75 @@
+# A second driver in the suite: MySQL has no RETURNING, so a projection over it
+# also exercises the exec-then-read write path and the ? placeholder rewriter.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: widgets-db
+  namespace: kube-crisp
+  labels:
+    # Without this the server refuses to use the Secret: a projection author
+    # chooses the SQL, so the credential's owner chooses whether it may be used.
+    crisp.kubecrisp.io/allow-projection: "true"
+type: Opaque
+stringData:
+  password: crisp
+  dsn: crisp:crisp@tcp(mysql.kube-crisp.svc:3306)/store?parseTime=true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: kube-crisp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          env:
+            - name: MYSQL_DATABASE
+              value: store
+            - name: MYSQL_USER
+              value: crisp
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: widgets-db
+                  key: password
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: widgets-db
+                  key: password
+          ports:
+            - containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "127.0.0.1", "-ucrisp", "-pcrisp"]
+            initialDelaySeconds: 10
+            periodSeconds: 3
+            failureThreshold: 40
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: kube-crisp
+spec:
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+      targetPort: 3306

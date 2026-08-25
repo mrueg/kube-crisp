@@ -79,6 +79,20 @@ own certificate is used, which is correct for a self-signed one and pins the web
 certificate otherwise. `--projection-webhook-name` names the configuration, for a cluster running
 more than one kube-crisp.
 
+The configuration is kept reconciled rather than registered once, because a generated certificate
+belongs to the pod that generated it. During a rolling update the pod on its way out can write its
+certificate after its replacement wrote theirs, leaving the cluster told to trust a certificate
+nothing serves — and since the policy is `Ignore`, that is silent: admission is skipped and a
+projection the server would have refused is accepted. The reconcile runs every 30 seconds and writes
+only when the configuration disagrees with what the server can actually answer.
+
+**More than one replica needs a real certificate.** With a generated one every replica signs its
+own, and the configuration can name only one CA — so the replicas take turns correcting it to
+theirs, and whichever the Service picks for a given request may be one the cluster does not trust.
+Give every replica the same certificate and pass its CA with
+`--projection-webhook-ca-bundle-file`, or run the webhook on a single replica.
+`kube_crisp_projections` does not show this, because from the server's side nothing failed.
+
 Its failure policy is `Ignore`, deliberately. This server is what serves the webhook, so `Fail`
 would mean that while it is down or rolling nobody can create or edit a projection — including the
 edit that would fix it. Nothing depends on the webhook having run: the server refuses to serve a

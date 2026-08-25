@@ -1,0 +1,1112 @@
+# Projections that exercise features the main one does not: a borrowed schema,
+# a read cache, and a hard concurrency limit.
+---
+# The schema is taken from an existing CustomResourceDefinition rather than
+# restated here. The CRD is read for its schema only and keeps being served by
+# the kube-apiserver for its own group.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: borrowed-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: BorrowedOrder
+    plural: borrowedorders
+    scope: Namespaced
+    schemaFrom:
+      name: benchorders.bench.example.com
+      version: v1alpha1
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents
+        FROM orders WHERE (:namespace::text IS NULL OR tenant = :namespace)
+        ORDER BY id LIMIT COALESCE(:limit, 1000)
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents
+        FROM orders WHERE tenant = :namespace AND id = :name
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: total_cents, path: spec.totalCents, type: integer}
+      - {column: status, path: status.phase}
+---
+# Reads are served from a cache for a few seconds. Writes through kube-crisp
+# drop it; a change made directly in the database is only picked up when the
+# entry expires, which is the trade a cache makes.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: cached-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  cacheTTL: 5s
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: CachedOrder
+    plural: cachedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer FROM orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace)
+        ORDER BY id LIMIT COALESCE(:limit, 1000)
+    get:
+      sql: SELECT id, tenant, customer FROM orders WHERE tenant = :namespace AND id = :name
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# One query at a time, and each one takes two seconds. Anything that cannot get
+# a slot within the acquire timeout is shed with 429 rather than queueing.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: slow-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+    maxOpenConns: 4
+    maxConcurrentQueries: 1
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: SlowOrder
+    plural: sloworders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, pg_sleep(2) AS delay
+        FROM orders WHERE tenant = :namespace LIMIT 1
+      timeout: 30s
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# Scale over a plain SQL column: the order total stands in for a replica count,
+# which is enough to prove that `kubectl scale` and an autoscaler can drive a
+# projected object.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: scalable-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: ScalableOrder
+    plural: scalableorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            replicas: {type: integer, format: int64, default: 1}
+        status:
+          type: object
+          properties:
+            replicas: {type: integer, format: int64}
+            phase: {type: string}
+    subresources:
+      status: {}
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, total_cents AS observed, updated_at
+        FROM orders WHERE (:namespace::text IS NULL OR tenant = :namespace)
+        ORDER BY id LIMIT COALESCE(:limit, 1000)
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, total_cents AS observed, updated_at
+        FROM orders WHERE tenant = :namespace AND id = :name
+    create:
+      sql: |
+        INSERT INTO orders (id, tenant, customer, status, total_cents, updated_at)
+        VALUES (:id, :tenant, :customer, :status, :total_cents,
+                (extract(epoch from clock_timestamp()) * 1000000)::bigint::text)
+        RETURNING id, tenant, customer, status, total_cents, total_cents AS observed, updated_at
+    update:
+      sql: |
+        UPDATE orders
+        SET customer = :customer, status = :status, total_cents = :total_cents,
+            updated_at = (extract(epoch from clock_timestamp()) * 1000000)::bigint::text
+        WHERE tenant = :namespace AND id = :name
+        RETURNING id, tenant, customer, status, total_cents, total_cents AS observed, updated_at
+    delete:
+      sql: DELETE FROM orders WHERE tenant = :namespace AND id = :name
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: total_cents, path: spec.replicas, type: integer}
+      - {column: observed, path: status.replicas, type: integer}
+      - {column: status, path: status.phase}
+---
+# Writes that span two tables, and a lifecycle the database owns: rows are
+# marked as going away rather than removed, and a generation counter advances
+# with the spec.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: audited-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: AuditedOrder
+    plural: auditedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            totalCents: {type: integer, format: int64}
+        status:
+          type: object
+          properties:
+            phase: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at, deleted_at, generation,
+               finalizers, owners
+        FROM orders WHERE tenant = :namespace ORDER BY id LIMIT COALESCE(:limit, 1000)
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at, deleted_at, generation,
+               finalizers, owners
+        FROM orders WHERE tenant = :namespace AND id = :name
+    # Both tables or neither. The audit row is written first on purpose: if the
+    # insert below fails, a projection without transactions would leave it
+    # behind, recording a create that never happened.
+    create:
+      statements:
+        - INSERT INTO order_events (id, tenant, event) VALUES (:id, :tenant, 'created')
+        - |
+          INSERT INTO orders (id, tenant, customer, status, total_cents, updated_at, generation,
+                              finalizers, owners)
+          VALUES (:id, :tenant, :customer, :status, :total_cents,
+                  (extract(epoch from clock_timestamp()) * 1000000)::bigint::text, 1,
+                  :finalizers, :owners)
+          RETURNING id, tenant, customer, status, total_cents, updated_at, deleted_at, generation,
+                    finalizers, owners
+    update:
+      statements:
+        - INSERT INTO order_events (id, tenant, event) VALUES (:name, :namespace, 'updated')
+        - |
+          UPDATE orders
+          SET customer = :customer, status = :status, total_cents = :total_cents,
+              finalizers = :finalizers, owners = :owners,
+              generation = generation + 1,
+              updated_at = (extract(epoch from clock_timestamp()) * 1000000)::bigint::text
+          WHERE tenant = :namespace AND id = :name
+          RETURNING id, tenant, customer, status, total_cents, updated_at, deleted_at, generation,
+                    finalizers, owners
+    # An object holding a finalizer is marked rather than removed, and every
+    # client sees it as terminating until the last one is cleared.
+    markDeleted:
+      statements:
+        - INSERT INTO order_events (id, tenant, event) VALUES (:name, :namespace, 'marked')
+        - |
+          UPDATE orders
+          SET deleted_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+              updated_at = (extract(epoch from clock_timestamp()) * 1000000)::bigint::text
+          WHERE tenant = :namespace AND id = :name AND deleted_at IS NULL
+    delete:
+      statements:
+        - INSERT INTO order_events (id, tenant, event) VALUES (:name, :namespace, 'deleted')
+        - DELETE FROM orders WHERE tenant = :namespace AND id = :name
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    deletionTimestamp: deleted_at
+    generation: generation
+    finalizers: finalizers
+    ownerReferences: owners
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: total_cents, path: spec.totalCents, type: integer}
+      - {column: status, path: status.phase}
+---
+# The projection's queries do not filter by tenant at all. The database does,
+# through a row-level security policy reading a setting this server puts on the
+# connection from the request — so a mistake in the SQL below cannot hand one
+# tenant another's rows.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: secured-orders
+spec:
+  dataSource:
+    driver: postgres
+    # A role with no special standing: PostgreSQL never enforces a policy
+    # against a superuser, so connecting as one would make the policy below
+    # decorative.
+    secretRef: {name: orders-db-app, namespace: kube-crisp}
+    sessionVariables:
+      - {name: app.tenant, from: RequestNamespace}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: SecuredOrder
+    plural: securedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: SELECT id, tenant, customer FROM secured_orders ORDER BY id LIMIT COALESCE(:limit, 1000)
+    get:
+      sql: SELECT id, tenant, customer FROM secured_orders WHERE id = :name
+  # A poll runs on a timer with no request behind it, so there is no tenant to
+  # set and the policy would show it nothing.
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# A table whose identity is two columns. The name is built from both and split
+# back to answer for a single row.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: shipments
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: Shipment
+    plural: shipments
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            carrier: {type: string}
+  queries:
+    list:
+      # Paged by the sequence it is ordered by, not by the name: the name here
+      # is two columns joined, and nothing orders by that.
+      sql: |
+        SELECT region, order_no, tenant, carrier, seq FROM shipments
+        WHERE tenant = :namespace AND (:after::bigint IS NULL OR seq > :after)
+        ORDER BY seq
+        LIMIT COALESCE(:limit, 1000)
+      keysetColumn: seq
+    get:
+      sql: |
+        SELECT region, order_no, tenant, carrier, seq FROM shipments
+        WHERE tenant = :namespace AND region = :region AND order_no = :order_no
+    create:
+      sql: |
+        INSERT INTO shipments (region, order_no, tenant, carrier)
+        VALUES (:region, :order_no, :tenant, :carrier)
+        RETURNING region, order_no, tenant, carrier, seq
+    delete:
+      sql: DELETE FROM shipments WHERE tenant = :namespace AND region = :region AND order_no = :order_no
+  watch:
+    disabled: true
+  mapping:
+    nameColumns: [region, order_no]
+    namespace: tenant
+    resourceVersion: seq
+    fields:
+      - {column: carrier, path: spec.carrier}
+---
+# The same collection as the PostgreSQL orders projection, from MySQL, so the
+# benchmark compares four backends over one dataset instead of four datasets.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: mysql-bench-orders
+spec:
+  dataSource:
+    driver: mysql
+    secretRef: {name: widgets-db, namespace: kube-crisp}
+    maxOpenConns: 20
+    preparedStatements: true
+  resource:
+    # Not bench.example.com: that group belongs to the native CRD the benchmark
+    # compares against, and an APIService for it would shadow the CRD entirely.
+    group: store.example.com
+    version: v1alpha1
+    kind: MySQLOrder
+    plural: mysqlorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            totalCents: {type: integer, format: int64}
+        status:
+          type: object
+          properties:
+            phase: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at
+        FROM bench_orders
+        WHERE (:namespace IS NULL OR tenant = :namespace)
+          AND (:after IS NULL OR id > :after)
+        ORDER BY id
+        LIMIT :limit
+      timeout: 60s
+      maxRows: 50000
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at
+        FROM bench_orders WHERE tenant = :namespace AND id = :name
+      timeout: 10s
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: total_cents, path: spec.totalCents, type: integer}
+      - {column: status, path: status.phase}
+---
+# And from SQLite, which has no server at all: the file is on the apiserver's
+# own volume.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: sqlite-bench-orders
+spec:
+  dataSource:
+    driver: sqlite
+    secretRef: {name: inventory-db, namespace: kube-crisp}
+    maxOpenConns: 20
+    preparedStatements: true
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: SQLiteOrder
+    plural: sqliteorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            totalCents: {type: integer, format: int64}
+        status:
+          type: object
+          properties:
+            phase: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at
+        FROM bench_orders
+        WHERE (:namespace IS NULL OR tenant = :namespace)
+          AND (:after IS NULL OR id > :after)
+        ORDER BY id
+        LIMIT :limit
+      timeout: 60s
+      maxRows: 50000
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at
+        FROM bench_orders WHERE tenant = :namespace AND id = :name
+      timeout: 10s
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: total_cents, path: spec.totalCents, type: integer}
+      - {column: status, path: status.phase}
+---
+# Server-side apply merges correctly from the schema alone, but it can only
+# detect a conflict if field ownership survives between requests — and an object
+# rebuilt from a row carries none unless a column holds it.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: applied-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef:
+      name: orders-db
+      namespace: kube-crisp
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: AppliedOrder
+    plural: appliedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            note: {type: string}
+        status:
+          type: object
+          properties:
+            phase: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, updated_at, managed_fields
+        FROM applied_orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace)
+        ORDER BY id
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, updated_at, managed_fields
+        FROM applied_orders
+        WHERE tenant = :namespace AND id = :name
+    update:
+      sql: |
+        UPDATE applied_orders
+        SET customer = :customer,
+            status = :status,
+            managed_fields = :managed_fields,
+            updated_at = clock_timestamp()::text
+        WHERE tenant = :namespace AND id = :name
+          AND (:resourceVersion::text IS NULL OR updated_at = :resourceVersion)
+        RETURNING id, tenant, customer, status, updated_at, managed_fields
+    create:
+      sql: |
+        INSERT INTO applied_orders (id, tenant, customer, status, managed_fields, updated_at)
+        VALUES (:id, :tenant, :customer, :status, :managed_fields, clock_timestamp()::text)
+        RETURNING id, tenant, customer, status, updated_at, managed_fields
+    delete:
+      sql: DELETE FROM applied_orders WHERE tenant = :namespace AND id = :name
+  # Polling this would serve no purpose here and would only add query load.
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    managedFields: managed_fields
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: status, path: status.phase}
+---
+# Reads go to the replica, writes to the primary. The two databases hold the
+# same row with different values and nothing replicates between them, so which
+# one answered is never in doubt.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: split-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+    readSecretRef: {name: orders-db-replica, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: SplitOrder
+    plural: splitorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM replicated_orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace) ORDER BY id
+    get:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM replicated_orders
+        WHERE tenant = :namespace AND id = :name
+    update:
+      sql: |
+        UPDATE replicated_orders SET customer = :customer, updated_at = clock_timestamp()::text
+        WHERE tenant = :namespace AND id = :name
+        RETURNING id, tenant, customer, updated_at
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# Labels that vary per row, out of one JSON column, with one key promoted to a
+# column of its own so a selector on it is answered by the database.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: tagged-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: TaggedOrder
+    plural: taggedorders
+    scope: Namespaced
+    selectableFields:
+      - jsonPath: .spec.customer
+        column: customer
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, status, labels, updated_at FROM tagged_orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace)
+          AND (:customer::text IS NULL OR customer = :customer)
+          AND (:customer_not::text IS NULL OR customer <> :customer_not)
+          AND (:label_status::text IS NULL OR status = :label_status)
+          AND (:label_status_not::text IS NULL OR status <> :label_status_not)
+          AND (:label_status_in::text IS NULL
+               OR status IN (SELECT jsonb_array_elements_text(:label_status_in::jsonb)))
+        ORDER BY id
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, labels, updated_at FROM tagged_orders
+        WHERE tenant = :namespace AND id = :name
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    labelsFrom: labels
+    labels:
+      store.example.com/status: status
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# Rows scoped to the caller's groups rather than to a namespace.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: team-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: TeamOrder
+    plural: teamorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            ownerTeam: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, owner_team, updated_at FROM team_orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace)
+          AND owner_team IN (SELECT jsonb_array_elements_text(:userGroups::jsonb))
+        ORDER BY id
+    get:
+      sql: |
+        SELECT id, tenant, owner_team, updated_at FROM team_orders
+        WHERE tenant = :namespace AND id = :name
+          AND owner_team IN (SELECT jsonb_array_elements_text(:userGroups::jsonb))
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: owner_team, path: spec.ownerTeam}
+---
+# An incremental watch that sees deletions from a tombstone table, with the
+# periodic full read turned off entirely.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: tombstoned-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: TombstonedOrder
+    plural: tombstonedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM tombstoned_orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace) ORDER BY id
+    get:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM tombstoned_orders
+        WHERE tenant = :namespace AND id = :name
+    delete:
+      statements:
+        - INSERT INTO order_tombstones (id, tenant, customer, updated_at, deleted_at)
+          SELECT id, tenant, customer, updated_at, clock_timestamp()::text
+          FROM tombstoned_orders WHERE tenant = :namespace AND id = :name
+        - DELETE FROM tombstoned_orders WHERE tenant = :namespace AND id = :name
+  watch:
+    pollInterval: 1s
+    # Off: the deletion query is the only thing looking for removals now.
+    fullResyncInterval: "0s"
+    query:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM tombstoned_orders
+        WHERE (:since::text IS NULL OR updated_at > :since)
+        ORDER BY updated_at ASC
+    deletedQuery:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM order_tombstones
+        WHERE (:since::text IS NULL OR deleted_at > :since)
+        ORDER BY deleted_at ASC
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# A watch woken by the database rather than by its own timer.
+#
+# pollInterval is deliberately long. If the notification does not arrive, the
+# only other thing that would find the change is the poll — and at 60s the test
+# times out rather than passing on a tick that happened to land. A short
+# interval here would make this pass whether or not the feature worked.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: notified-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: NotifiedOrder
+    plural: notifiedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM notified_orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace)
+        ORDER BY id
+    get:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM notified_orders
+        WHERE tenant = :namespace AND id = :name
+  watch:
+    pollInterval: 60s
+    notify:
+      channel: notified_orders_changed
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# The control: identical, with no notify and the same long interval, so the only
+# thing that can find a change is the timer.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: polled-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: PolledOrder
+    plural: polledorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM polled_orders
+        WHERE (:namespace::text IS NULL OR tenant = :namespace)
+        ORDER BY id
+    get:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM polled_orders
+        WHERE tenant = :namespace AND id = :name
+  watch:
+    pollInterval: 60s
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# A pair that differs in exactly one field, so what PostgreSQL logs when the
+# query is cut short attributes the abort to one mechanism or the other.
+#
+# Both run a query that cannot finish inside its own timeout. Without
+# statementTimeout the driver cancels on the client side and PostgreSQL logs
+# "canceling statement due to user request"; with it the database enforces the
+# bound itself and logs "canceling statement due to statement timeout". The
+# query dies either way on a healthy connection, which is why the log line —
+# not the wall clock and not the error the client sees — is what tells the two
+# apart.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: timed-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+    statementTimeout: true
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: TimedOrder
+    plural: timedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, pg_sleep(5) AS slept
+        FROM orders WHERE tenant = :namespace LIMIT 1
+      timeout: 500ms
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+---
+# The control: identical but for statementTimeout, so a difference in the logs
+# cannot come from the query, the table, or the timeout.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: untimed-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: UntimedOrder
+    plural: untimedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, pg_sleep(5) AS slept
+        FROM orders WHERE tenant = :namespace LIMIT 1
+      timeout: 500ms
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+---
+# A history ring of one, so anything but the very latest version has to be
+# answered from the database or refused. It has a deletedQuery, so it can be.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: replayed-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: ReplayedOrder
+    plural: replayedorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM tombstoned_orders
+        WHERE tenant = :namespace ORDER BY id
+  watch:
+    pollInterval: 1s
+    fullResyncInterval: "0s"
+    # One entry, so a client resuming from anything older is beyond it.
+    historySize: 1
+    query:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM tombstoned_orders
+        WHERE (:since::text IS NULL OR updated_at > :since)
+        ORDER BY updated_at ASC
+    deletedQuery:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM order_tombstones
+        WHERE (:since::text IS NULL OR deleted_at > :since)
+        ORDER BY deleted_at ASC
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# The same ring of one with nothing to say what was deleted. A replay would
+# report every change and no removal, so this one still has to refuse.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: unreplayable-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: UnreplayableOrder
+    plural: unreplayableorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM tombstoned_orders
+        WHERE tenant = :namespace ORDER BY id
+  watch:
+    pollInterval: 1s
+    historySize: 1
+    query:
+      sql: |
+        SELECT id, tenant, customer, updated_at FROM tombstoned_orders
+        WHERE (:since::text IS NULL OR updated_at > :since)
+        ORDER BY updated_at ASC
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# A row that cannot be named, and the two ways to treat it. The pair differs
+# only in mapping.onUnmappableRow.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: strict-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: StrictOrder
+    plural: strictorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT CASE WHEN customer = 'ada' THEN NULL ELSE id END AS id,
+               tenant, customer
+        FROM orders WHERE tenant = :namespace ORDER BY id
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    onUnmappableRow: Fail
+    fields:
+      - {column: customer, path: spec.customer}
+---
+# The default, over the same unmappable rows: they are left out and the rest of
+# the table is still readable.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: lenient-orders
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: LenientOrder
+    plural: lenientorders
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+  queries:
+    list:
+      sql: |
+        SELECT CASE WHEN customer = 'ada' THEN NULL ELSE id END AS id,
+               tenant, customer
+        FROM orders WHERE tenant = :namespace ORDER BY id
+  watch:
+    disabled: true
+  mapping:
+    name: id
+    namespace: tenant
+    fields:
+      - {column: customer, path: spec.customer}

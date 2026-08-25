@@ -1,0 +1,86 @@
+# The third driver. SQLite has no server: the database is a file on a volume
+# the apiserver mounts, which also makes it the cheapest way to project
+# something that already lives on disk.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: inventory-db
+  namespace: kube-crisp
+  labels:
+    crisp.kubecrisp.io/allow-projection: "true"
+type: Opaque
+stringData:
+  # For SQLite the connection string is simply the path to the file.
+  dsn: /var/lib/kube-crisp/sqlite/inventory.db
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sqlite-seed
+  namespace: kube-crisp
+data:
+  seed.py: |
+    # Python ships with sqlite3, which keeps the init container to a stock image.
+    import os
+    import sqlite3
+
+    path = "/var/lib/kube-crisp/sqlite/inventory.db"
+    db = sqlite3.connect(path)
+    db.executescript(
+        """
+        DROP TABLE IF EXISTS items;
+        CREATE TABLE items (
+            id         TEXT PRIMARY KEY,
+            tenant     TEXT    NOT NULL,
+            label      TEXT    NOT NULL,
+            quantity   INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX items_tenant_idx ON items (tenant);
+        """
+    )
+    db.executemany(
+        "INSERT INTO items VALUES (?, ?, ?, ?, ?)",
+        [(f"item-{i:04d}", "acme", f"label-{i % 7}", i, i) for i in range(1, 51)],
+    )
+
+    # The same collection the other drivers hold, so the benchmark compares
+    # four backends over one dataset rather than four datasets. ROWS is
+    # substituted by hack/e2e-up.sh from the same variable that seeds them.
+    rows = int(os.environ.get("BENCH_ROWS", "10000"))
+    db.executescript(
+        """
+        DROP TABLE IF EXISTS bench_orders;
+        CREATE TABLE bench_orders (
+            id          TEXT PRIMARY KEY,
+            tenant      TEXT    NOT NULL,
+            customer    TEXT    NOT NULL,
+            status      TEXT    NOT NULL,
+            total_cents INTEGER NOT NULL,
+            updated_at  TEXT    NOT NULL
+        );
+        CREATE INDEX bench_orders_tenant_idx ON bench_orders (tenant);
+        """
+    )
+    db.executemany(
+        "INSERT INTO bench_orders VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (
+                f"order-{i:06d}",
+                "bench",
+                f"customer-{i % 997}",
+                "shipped" if i % 3 == 0 else "pending",
+                (i * 37) % 100000,
+                str(i),
+            )
+            for i in range(1, rows + 1)
+        ],
+    )
+    db.commit()
+    db.close()
+
+    # This container runs as root and the apiserver does not. fsGroup gives
+    # them a common group; the mode is what lets that group write, and SQLite
+    # needs the directory too for its journal.
+    os.chmod(path, 0o664)
+    os.chmod(os.path.dirname(path), 0o775)

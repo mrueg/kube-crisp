@@ -1,0 +1,55 @@
+# A projection served from --projection-dir rather than from the cluster.
+#
+# Mounted into the apiserver as a directory, which is the shape the flag is
+# meant for: a ConfigMap updates by swapping a symlink, so the files are never
+# written to and only the directory sees the change. That is also what makes it
+# a real test of the reload path rather than of a file write.
+#
+# The e2e suite rewrites the mapping below to prove a change is picked up
+# without a restart, so treat the contents as fixture state rather than as an
+# example worth copying.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: static-projections
+  namespace: kube-crisp
+data:
+  static-orders.yaml: |
+    apiVersion: crisp.kubecrisp.io/v1alpha1
+    kind: CustomResourceProjection
+    metadata:
+      name: static-orders
+    spec:
+      dataSource:
+        driver: postgres
+        secretRef: {name: orders-db, namespace: kube-crisp}
+      resource:
+        group: store.example.com
+        version: v1alpha1
+        kind: StaticOrder
+        plural: staticorders
+        scope: Namespaced
+        schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                customer: {type: string}
+                totalCents: {type: integer}
+      queries:
+        list:
+          sql: |
+            SELECT id, tenant, customer, total_cents
+            FROM orders WHERE tenant = :namespace ORDER BY id LIMIT 5
+        get:
+          sql: |
+            SELECT id, tenant, customer, total_cents
+            FROM orders WHERE tenant = :namespace AND id = :name
+      watch:
+        disabled: true
+      mapping:
+        name: id
+        namespace: tenant
+        fields:
+          - {column: customer, path: spec.customer}

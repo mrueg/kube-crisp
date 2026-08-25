@@ -1,0 +1,111 @@
+# e2e deployment: single replica, locally built image, projections read from the
+# cluster rather than from a ConfigMap so that the watch path is exercised.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-crisp-apiserver
+  namespace: kube-crisp
+  labels:
+    app.kubernetes.io/name: kube-crisp-apiserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-crisp-apiserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-crisp-apiserver
+    spec:
+      serviceAccountName: kube-crisp-apiserver
+      # The SQLite file is created by the init container as root and written by
+      # the apiserver as 65532; fsGroup is what makes the volume writable by
+      # both.
+      securityContext:
+        fsGroup: 65532
+      initContainers:
+        # SQLite has no server to wait for, so the file is prepared before the
+        # apiserver starts.
+        - name: seed-sqlite
+          image: python:3.13-alpine
+          command: ["python", "/seed/seed.py"]
+          env:
+            - name: BENCH_ROWS
+              value: "${BENCH_ROWS}"
+          volumeMounts:
+            - name: sqlite
+              mountPath: /var/lib/kube-crisp/sqlite
+            - name: sqlite-seed
+              mountPath: /seed
+      containers:
+        - name: apiserver
+          # hack/e2e-up.sh substitutes the image goreleaser just built.
+          image: ${KUBE_CRISP_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --secure-port=6443
+            - --watch-projections=true
+            - --enable-admission
+            # The projection webhook, so a projection whose SQL the database
+            # cannot run is refused at apply time rather than reported in its
+            # status afterwards. Registers its own configuration using this
+            # server's self-signed certificate as the CA bundle.
+            - --enable-projection-webhook
+            # One replica here, so it simply wins — what this exercises is the
+            # wiring: the flag, the Lease RBAC, and the metric that says which
+            # replica is polling at the configured interval.
+            - --enable-leader-election
+            - --cert-dir=/var/run/kube-crisp/certificates
+            # Projections from a directory, served alongside the ones watched
+            # from the cluster. Backed by a ConfigMap, which is what the
+            # directory watch is built for.
+            - --projection-dir=/etc/kube-crisp/projections
+            - --v=2
+          env:
+            # Used as the default namespace for the APIServices this server
+            # creates for the groups it serves.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: https
+              containerPort: 6443
+          volumeMounts:
+            - name: certificates
+              mountPath: /var/run/kube-crisp/certificates
+            - name: sqlite
+              mountPath: /var/lib/kube-crisp/sqlite
+            - name: static-projections
+              mountPath: /etc/kube-crisp/projections
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: certificates
+          emptyDir: {}
+        - name: sqlite
+          emptyDir: {}
+        - name: sqlite-seed
+          configMap:
+            name: sqlite-seed
+        - name: static-projections
+          configMap:
+            name: static-projections

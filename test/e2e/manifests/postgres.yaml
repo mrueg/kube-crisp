@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-db
+  namespace: kube-crisp
+  labels:
+    # Without this the server refuses to use the Secret: a projection author
+    # chooses the SQL, so the credential's owner chooses whether it may be used.
+    crisp.kubecrisp.io/allow-projection: "true"
+type: Opaque
+stringData:
+  password: crisp
+  dsn: postgres://crisp:crisp@postgres.kube-crisp.svc:5432/store?sslmode=disable
+---
+# The same database as a role with no special standing, so a row-level security
+# policy is actually enforced against it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-db-app
+  namespace: kube-crisp
+  labels:
+    crisp.kubecrisp.io/allow-projection: "true"
+type: Opaque
+stringData:
+  dsn: postgres://crisp_app:crisp@postgres.kube-crisp.svc:5432/store?sslmode=disable
+---
+# The "replica" the read-split test reads through. It is a separate database on
+# the same server rather than a streaming replica: nothing replicates into it,
+# which is a cruder version of replication lag than any real replica has — and
+# exactly what makes it unambiguous which side answered a read.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-db-replica
+  namespace: kube-crisp
+  labels:
+    crisp.kubecrisp.io/allow-projection: "true"
+type: Opaque
+stringData:
+  dsn: postgres://crisp:crisp@postgres.kube-crisp.svc:5432/storereplica?sslmode=disable
+---
+# A real volume rather than an emptyDir: the outage test scales this deployment
+# to zero and back, and a database that came back empty would be testing the
+# wrong thing.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: kube-crisp
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: kube-crisp
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two pods cannot mount the same volume, and the
+  # outage test depends on the old one going away.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_USER
+              value: crisp
+            - name: POSTGRES_DB
+              value: store
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: orders-db
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "crisp", "-d", "store"]
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: kube-crisp
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

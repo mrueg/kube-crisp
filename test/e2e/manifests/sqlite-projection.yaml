@@ -1,0 +1,92 @@
+# A projection over a SQLite file on the apiserver's own volume. Everything the
+# other drivers do — keyset paging, a count for remainingItemCount, writes, and
+# an incremental watch — expressed in SQLite's dialect.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: items
+spec:
+  dataSource:
+    driver: sqlite
+    secretRef:
+      name: inventory-db
+      namespace: kube-crisp
+    dsnKey: dsn
+    # One connection: SQLite serialises writers anyway, and a limit here is
+    # what turns contention into a 429 instead of a lock wait.
+    maxOpenConns: 1
+    maxConcurrentQueries: 4
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: Item
+    plural: items
+    singular: item
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            label: {type: string}
+            quantity: {type: integer, format: int64}
+    selectableFields:
+      - jsonPath: .spec.label
+        column: label
+    additionalPrinterColumns:
+      - name: Label
+        type: string
+        jsonPath: .spec.label
+      - name: Quantity
+        type: integer
+        jsonPath: .spec.quantity
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, label, quantity, updated_at
+        FROM items
+        WHERE (:namespace IS NULL OR tenant = :namespace)
+          AND (:after IS NULL OR id > :after)
+          AND (:label IS NULL OR label = :label)
+        ORDER BY id
+        LIMIT :limit
+    get:
+      sql: |
+        SELECT id, tenant, label, quantity, updated_at
+        FROM items WHERE tenant = :namespace AND id = :name
+    count:
+      sql: SELECT COUNT(*) FROM items WHERE (:namespace IS NULL OR tenant = :namespace)
+    create:
+      sql: |
+        INSERT INTO items (id, tenant, label, quantity, updated_at)
+        VALUES (:id, :tenant, :label, :quantity,
+                (SELECT COALESCE(MAX(updated_at), 0) + 1 FROM items))
+        RETURNING id, tenant, label, quantity, updated_at
+    update:
+      sql: |
+        UPDATE items
+        SET label = :label, quantity = :quantity,
+            updated_at = (SELECT COALESCE(MAX(updated_at), 0) + 1 FROM items)
+        WHERE tenant = :namespace AND id = :name
+          AND (:resourceVersion IS NULL OR updated_at = :resourceVersion)
+        RETURNING id, tenant, label, quantity, updated_at
+    delete:
+      sql: DELETE FROM items WHERE tenant = :namespace AND id = :name
+  watch:
+    pollInterval: 1s
+    fullResyncInterval: 10s
+    query:
+      sql: |
+        SELECT id, tenant, label, quantity, updated_at
+        FROM items
+        WHERE (:since IS NULL OR updated_at > :since)
+        ORDER BY updated_at ASC
+        LIMIT :limit
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: label, path: spec.label}
+      - {column: quantity, path: spec.quantity, type: integer}

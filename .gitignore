@@ -1,0 +1,14 @@
+bin/
+dist/
+coverage.out
+hack/.e2e-kubeconfig
+*.db
+*.test
+core.*
+
+# Self-signed serving certificates the apiserver generates when none are
+# supplied. The default --cert-dir is relative to the working directory, so a
+# stray run leaves a private key in the tree.
+apiserver.local.config/
+.alerts-check.yaml
+.alerts-rendered.yaml

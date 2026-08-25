@@ -1,0 +1,128 @@
+version: 2
+
+project_name: kube-crisp
+
+before:
+  hooks:
+    # Not "go mod tidy": a release must build what is committed, not quietly
+    # rewrite go.mod on the way past.
+    - go mod download
+    - go mod verify
+
+builds:
+  - id: kube-crisp-apiserver
+    main: ./cmd/kube-crisp-apiserver
+    binary: kube-crisp-apiserver
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/mrueg/kube-crisp/pkg/version.Version={{ .Version }}
+    # With -trimpath, a fixed timestamp is what is left to make the build
+    # byte-for-byte reproducible from a given commit.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+# ko builds the image straight from the Go binary, so there is no Dockerfile
+# and no build context to keep in sync.
+kos:
+  - id: kube-crisp-apiserver
+    build: kube-crisp-apiserver
+    base_image: gcr.io/distroless/static:nonroot
+    repositories:
+      - ghcr.io/mrueg/kube-crisp
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Version }}"
+      # Prereleases must not move latest.
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    # bare: the image is exactly the repository above, with no Go import path
+    # appended to it.
+    bare: true
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: Serve any SQL database as Kubernetes custom resources
+      org.opencontainers.image.url: https://github.com/mrueg/kube-crisp
+      # ghcr links the package to the repository through this label.
+      org.opencontainers.image.source: https://github.com/mrueg/kube-crisp
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: Apache-2.0
+
+archives:
+  - id: kube-crisp
+    ids:
+      - kube-crisp-apiserver
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+# ko already attaches an SBOM to the image it builds, so this covers the
+# artifacts it does not: the release archives.
+sboms:
+  - id: archives
+    artifacts: archive
+
+# Keyless signing: the workflow's id-token permission is exchanged with Sigstore
+# for a short-lived certificate, which is what removes the need for a stored
+# private key.
+#
+# Only checksums.txt is signed, and that is deliberate -- it lists the hash of
+# every archive, so one signature covers them all.
+#
+# These args are correct for cosign v3, which replaced sign-blob's
+# --output-signature and --output-certificate with a single --bundle. The
+# workflow pins the cosign version to match; bump the two together.
+signs:
+  - id: checksum
+    cmd: cosign
+    signature: "${artifact}.bundle"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "--yes"
+      - "${artifact}"
+    artifacts: checksum
+    output: true
+
+# The image is signed where it is published, so consumers can verify what they
+# pull rather than only what they download.
+docker_signs:
+  - id: images
+    cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - "--yes"
+      - "${artifact}"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+release:
+  prerelease: auto
+  # Named explicitly rather than inferred from a git remote, so the config
+  # validates in a fresh clone and in CI checkouts alike.
+  github:
+    owner: mrueg
+    name: kube-crisp
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

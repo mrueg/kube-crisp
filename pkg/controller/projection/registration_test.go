@@ -420,3 +420,62 @@ func TestStatusWriteRetriesOnConflict(t *testing.T) {
 		t.Error("the projection has no conditions, so the write that conflicted was never retried through")
 	}
 }
+
+// TestStatusReportsTheRequiredSchema checks that what a projection needs from
+// its database reaches the object a person reads.
+//
+// kube-crisp creates nothing, so the only thing it can usefully say about a
+// missing table is what the table would have to contain. That is spread across
+// the queries and a dozen mapping fields until something gathers it.
+func TestStatusReportsTheRequiredSchema(t *testing.T) {
+	f := newFixture(t, []runtime.Object{projectionObject("bins", "bins")})
+	f.syncUntil(t, func() bool { return len(f.router.ServedPaths()) == 1 })
+
+	obj, err := f.client.CrispV1alpha1().CustomResourceProjections().Get(
+		context.Background(), "bins", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the projection: %v", err)
+	}
+
+	required := obj.Status.RequiredSchema
+	if required == nil {
+		t.Fatal("the projection reports no required schema")
+	}
+	if len(required.Tables) == 0 {
+		t.Error("no table is named, so nothing says where the rows come from")
+	}
+	if len(required.Columns) == 0 {
+		t.Error("no column is named, so nothing says what the table must contain")
+	}
+	for _, column := range required.Columns {
+		if column.Name == "" {
+			t.Errorf("a column is reported with no name: %+v", column)
+		}
+		if column.UsedFor == "" {
+			t.Errorf("column %q does not say what it is for", column.Name)
+		}
+	}
+}
+
+// TestStatusRewritesWhenTheRequiredSchemaChanges: the comparison that decides
+// whether to write has to include it, or a projection whose mapping changed
+// under an unchanged generation would go on reporting the old schema.
+func TestStatusRewritesWhenTheRequiredSchemaChanges(t *testing.T) {
+	before := crispv1alpha1.CustomResourceProjectionStatus{
+		ObservedGeneration: 1,
+		RequiredSchema: &crispv1alpha1.RequiredSchema{
+			Tables:  []string{"bins"},
+			Columns: []crispv1alpha1.RequiredColumn{{Name: "id", Type: "string", UsedFor: "identity"}},
+		},
+	}
+	after := *before.DeepCopy()
+	after.RequiredSchema.Columns = append(after.RequiredSchema.Columns,
+		crispv1alpha1.RequiredColumn{Name: "label", Type: "string", UsedFor: "field"})
+
+	if statusUnchanged(before, after) {
+		t.Error("a changed required schema was treated as no change, so it would never be written")
+	}
+	if !statusUnchanged(before, *before.DeepCopy()) {
+		t.Error("an unchanged status was treated as changed, which would write on every sync")
+	}
+}

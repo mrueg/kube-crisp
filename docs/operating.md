@@ -128,6 +128,10 @@ $ kubectl get crp orders -o jsonpath='{.status}' | jq
 {
   "observedGeneration": 3,
   "servedPaths": ["/apis/store.example.com/v1alpha1/orders"],
+  "requiredSchema": {
+    "tables": ["orders"],
+    "columns": [{"name": "id", "type": "string", "usedFor": "identity"}]
+  },
   "conditions": [
     {"type": "Ready", "status": "True", "reason": "Serving"},
     {"type": "Registered", "status": "True", "reason": "Routed"},
@@ -140,6 +144,14 @@ $ kubectl get crp orders -o jsonpath='{.status}' | jq
 `servedPaths` is what the projection is actually answering on, one entry per
 served version — which is how you tell an extra version that is installed from
 one that is only declared.
+
+`requiredSchema` is what the projection reads from the database, gathered from
+its queries and its mapping. kube-crisp creates nothing, so this is what to hand
+to whatever does — see
+[the reference](reference.md#what-a-projection-needs-from-the-database). It is
+reported whether or not the projection is serving, which matters because a
+projection that failed to compile because its table is missing is exactly the
+one whose required schema someone wants to read.
 
 The four conditions say different things and are worth reading separately.
 `SchemaResolved` covers the shape, including a schema borrowed with

@@ -2513,7 +2513,7 @@ spec:
               conditions:
                 description: |-
                   Conditions describe the projection's serving state. Known types are
-                  "Ready", "DataSourceConnected", and "SchemaResolved".
+                  "Ready", "Registered", "DataSourceConnected", and "SchemaResolved".
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -2577,6 +2577,66 @@ spec:
                   reconciled.
                 format: int64
                 type: integer
+              requiredSchema:
+                description: |-
+                  RequiredSchema is what this projection reads from its database, gathered
+                  from the queries and the mapping into one place.
+
+                  kube-crisp does not create tables, and a projection whose table is
+                  missing reports CompilationFailed with the database's own message. This
+                  is the other half of that: what the table would have to contain, without
+                  anybody reading the SQL to work it out. It is meant to be handed to
+                  whatever manages the schema — a migration tool, or a person writing DDL.
+                properties:
+                  columns:
+                    description: |-
+                      Columns names the columns the mapping reads out of query results, with
+                      the type each value is coerced to.
+
+                      These are result columns rather than table columns. A projection whose
+                      list query computes one — SELECT total_cents * 2 AS doubled — needs
+                      "doubled" in its results and no such column in any table.
+                    items:
+                      description: RequiredColumn is one column a projection reads.
+                      properties:
+                        name:
+                          description: Name is the result column name.
+                          type: string
+                        type:
+                          description: |-
+                            Type is what the value is coerced to. Columns carrying identity and
+                            metadata are read as strings; only mapping.fields can ask for anything
+                            else.
+                          enum:
+                          - string
+                          - integer
+                          - number
+                          - boolean
+                          - timestamp
+                          - json
+                          type: string
+                        usedFor:
+                          description: |-
+                            UsedFor says what the column provides, so a reader can tell a column the
+                            projection cannot work without from one that fills in a field.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  tables:
+                    description: |-
+                      Tables names the tables the projection's statements refer to.
+
+                      Read out of the statement text, so a name inside a string literal or a
+                      comment is not one. Deliberately incomplete in two ways worth knowing: a
+                      common table expression is listed alongside the tables it reads, and a
+                      table reached only through a view or through dynamic SQL is not listed at
+                      all, because nothing in the statement says so.
+                    items:
+                      type: string
+                    type: array
+                type: object
               servedPaths:
                 description: ServedPaths lists the API paths currently served for
                   this projection.

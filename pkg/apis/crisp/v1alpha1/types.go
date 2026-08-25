@@ -1024,7 +1024,7 @@ type CustomResourceProjectionStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions describe the projection's serving state. Known types are
-	// "Ready", "DataSourceConnected", and "SchemaResolved".
+	// "Ready", "Registered", "DataSourceConnected", and "SchemaResolved".
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -1033,6 +1033,60 @@ type CustomResourceProjectionStatus struct {
 	// ServedPaths lists the API paths currently served for this projection.
 	// +optional
 	ServedPaths []string `json:"servedPaths,omitempty"`
+
+	// RequiredSchema is what this projection reads from its database, gathered
+	// from the queries and the mapping into one place.
+	//
+	// kube-crisp does not create tables, and a projection whose table is
+	// missing reports CompilationFailed with the database's own message. This
+	// is the other half of that: what the table would have to contain, without
+	// anybody reading the SQL to work it out. It is meant to be handed to
+	// whatever manages the schema — a migration tool, or a person writing DDL.
+	// +optional
+	RequiredSchema *RequiredSchema `json:"requiredSchema,omitempty"`
+}
+
+// RequiredSchema describes what a projection reads from its database.
+//
+// A description, never an instruction: nothing in kube-crisp acts on this, and
+// it is derived from the projection alone rather than from the database, so it
+// says what the projection asks for and not what is there.
+type RequiredSchema struct {
+	// Tables names the tables the projection's statements refer to.
+	//
+	// Read out of the statement text, so a name inside a string literal or a
+	// comment is not one. Deliberately incomplete in two ways worth knowing: a
+	// common table expression is listed alongside the tables it reads, and a
+	// table reached only through a view or through dynamic SQL is not listed at
+	// all, because nothing in the statement says so.
+	// +optional
+	Tables []string `json:"tables,omitempty"`
+
+	// Columns names the columns the mapping reads out of query results, with
+	// the type each value is coerced to.
+	//
+	// These are result columns rather than table columns. A projection whose
+	// list query computes one — SELECT total_cents * 2 AS doubled — needs
+	// "doubled" in its results and no such column in any table.
+	// +optional
+	Columns []RequiredColumn `json:"columns,omitempty"`
+}
+
+// RequiredColumn is one column a projection reads.
+type RequiredColumn struct {
+	// Name is the result column name.
+	Name string `json:"name"`
+
+	// Type is what the value is coerced to. Columns carrying identity and
+	// metadata are read as strings; only mapping.fields can ask for anything
+	// else.
+	// +optional
+	Type FieldType `json:"type,omitempty"`
+
+	// UsedFor says what the column provides, so a reader can tell a column the
+	// projection cannot work without from one that fills in a field.
+	// +optional
+	UsedFor string `json:"usedFor,omitempty"`
 }
 
 // Condition types reported in CustomResourceProjectionStatus.

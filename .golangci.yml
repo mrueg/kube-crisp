@@ -1,0 +1,71 @@
+version: "2"
+
+run:
+  # Without this the e2e suite is invisible to the linter: it is behind a build
+  # tag, and unlinted test code is where sloppiness accumulates.
+  build-tags:
+    - e2e
+
+linters:
+  default: standard
+  enable:
+    # Response bodies that are never closed leak connections; the same class of
+    # mistake as leaving *sql.Rows open.
+    - bodyclose
+    # errors.Is/As rather than == and type assertions, so wrapped API errors
+    # keep matching.
+    - errorlint
+    # database/sql is full of Close, Rollback, and Scan calls whose errors are
+    # easy to drop silently.
+    - rowserrcheck
+    - sqlclosecheck
+    - misspell
+    - unconvert
+    # This server runs operator-supplied SQL with credentials read from
+    # Secrets, so the classes gosec covers — statement construction, file
+    # permissions, weak randomness, unhandled errors around crypto — are the
+    # ones that matter most here.
+    - gosec
+    - usestdlibvars
+    # Context should be passed, not stored or dropped: every query carries a
+    # request deadline.
+    - noctx
+    - nilerr
+  settings:
+    misspell:
+      # rest.Creater is how upstream spells the interface; it is not a typo of
+      # "Creature".
+      ignore-rules:
+        - creater
+    errcheck:
+      # Writing to an http.ResponseWriter can fail when the client goes away;
+      # there is nothing useful to do about it, and the alternative is noise at
+      # every response.
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+  exclusions:
+    generated: lax
+    rules:
+      # Test helpers deliberately ignore errors on cleanup paths.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+          - noctx
+          - sqlclosecheck
+      # G101 fires on the obviously-fake connection strings test fixtures are
+      # built from; G204 on the e2e helpers that shell out to kubectl with
+      # arguments the test itself assembled.
+      - path: _test\.go
+        linters:
+          - gosec
+        text: "G101|G204"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/mrueg/kube-crisp

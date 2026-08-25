@@ -1,0 +1,46 @@
+# Dependency updates.
+#
+# The Kubernetes libraries move together — a bump to one of k8s.io/* that leaves
+# the others behind does not compile — so they are grouped into a single pull
+# request rather than arriving as a dozen that each fail on their own.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      # Drivers are grouped too: they are what this project is, so they are
+      # worth reviewing together rather than one at a time.
+      database-drivers:
+        patterns:
+          - "github.com/jackc/*"
+          - "github.com/go-sql-driver/*"
+          - "modernc.org/*"
+      other:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+          - "github.com/jackc/*"
+          - "github.com/go-sql-driver/*"
+          - "modernc.org/*"
+
+  # The workflows pin every action by SHA, which is what makes this worth
+  # automating: a pinned digest is invisible to a human reading for staleness.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns:
+          - "*"

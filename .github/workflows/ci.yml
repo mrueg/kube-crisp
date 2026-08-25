@@ -1,0 +1,336 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+# Least privilege: nothing in CI needs to write to the repository.
+permissions:
+  contents: read
+
+# Superseded pushes to the same ref cancel their in-flight runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GOLANGCI_LINT_VERSION: v2.12.2
+  # Only promtool is used, to check the alert rules parse.
+  PROMETHEUS_VERSION: v3.7.3
+
+jobs:
+  hygiene:
+    name: Format & Tidy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go mod tidy
+        run: make tidy-check
+
+      # Both tag sets: the e2e suite is behind a build tag and would otherwise
+      # never be vetted.
+      - name: go vet
+        run: make vet
+
+      # The CRD and the typed client come from the API types. A field added to
+      # the types and not regenerated is one the API server prunes in silence.
+      - name: generated code is current
+        run: make codegen-check
+
+      # A benchmark added without being placed in a CI shard is a benchmark that
+      # stops running, which nothing else would report.
+      - name: every benchmark is in a shard
+        run: make e2e-bench-check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # Config lives in .golangci.yml; the version is pinned so a new
+      # golangci-lint release cannot red-CI an unrelated pull request.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # Pinned so a new Helm release cannot red-CI an unrelated pull
+          # request, the same reason golangci-lint is pinned above.
+          version: v3.19.0
+
+      # Renders the chart with every combination the templates branch on. A
+      # chart that only lints still fails at install time if a value it does not
+      # expect makes a template produce nothing, or something invalid.
+      - name: Lint and render the chart
+        run: make helm-lint
+
+      # The rendered objects have to be objects the API server would accept.
+      - name: Validate the rendered manifests
+        run: |
+          helm template kube-crisp charts/kube-crisp --namespace kube-crisp \
+            --set networkPolicy.enabled=true \
+            | kubectl create --dry-run=client -f - > /dev/null
+
+      # A broken PromQL expression would otherwise surface when Prometheus
+      # loads the rules, long after anybody would connect the two.
+      - name: Install promtool
+        run: |
+          curl -sSfL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION#v}.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin \
+                "prometheus-${PROMETHEUS_VERSION#v}.linux-amd64/promtool"
+
+      - name: Check the alert rules
+        run: make alerts-check
+
+  unit-test:
+    name: Unit Tests (race + coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # -race matters here: the watch cache is refreshed by a poll loop while
+      # watchers read from it, and the served API surface is swapped under live
+      # requests.
+      - name: Run unit tests
+        run: make cover
+
+      # Always visible, needs nothing configured: the totals land on the run's
+      # own summary page, rather than in an artifact nobody opens.
+      - name: Report coverage
+        # always(), so a failing test run still reports what it did cover — but
+        # only if the profile exists, or this step fails on top of the failure
+        # that actually matters.
+        if: always()
+        run: |
+          if [ ! -s coverage.out ]; then
+            echo "no coverage profile was produced" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo '## Coverage'
+            echo
+            echo '```'
+            go tool cover -func=coverage.out | tail -1
+            echo '```'
+            echo
+            echo '<details><summary>Per function</summary>'
+            echo
+            echo '```'
+            go tool cover -func=coverage.out
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+
+  vulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # govulncheck reports only vulnerabilities that are actually reachable
+      # from this code, so a finding here is a call path worth looking at rather
+      # than a version-range match in a dependency nobody calls.
+      - name: Run govulncheck
+        run: make vulncheck
+
+  release-config:
+    name: Release config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # goreleaser derives the version from git history and tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # A broken .goreleaser.yaml would otherwise surface for the first time
+      # when a tag is pushed, which is the worst place to find out.
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          args: check
+
+  # Built once for every shard below. Each shard still provisions a cluster of
+  # its own — kind and three databases cannot be shared across runners — but the
+  # image is the same image, from the same commit, and building it five times
+  # was most of the setup cost of every one of them.
+  e2e-image:
+    name: Build the E2E image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # goreleaser derives the version from git history and tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          install-only: true
+
+      # hack/e2e-image.sh puts the name on stdout and everything else on stderr,
+      # so this is the name and not the build log.
+      - name: Build
+        id: build
+        run: |
+          image="$(./hack/e2e-image.sh)"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          docker save "${image}" -o /tmp/kube-crisp-image.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-image
+          path: /tmp/kube-crisp-image.tar
+          if-no-files-found: error
+          # Only ever consumed by the shards in this same run.
+          retention-days: 1
+
+  e2e:
+    name: E2E ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    needs: e2e-image
+    # Each shard provisions a cluster of its own — kind and three databases
+    # cannot be shared across runners — so that part of the setup is still paid
+    # per job. The image is not: it comes from e2e-image above.
+    # The correctness shard is a couple of minutes of testing after that setup.
+    timeout-minutes: 30
+    strategy:
+      # One shard failing should not hide what the others would have found.
+      fail-fast: false
+      matrix:
+        include:
+          - shard: correctness
+            make: e2e-correctness
+          - shard: bench-reads
+            make: e2e-bench SHARD=reads
+          - shard: bench-drivers
+            make: e2e-bench SHARD=drivers
+          - shard: bench-queries
+            make: e2e-bench SHARD=queries
+          - shard: bench-cluster
+            make: e2e-bench SHARD=cluster
+    env:
+      # CI runs the benchmarks to find out whether they work, not to publish
+      # numbers, and the repeats exist to make numbers quotable. One run is a
+      # third of the longest shard.
+      BENCH_RUNS: 1
+    steps:
+      # No fetch-depth here: nothing in a shard derives a version from git
+      # history, because nothing in a shard builds the image.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # kind is installed from source rather than via a third-party action: the
+      # harness drives kind itself, so all CI needs is the binary on PATH.
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: e2e-image
+          path: /tmp
+
+      - name: Load the image
+        run: docker load -i /tmp/kube-crisp-image.tar
+
+      # Pre-pull so the harness is not racing a cold pull while waiting for the
+      # databases to report ready.
+      - name: Pre-pull database images
+        run: |
+          docker pull postgres:17-alpine
+          docker pull mysql:8.4
+
+      # KUBE_CRISP_IMAGE is what tells the harness the image is already here.
+      - name: Provision the cluster
+        run: make e2e-up
+        env:
+          KUBE_CRISP_IMAGE: ${{ needs.e2e-image.outputs.image }}
+
+      - name: Run ${{ matrix.shard }}
+        run: make ${{ matrix.make }}
+
+      # The failure that matters is usually in the deployed server, not in the
+      # test output.
+      - name: Dump kube-crisp state
+        if: failure()
+        run: |
+          export KUBECONFIG=hack/.e2e-kubeconfig
+          kubectl -n kube-crisp logs deploy/kube-crisp-apiserver --tail=200 || true
+          kubectl get apiservice v1alpha1.store.example.com -o yaml || true
+          kubectl get customresourceprojections -o yaml || true
+          kubectl -n kube-crisp logs deploy/postgres --tail=50 || true
+
+      - name: Tear down
+        if: always()
+        run: make e2e-down
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build binary
+        run: make build

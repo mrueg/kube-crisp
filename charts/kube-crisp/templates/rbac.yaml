@@ -1,0 +1,161 @@
+# Delegated authentication and authorization: the aggregated server asks the
+# kube-apiserver to review the tokens and permissions of incoming requests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}:auth-delegator
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-crisp.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Required so the server can read the requestheader client CA the aggregation
+# layer authenticates with.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}:extension-apiserver-authentication-reader
+  namespace: kube-system
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-crisp.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["crisp.kubecrisp.io"]
+    resources: ["customresourceprojections"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["crisp.kubecrisp.io"]
+    resources: ["customresourceprojections/status"]
+    verbs: ["get", "update", "patch"]
+  # Read only, and only for a projection that borrows a schema with schemaFrom.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  {{- if .Values.crisp.manageAPIServices }}
+  # The server registers the groups it serves with the aggregation layer and
+  # withdraws the registration when the last projection in a group is deleted.
+  # It only ever modifies APIServices it labelled as its own.
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  {{- end }}
+  {{- if .Values.crisp.admission }}
+  # The admission plugins watch these cluster-wide.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+      - validatingadmissionpolicies
+      - validatingadmissionpolicybindings
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.crisp.priorityAndFairness }}
+  # Fair queueing watches the objects that define the queues.
+  - apiGroups: ["flowcontrol.apiserver.k8s.io"]
+    resources: ["flowschemas", "prioritylevelconfigurations"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-crisp.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-crisp.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- range $namespace := (default (list .Release.Namespace) .Values.crisp.dataSourceNamespaces) }}
+---
+# Data source credentials are read from this namespace only, and only from
+# Secrets that opted in. Narrow this to named Secrets with resourceNames before
+# production use.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kube-crisp.fullname" $ }}:datasource-secrets
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "kube-crisp.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    # list and watch are what make a rotated credential take effect when it
+    # changes rather than at the next resync.
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kube-crisp.fullname" $ }}:datasource-secrets
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "kube-crisp.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kube-crisp.fullname" $ }}:datasource-secrets
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-crisp.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- if .Values.crisp.leaderElection }}
+---
+# The Lease that decides which replica polls watched projections at their
+# configured interval.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}:leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kube-crisp.fullname" . }}:leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-crisp.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kube-crisp.fullname" . }}:leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-crisp.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

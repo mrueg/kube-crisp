@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-crisp-apiserver
+  namespace: kube-crisp
+---
+# Delegated authentication and authorization: the aggregated server asks the
+# kube-apiserver to review the tokens and permissions of incoming requests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-crisp:system:auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: kube-crisp-apiserver
+    namespace: kube-crisp
+---
+# Required so the server can read the requestheader client CA used by the
+# aggregation layer.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-crisp-extension-apiserver-authentication-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: kube-crisp-apiserver
+    namespace: kube-crisp
+---
+# Read access to projection configuration and to the Secrets holding database
+# credentials. Narrow the secrets rule to specific names in production.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-crisp:apiserver
+rules:
+  - apiGroups: ["crisp.kubecrisp.io"]
+    resources: ["customresourceprojections"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["crisp.kubecrisp.io"]
+    resources: ["customresourceprojections/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  # The server registers the groups it serves with the aggregation layer, and
+  # withdraws the registration when the last projection in a group is deleted.
+  # It only ever modifies APIServices it labelled as its own.
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# Data source credentials are read from this namespace only, and only from
+# Secrets that opted in with crisp.kubecrisp.io/allow-projection=true.
+#
+# Both halves matter. A CustomResourceProjection is cluster-scoped and carries
+# arbitrary SQL, so whoever can create one chooses the database and the
+# statement; without these, that would be every Secret this server can read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-crisp:datasource-secrets
+  namespace: kube-crisp
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    # list and watch are what make a rotated credential take effect when it
+    # changes rather than at the next resync. The Role is namespaced, so this
+    # reaches only the namespace data source Secrets are read from.
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-crisp:datasource-secrets
+  namespace: kube-crisp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kube-crisp:datasource-secrets
+subjects:
+  - kind: ServiceAccount
+    name: kube-crisp-apiserver
+    namespace: kube-crisp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-crisp:apiserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-crisp:apiserver
+subjects:
+  - kind: ServiceAccount
+    name: kube-crisp-apiserver
+    namespace: kube-crisp
+---
+# The Lease that decides which replica polls watched projections at their
+# configured interval. Required by --enable-leader-election, which the shipped
+# Deployment passes; without the flag every replica polls, which is correct but
+# multiplies the query load by the replica count.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-crisp:leader-election
+  namespace: kube-crisp
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-crisp:leader-election
+  namespace: kube-crisp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kube-crisp:leader-election
+subjects:
+  - kind: ServiceAccount
+    name: kube-crisp-apiserver
+    namespace: kube-crisp

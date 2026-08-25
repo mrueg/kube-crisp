@@ -1,0 +1,100 @@
+# Egress control for kube-crisp-apiserver.
+#
+# EDIT THE DATABASE RULE BEFORE APPLYING. As written it allows egress only to
+# DNS, to the kube-apiserver, and to an in-cluster PostgreSQL Pod matching the
+# selector at the bottom — which is almost certainly not where your database
+# lives. Applied unedited it fails closed: projections report
+# DataSourceConnected=False and answer 503, which is at least a symptom that
+# says what happened.
+#
+# This is the control worth having for this server in particular. kube-crisp
+# opens connections to arbitrary databases with credentials it reads from
+# Secrets, and a CustomResourceProjection is cluster-scoped — so whoever can
+# create one chooses the destination. A network policy is what turns "the SQL
+# is arbitrary" into "the SQL is arbitrary, against these databases".
+#
+# Not applied by `kubectl apply -f manifests/`: that is not recursive, so
+# everything under optional/ is skipped until you ask for it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kube-crisp-apiserver
+  namespace: kube-crisp
+  labels:
+    app.kubernetes.io/name: kube-crisp-apiserver
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kube-crisp-apiserver
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # The aggregation layer connects from the kube-apiserver, which normally
+    # runs on a control plane node's host network and cannot be selected by pod
+    # or namespace labels. The port is therefore reachable from the cluster, and
+    # delegated authentication rather than the network is what decides who is
+    # served.
+    - ports:
+        - port: https
+          protocol: TCP
+
+    # Narrow it to the nodes the control plane runs on if you know their range,
+    # the same trade the egress rule below offers. Everything on this port is
+    # authenticated either way — this only decides who gets to be refused.
+    #
+    # - from:
+    #     - ipBlock:
+    #         cidr: 10.0.0.0/24
+    #   ports:
+    #     - port: https
+    #       protocol: TCP
+
+  egress:
+    # DNS. Without this nothing else resolves, including the kube-apiserver.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+    # The kube-apiserver: delegated authentication and authorization on every
+    # request, watching CustomResourceProjections and data source Secrets,
+    # reconciling APIServices, and renewing the polling Lease.
+    #
+    # No `to` selector, because the API server's address is usually outside the
+    # cluster network and not selectable by label. Narrow this to your control
+    # plane's CIDR if you can.
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+
+    # The databases projections connect to. REPLACE THIS.
+    #
+    # In-cluster, by label:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+
+    # Outside the cluster, by address — uncomment and set the range:
+    #
+    # - to:
+    #     - ipBlock:
+    #         cidr: 10.0.0.0/24
+    #   ports:
+    #     - port: 5432
+    #       protocol: TCP

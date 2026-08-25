@@ -1,0 +1,1020 @@
+// Package projection watches CustomResourceProjection objects and keeps the
+// served API surface in sync with them.
+package projection
+
+import (
+	"bytes"
+	"errors"
+	"maps"
+
+	"context"
+	"fmt"
+	"sort"
+	"sync/atomic"
+	"time"
+
+	"github.com/fsnotify/fsnotify"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/prometheus/client_golang/prometheus"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
+
+	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
+	apidynamic "github.com/mrueg/kube-crisp/pkg/apiserver/dynamic"
+	crispclient "github.com/mrueg/kube-crisp/pkg/generated/clientset/versioned"
+	crispinformers "github.com/mrueg/kube-crisp/pkg/generated/informers/externalversions"
+	crisplisters "github.com/mrueg/kube-crisp/pkg/generated/listers/crisp/v1alpha1"
+	crispmetrics "github.com/mrueg/kube-crisp/pkg/metrics"
+	"github.com/mrueg/kube-crisp/pkg/projection"
+	crispsql "github.com/mrueg/kube-crisp/pkg/sql"
+)
+
+// GVR is the resource the controller watches. The typed client knows this
+// already; it is kept because the APIService reconciler and the tests address
+// resources by GVR.
+var GVR = schema.GroupVersionResource{
+	Group:    crispv1alpha1.GroupName,
+	Version:  "v1alpha1",
+	Resource: "customresourceprojections",
+}
+
+// syncKey is the only key the queue carries. Projections are cheap to compile
+// and the served surface is rebuilt as a whole, so there is nothing to gain
+// from per-object keys and a lot of ordering trouble to avoid.
+const syncKey = "sync"
+
+// registrationRecheckInterval is how soon to look again while the aggregation
+// layer has not confirmed a registration. Short, because it is the difference
+// between a projection describing a recovery within seconds and describing an
+// outage that is over until the next resync.
+//
+// A variable so tests can shorten it; nothing else assigns to it.
+var registrationRecheckInterval = 15 * time.Second
+
+// ResyncPeriod is how often the informer relists projections, as a backstop
+// against a missed watch event.
+const ResyncPeriod = 10 * time.Minute
+
+// Controller keeps the router's resources in sync with the cluster.
+type Controller struct {
+	// client reads and writes projections; dynamicClient is only used for the
+	// APIServices this server manages.
+	client        crispclient.Interface
+	dynamicClient dynamic.Interface
+
+	pools    *crispsql.PoolCache
+	informer cache.SharedIndexInformer
+	lister   crisplisters.CustomResourceProjectionLister
+
+	// secrets watch data source credentials. A change to one is a reason to
+	// recompile: the pool is keyed by the connection string, so a projection
+	// whose password moved gets a new pool and the old one is released.
+	secrets []cache.SharedIndexInformer
+
+	// apiServiceInformer backs the registration reconciler's reads.
+	apiServiceInformer cache.SharedIndexInformer
+
+	compiler    *apidynamic.Compiler
+	router      *apidynamic.Router
+	apiServices *apiServiceManager
+
+	// static projections come from --projection-dir and are always served,
+	// regardless of what exists in the cluster. staticDir is where they were
+	// read from, when they came from a directory at all.
+	//
+	// They are re-read on every sync rather than held from startup: a file
+	// changing is the same kind of event as a projection changing in the
+	// cluster, and needing a restart to pick one up made the directory the only
+	// part of the configuration that could go stale. Only sync touches these.
+	static    []crispv1alpha1.CustomResourceProjection
+	staticDir string
+
+	// lastStatus is the status this controller last wrote for each projection,
+	// keyed by projection name.
+	//
+	// The lister's copy can lag a write this controller just made, and a status
+	// write does not change the generation — which the update handler
+	// deliberately ignores, so it queues no sync of its own. Deciding "this
+	// status is already correct" from the lister therefore risks skipping the
+	// one write that would have corrected it, leaving the object wrong until
+	// something unrelated happens. What this controller last wrote is the
+	// authoritative answer to that question.
+	//
+	// Only sync touches it, and sync runs on one worker.
+	lastStatus map[string]crispv1alpha1.CustomResourceProjectionStatus
+
+	// hasPeers is Options.HasPeers; warnedUnversioned keeps the warning above
+	// from repeating on every sync.
+	hasPeers          bool
+	warnedUnversioned map[string]bool
+
+	// compiled remembers what each projection last compiled to, keyed by
+	// projection name. Only sync touches it, and sync runs on one worker.
+	//
+	// Recompiling builds fresh storage, and fresh storage means an empty watch
+	// cache, an empty read cache, and every watcher relisting. Doing that to
+	// every projection whenever any one of them changes — or ten minutes pass —
+	// is a lot of disruption for no change, so a projection whose spec and
+	// credentials are unchanged keeps the storage it already has.
+	compiled map[string]compilation
+
+	queue     workqueue.TypedRateLimitingInterface[string]
+	hasSynced atomic.Bool
+
+	// degraded names the projections that could not be compiled on the last
+	// sync. Serving three of five projections is not the same as serving all
+	// five, and nothing else in the health surface says so.
+	degraded atomic.Pointer[[]string]
+}
+
+// compilation is one projection's compiled resources and the fingerprint that
+// says what they were compiled from.
+type compilation struct {
+	fingerprint string
+	resources   []apidynamic.Resource
+}
+
+// Options configures a Controller.
+type Options struct {
+	// Client reads projections and writes their status.
+	Client crispclient.Interface
+
+	// DynamicClient is used for the APIServices this server registers.
+	DynamicClient dynamic.Interface
+
+	// Factory supplies the projection informer. The caller owns starting it.
+	Factory crispinformers.SharedInformerFactory
+
+	// SecretInformers watch the Secrets that hold data source credentials, so
+	// a rotated password is picked up when it changes rather than at the next
+	// resync. One per namespace credentials may be read from. Optional: with
+	// none, rotation still lands within ResyncPeriod.
+	SecretInformers []cache.SharedIndexInformer
+
+	// APIServiceInformer watches the registrations this server manages, so
+	// reconciling them reads from a cache rather than making a request per
+	// served group version on every sync. Optional: without it the reconciler
+	// reads through the client.
+	APIServiceInformer cache.SharedIndexInformer
+
+	// Compiler turns projections into servable resources; Router installs them.
+	Compiler *apidynamic.Compiler
+	Router   *apidynamic.Router
+	// HasPeers reports whether this server expects to run alongside other
+	// replicas, which is what makes a projection with no mapped resourceVersion
+	// unsafe: the version a list reports then comes from a per-replica counter,
+	// so two replicas hand the same client incompatible versions.
+	HasPeers bool
+
+	// Pools is the shared connection pool cache, trimmed as projections come
+	// and go.
+	Pools *crispsql.PoolCache
+
+	// Static projections come from --projection-dir and are always served,
+	// regardless of what exists in the cluster.
+	Static []crispv1alpha1.CustomResourceProjection
+
+	// StaticDir is where those came from. Given one, the controller re-reads it
+	// on every sync and watches it for changes; without one, Static is fixed.
+	StaticDir string
+
+	// APIServices controls whether this server registers the groups it serves
+	// with the aggregation layer, and how it describes itself when it does.
+	APIServices APIServiceOptions
+}
+
+// New builds a controller. The caller owns starting the informer factory.
+func New(opts Options) *Controller {
+	informer := opts.Factory.Crisp().V1alpha1().CustomResourceProjections()
+
+	c := &Controller{
+		apiServiceInformer: opts.APIServiceInformer,
+
+		client:            opts.Client,
+		dynamicClient:     opts.DynamicClient,
+		pools:             opts.Pools,
+		informer:          informer.Informer(),
+		lister:            informer.Lister(),
+		compiler:          opts.Compiler,
+		router:            opts.Router,
+		apiServices:       newAPIServiceManager(opts.DynamicClient, opts.APIServices, apiServiceIndexer(opts.APIServiceInformer)),
+		static:            opts.Static,
+		staticDir:         opts.StaticDir,
+		secrets:           opts.SecretInformers,
+		compiled:          map[string]compilation{},
+		lastStatus:        map[string]crispv1alpha1.CustomResourceProjectionStatus{},
+		hasPeers:          opts.HasPeers,
+		warnedUnversioned: map[string]bool{},
+		queue: workqueue.NewTypedRateLimitingQueue[string](
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+		),
+	}
+
+	_, _ = c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(any) { c.queue.Add(syncKey) },
+		DeleteFunc: func(any) { c.queue.Add(syncKey) },
+		UpdateFunc: func(old, new any) {
+			// Ignore updates that only touched status, which the controller
+			// writes itself and which would otherwise loop.
+			oldObj, okOld := old.(*crispv1alpha1.CustomResourceProjection)
+			newObj, okNew := new.(*crispv1alpha1.CustomResourceProjection)
+			if okOld && okNew && oldObj.Generation == newObj.Generation {
+				return
+			}
+			c.queue.Add(syncKey)
+		},
+	})
+
+	// Nothing reacted to these before: the informer was a read cache and no
+	// more, so an APIService someone deleted, or one the aggregator had just
+	// marked unavailable, was neither repaired nor reported until the next
+	// resync — up to ResyncPeriod of a projection claiming to serve an API that
+	// answers NotFound.
+	if c.apiServiceInformer != nil {
+		_, _ = c.apiServiceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    func(any) { c.queue.Add(syncKey) },
+			DeleteFunc: func(any) { c.queue.Add(syncKey) },
+			UpdateFunc: func(old, new any) {
+				// Only a changed registration is worth a sync. An APIService
+				// relisted unchanged is not — and the resync period here is the
+				// controller's own, so without this every relist would rebuild
+				// the API surface.
+				//
+				// Content rather than resourceVersion: what matters is whether
+				// the spec this server maintains, or the availability the
+				// aggregator reports, actually moved.
+				oldObj, okOld := old.(*unstructured.Unstructured)
+				newObj, okNew := new.(*unstructured.Unstructured)
+				if okOld && okNew && sameRegistration(oldObj, newObj) {
+					return
+				}
+				c.queue.Add(syncKey)
+			},
+		})
+	}
+
+	for _, secrets := range c.secrets {
+		_, _ = secrets.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    func(any) { c.queue.Add(syncKey) },
+			DeleteFunc: func(any) { c.queue.Add(syncKey) },
+			UpdateFunc: func(old, new any) {
+				// Only a changed credential is worth recompiling for. A Secret
+				// relisted unchanged, or relabelled, is not.
+				oldSecret, okOld := old.(*corev1.Secret)
+				newSecret, okNew := new.(*corev1.Secret)
+				if okOld && okNew && maps.EqualFunc(oldSecret.Data, newSecret.Data, bytes.Equal) {
+					return
+				}
+				c.queue.Add(syncKey)
+			},
+		})
+	}
+
+	return c
+}
+
+// sameRegistration reports whether two versions of an APIService say the same
+// thing about how the group version is routed and whether it is reachable.
+func sameRegistration(old, new *unstructured.Unstructured) bool {
+	for _, field := range []string{"spec", "status"} {
+		oldValue, _, _ := unstructured.NestedMap(old.Object, field)
+		newValue, _, _ := unstructured.NestedMap(new.Object, field)
+		if !apiequality.Semantic.DeepEqual(oldValue, newValue) {
+			return false
+		}
+	}
+	return true
+}
+
+// apiServiceIndexer returns an informer's cache, or nil when there is no
+// informer to read from.
+func apiServiceIndexer(informer cache.SharedIndexInformer) cache.Indexer {
+	if informer == nil {
+		return nil
+	}
+	return informer.GetIndexer()
+}
+
+// HasSynced reports whether the controller has installed the API surface at
+// least once, which is what makes the server ready to serve projections.
+func (c *Controller) HasSynced() bool { return c.hasSynced.Load() }
+
+// Degraded returns the projections that are defined but not being served,
+// sorted. An empty result means every projection compiled.
+func (c *Controller) Degraded() []string {
+	names := c.degraded.Load()
+	if names == nil {
+		return nil
+	}
+	return *names
+}
+
+// Run processes queue items until the context is cancelled.
+func (c *Controller) Run(ctx context.Context) {
+	defer utilruntime.HandleCrash()
+	defer c.queue.ShutDown()
+
+	klog.InfoS("starting projection controller")
+	defer klog.InfoS("stopping projection controller")
+
+	synced := []cache.InformerSynced{c.informer.HasSynced}
+
+	for _, secrets := range c.secrets {
+		synced = append(synced, secrets.HasSynced)
+	}
+	if c.apiServiceInformer != nil {
+		// Reconciling reads this cache, and reading it before it has synced
+		// would look like every registration is missing.
+		synced = append(synced, c.apiServiceInformer.HasSynced)
+	}
+	if !cache.WaitForCacheSync(ctx.Done(), synced...) {
+		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		return
+	}
+
+	c.watchStaticDir(ctx)
+
+	// Install whatever exists right now before serving traffic.
+	c.queue.Add(syncKey)
+
+	go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+	<-ctx.Done()
+}
+
+func (c *Controller) runWorker(ctx context.Context) {
+	for c.processNext(ctx) {
+	}
+}
+
+func (c *Controller) processNext(ctx context.Context) bool {
+	key, shutdown := c.queue.Get()
+	if shutdown {
+		return false
+	}
+	defer c.queue.Done(key)
+
+	if err := c.sync(ctx); err != nil {
+		utilruntime.HandleError(fmt.Errorf("syncing projections: %w", err))
+		c.queue.AddRateLimited(key)
+		return true
+	}
+
+	c.queue.Forget(key)
+	return true
+}
+
+// sync rebuilds the entire served surface from the current set of projections.
+func (c *Controller) sync(ctx context.Context) error {
+	objects, err := c.lister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("listing projections: %w", err)
+	}
+
+	static := c.staticProjections()
+	candidates := make([]projectionCandidate, 0, len(objects)+len(static))
+	for i := range static {
+		candidates = append(candidates, projectionCandidate{projection: &static[i]})
+	}
+	for _, obj := range objects {
+		candidates = append(candidates, projectionCandidate{projection: obj, stored: obj})
+	}
+
+	var (
+		resources []apidynamic.Resource
+		failures  = map[string]error{}
+
+		// Separate from failures on purpose: a projection whose database is
+		// down is still installed and still answers, with 503.
+		unreachable = map[string]error{}
+
+		// stale names the projections that failed to compile this time but are
+		// still being served from what they compiled to last time.
+		stale = map[string]struct{}{}
+	)
+
+	// Storage that is about to stop being served, released once the router no
+	// longer routes to it: a projection that was replaced or deleted otherwise
+	// keeps polling its table forever with nobody reading the result.
+	var retired []apidynamic.Resource
+	surviving := make(map[string]compilation, len(candidates))
+
+	// failed records a projection that did not compile, and keeps whatever it is
+	// already serving.
+	//
+	// A projection that exists and cannot be compiled is not a projection that
+	// is gone. Reading its data source Secret can fail for a moment, and a
+	// borrowed schema is a request to the kube-apiserver like any other — so
+	// treating a failure as a deletion would withdraw the API group, delete its
+	// APIService, and take discovery, RBAC, and every controller watching it
+	// down with it, over a blip. That is the same reasoning that keeps a
+	// projection installed when its database is unreachable; this is the other
+	// half of it.
+	//
+	// Nothing is hidden by doing so: the projection is still counted as failed,
+	// still named by Degraded, and still reports Ready=False for the generation
+	// that did not compile.
+	failed := func(name string, err error) {
+		failures[name] = err
+
+		previous, served := c.compiled[name]
+		if !served {
+			// Never compiled, so there is nothing to fall back to and no
+			// registration to protect.
+			klog.ErrorS(err, "projection is not servable", "projection", name)
+			return
+		}
+
+		stale[name] = struct{}{}
+		surviving[name] = previous
+		resources = append(resources, previous.resources...)
+		klog.ErrorS(err, "projection failed to compile; still serving its previous configuration",
+			"projection", name)
+	}
+
+	for _, cand := range candidates {
+		name := cand.projection.Name
+
+		prepared, err := c.compiler.Prepare(ctx, cand.projection)
+		if err != nil {
+			failed(name, err)
+			continue
+		}
+
+		// Unchanged spec, unchanged credentials: keep the storage that is
+		// already serving, along with its watch cache and everything watching
+		// it. Only the data source is re-probed, since that can change without
+		// the projection doing anything.
+		if previous, ok := c.compiled[name]; ok && previous.fingerprint == prepared.Fingerprint {
+			reachErr := prepared.Pool.Ping(ctx)
+			for i := range previous.resources {
+				previous.resources[i].DataSourceReady = reachErr == nil
+				previous.resources[i].DataSourceError = reachErr
+			}
+			if reachErr != nil {
+				unreachable[name] = reachErr
+			}
+			surviving[name] = previous
+			resources = append(resources, previous.resources...)
+			continue
+		}
+
+		compiled, err := c.compiler.CompileWith(ctx, cand.projection, prepared)
+		if err != nil {
+			failed(name, err)
+			continue
+		}
+		for _, res := range compiled {
+			if !res.DataSourceReady && res.DataSourceError != nil {
+				unreachable[name] = res.DataSourceError
+			}
+		}
+		if previous, ok := c.compiled[name]; ok {
+			retired = append(retired, previous.resources...)
+		}
+		surviving[name] = compilation{fingerprint: prepared.Fingerprint, resources: compiled}
+		resources = append(resources, compiled...)
+	}
+
+	// Anything gone from the cluster entirely keeps whatever it had until here
+	// and then loses it. A projection that merely failed to compile is in
+	// surviving and is not retired: it is still serving what it last compiled
+	// to, which is what failed() arranges.
+	for name, previous := range c.compiled {
+		if _, still := surviving[name]; !still {
+			retired = append(retired, previous.resources...)
+		}
+	}
+
+	if err := c.router.Rebuild(resources); err != nil {
+		return fmt.Errorf("installing projected resources: %w", err)
+	}
+	c.compiled = surviving
+	c.hasSynced.Store(true)
+
+	// A projection that is gone takes its remembered status with it, so a later
+	// object of the same name is not compared against a stranger's.
+	live := make(map[string]struct{}, len(candidates))
+	for _, cand := range candidates {
+		live[cand.projection.Name] = struct{}{}
+	}
+	for name := range c.lastStatus {
+		if _, still := live[name]; !still {
+			delete(c.lastStatus, name)
+		}
+	}
+
+	// The same for the unversioned warning. A projection that has been deleted
+	// is not a projection running unsafely, and leaving its gauge behind would
+	// have an alert fire for something that no longer exists.
+	for name := range c.warnedUnversioned {
+		if _, still := live[name]; !still {
+			delete(c.warnedUnversioned, name)
+			crispmetrics.ProjectionsUnversioned.DeletePartialMatch(
+				prometheus.Labels{"projection": name})
+		}
+	}
+
+	// After the rebuild, so a request in flight against the old surface is
+	// never handed storage that has just been torn down.
+	apidynamic.DestroyAll(retired)
+
+	// Connections belonging to projections that are gone are released here;
+	// otherwise a deleted projection would hold its pool open forever.
+	inUse := make(map[string]struct{}, len(resources))
+	for _, res := range resources {
+		inUse[res.PoolKey] = struct{}{}
+		if res.ReadPoolKey != "" {
+			inUse[res.ReadPoolKey] = struct{}{}
+		}
+	}
+	if evicted := c.pools.RetainOnly(inUse); evicted > 0 {
+		klog.InfoS("released connection pools no projection references", "pools", evicted)
+	}
+
+	// Registration happens after the surface is installed: an APIService that
+	// points at a group this server does not serve yet would be marked
+	// unavailable by the aggregator.
+	unregistered, err := c.apiServices.reconcile(ctx, resources, c.apiServiceOwners(candidates, resources))
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("reconciling APIServices: %w", err))
+	}
+
+	broken := make([]string, 0, len(failures))
+	for name := range failures {
+		broken = append(broken, name)
+	}
+	sort.Strings(broken)
+	c.degraded.Store(&broken)
+
+	crispmetrics.Projections.WithLabelValues(crispmetrics.ProjectionServing).Set(float64(len(resources)))
+	crispmetrics.Projections.WithLabelValues(crispmetrics.ProjectionFailed).Set(float64(len(failures)))
+	// Worth its own series: a projection serving configuration it can no longer
+	// recompile looks healthy from the outside, and only stops being correct
+	// when whatever broke the recompile is fixed. Alerting on this above zero
+	// for more than a few minutes is how that gets noticed.
+	crispmetrics.Projections.WithLabelValues(crispmetrics.ProjectionStale).Set(float64(len(stale)))
+	// Compiled here and unreachable from outside. Counted separately because
+	// nothing else would show it: the projection is installed, its queries
+	// work, and every request for it stops at the aggregation layer. Only
+	// group versions whose registration has actually failed — one merely
+	// waiting to be dialled is not a fault.
+	unrouted := 0
+	for _, err := range unregistered {
+		if !errors.Is(err, errRegistrationPending) {
+			unrouted++
+		}
+	}
+	crispmetrics.Projections.WithLabelValues(crispmetrics.ProjectionUnrouted).Set(float64(unrouted))
+
+	// Look again shortly while any group version is unregistered or waiting to
+	// be dialled.
+	//
+	// The aggregator's verdict arrives as a change to an APIService, which the
+	// informer turns into a sync — but only if the change lands after this sync
+	// read the cache. When it lands during one, the sync writes a verdict that
+	// is already out of date and the event that would have corrected it has
+	// already been spent. Observed on a rollout: the aggregator marked the
+	// registration available in the same second the controller read it as
+	// unavailable, and the projection reported an outage that was over until
+	// something unrelated queued the next sync ten minutes later.
+	//
+	// Only while something is unresolved, so a healthy server still syncs only
+	// when something actually changes.
+	if len(unregistered) > 0 {
+		c.queue.AddAfter(syncKey, registrationRecheckInterval)
+	}
+
+	for _, cand := range candidates {
+		c.warnIfUnversioned(cand.projection)
+	}
+
+	klog.InfoS("projections installed",
+		"servable", len(resources), "failed", len(failures), "stale", len(stale))
+
+	// Status is reported only for projections that exist in the cluster;
+	// file-based ones have no object to write back to.
+	for _, cand := range candidates {
+		if cand.stored == nil {
+			continue
+		}
+		name := cand.projection.Name
+		_, servingPrevious := stale[name]
+		if err := c.updateStatus(ctx, cand.stored, failures[name], unreachable[name],
+			registrationError(cand.projection, unregistered), servingPrevious); err != nil {
+			utilruntime.HandleError(fmt.Errorf("updating status of %s: %w", name, err))
+		}
+	}
+
+	return nil
+}
+
+// staticProjections returns what --projection-dir holds now.
+//
+// A directory that cannot be read, or holds a projection that does not parse,
+// keeps whatever was last read successfully. The alternative is that saving a
+// half-written file takes every file-backed projection out of service, which is
+// a worse answer to a mistake than carrying on with the last good one — and the
+// same reasoning that keeps a projection serving when it fails to recompile.
+func (c *Controller) staticProjections() []crispv1alpha1.CustomResourceProjection {
+	if c.staticDir == "" {
+		return c.static
+	}
+
+	loaded, err := projection.LoadDir(c.staticDir)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf(
+			"re-reading %s; keeping the %d projection(s) last read from it: %w",
+			c.staticDir, len(c.static), err))
+		return c.static
+	}
+
+	c.static = loaded
+	return loaded
+}
+
+// watchStaticDir queues a sync when the projection directory changes.
+//
+// The directory is watched rather than the files in it, which is what makes
+// this work for a ConfigMap: a mount is updated by swapping a symlink, so the
+// files themselves are never written to and only the directory sees the event.
+//
+// A watch that cannot be established is reported and not fatal — the resync
+// still picks a change up, just not promptly.
+func (c *Controller) watchStaticDir(ctx context.Context) {
+	if c.staticDir == "" {
+		return
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("watching %s: %w", c.staticDir, err))
+		return
+	}
+	if err := watcher.Add(c.staticDir); err != nil {
+		_ = watcher.Close()
+		utilruntime.HandleError(fmt.Errorf("watching %s: %w", c.staticDir, err))
+		return
+	}
+
+	klog.InfoS("watching the projection directory for changes", "dir", c.staticDir)
+
+	go func() {
+		defer func() { _ = watcher.Close() }()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				// Which file changed does not matter: the whole directory is
+				// re-read, and the queue collapses a burst into one sync.
+				c.queue.Add(syncKey)
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				utilruntime.HandleError(fmt.Errorf("watching %s: %w", c.staticDir, err))
+			}
+		}
+	}()
+}
+
+// updateStatus reports whether a projection is being served.
+// projectionCandidate is one projection under consideration for installation,
+// from the cluster or from a file.
+type projectionCandidate struct {
+	projection *crispv1alpha1.CustomResourceProjection
+
+	// stored is nil for file-based projections, which have no object to write
+	// status back to.
+	stored *crispv1alpha1.CustomResourceProjection
+}
+
+// apiServiceOwners works out which CustomResourceProjections should own each
+// registered APIService, so that removing them removes it.
+//
+// Without owner references an uninstall leaves the registrations behind:
+// cluster-scoped objects pointing at a Service that no longer exists, which the
+// aggregation layer goes on dialling and failing to reach. Owned, they are
+// collected when the last projection behind them is — including when the CRD
+// itself is deleted, which is what `kubectl delete -f manifests/` does and what
+// takes every projection with it.
+//
+// A group version is left unowned if any projection serving it came from a file
+// rather than the cluster. Kubernetes deletes a dependent once *all* its owners
+// are gone, so owning it by only the cluster-backed ones would collect the
+// registration while a file-based projection was still serving through it.
+func (c *Controller) apiServiceOwners(
+	candidates []projectionCandidate,
+	resources []apidynamic.Resource,
+) map[schema.GroupVersion][]metav1.OwnerReference {
+	stored := make(map[string]*crispv1alpha1.CustomResourceProjection, len(candidates))
+	for _, cand := range candidates {
+		stored[cand.projection.Name] = cand.stored
+	}
+
+	owners := map[schema.GroupVersion][]metav1.OwnerReference{}
+	unownable := map[schema.GroupVersion]bool{}
+	seen := map[schema.GroupVersion]map[types.UID]bool{}
+
+	for _, res := range resources {
+		gv := res.GroupVersion()
+		object, known := stored[res.ProjectionName]
+		if !known || object == nil || object.UID == "" {
+			unownable[gv] = true
+			continue
+		}
+		if seen[gv] == nil {
+			seen[gv] = map[types.UID]bool{}
+		}
+		if seen[gv][object.UID] {
+			continue
+		}
+		seen[gv][object.UID] = true
+		owners[gv] = append(owners[gv], metav1.OwnerReference{
+			APIVersion: crispv1alpha1.SchemeGroupVersion.String(),
+			Kind:       "CustomResourceProjection",
+			Name:       object.Name,
+			UID:        object.UID,
+		})
+	}
+
+	for gv := range unownable {
+		delete(owners, gv)
+	}
+	return owners
+}
+
+// registrationError picks out the registration failure that applies to one
+// projection, if any.
+//
+// A projection can serve several group versions, and it is not being routed
+// unless all of them are. The first failure is the one reported: listing them
+// all would make the condition message unreadable without saying anything the
+// first does not.
+func registrationError(p *crispv1alpha1.CustomResourceProjection, unregistered map[schema.GroupVersion]error) error {
+	if len(unregistered) == 0 {
+		return nil
+	}
+
+	versions := []string{p.Spec.Resource.Version}
+	for _, version := range p.Spec.Resource.Versions {
+		if version.Served != nil && !*version.Served {
+			continue
+		}
+		versions = append(versions, version.Name)
+	}
+
+	for _, version := range versions {
+		gv := schema.GroupVersion{Group: p.Spec.Resource.Group, Version: version}
+		if err, ok := unregistered[gv]; ok {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) updateStatus(
+	ctx context.Context,
+	p *crispv1alpha1.CustomResourceProjection,
+	failure error,
+	unreachable error,
+	unregistered error,
+	servingPrevious bool,
+) error {
+	conditions := append([]metav1.Condition(nil), p.Status.Conditions...)
+	generation := p.Generation
+
+	setStatus := func(conditionType string, status metav1.ConditionStatus, reason, message string) {
+		apimeta.SetStatusCondition(&conditions, metav1.Condition{
+			Type:               conditionType,
+			Status:             status,
+			ObservedGeneration: generation,
+			Reason:             reason,
+			Message:            message,
+		})
+	}
+
+	set := func(conditionType string, ok bool, reason, message string) {
+		status := metav1.ConditionFalse
+		if ok {
+			status = metav1.ConditionTrue
+		}
+		setStatus(conditionType, status, reason, message)
+	}
+
+	// Unknown is for a condition nothing has answered yet, as distinct from one
+	// answered in the negative.
+	setUnknown := func(conditionType, reason, message string) {
+		setStatus(conditionType, metav1.ConditionUnknown, reason, message)
+	}
+
+	var servedPaths []string
+	if failure == nil {
+		servedPaths = []string{fmt.Sprintf("/apis/%s/%s/%s",
+			p.Spec.Resource.Group, p.Spec.Resource.Version, p.Spec.Resource.Plural)}
+		for _, version := range p.Spec.Resource.Versions {
+			if version.Served != nil && !*version.Served {
+				continue
+			}
+			servedPaths = append(servedPaths, fmt.Sprintf("/apis/%s/%s/%s",
+				p.Spec.Resource.Group, version.Name, p.Spec.Resource.Plural))
+		}
+
+		set(crispv1alpha1.ConditionSchemaResolved, true, "SchemaAccepted", "Projected schema accepted.")
+
+		if unreachable == nil {
+			set(crispv1alpha1.ConditionDataSourceConnected, true, "Connected",
+				fmt.Sprintf("Connected to the %s data source.", p.Spec.DataSource.Driver))
+		} else {
+			// Served but not answering: requests get 503 until it recovers.
+			set(crispv1alpha1.ConditionDataSourceConnected, false, "Unreachable", unreachable.Error())
+		}
+
+		switch {
+		case unregistered == nil:
+			set(crispv1alpha1.ConditionRegistered, true, "Routed",
+				"The aggregation layer is routing the projected group version here.")
+			set(crispv1alpha1.ConditionReady, true, "Serving", fmt.Sprintf("Serving %s.", servedPaths[0]))
+
+		case errors.Is(unregistered, errRegistrationPending):
+			// Registered, but nothing has confirmed it routes yet. Everything
+			// this server is responsible for is done, so Ready stands; the
+			// Registered condition is where the wait is visible.
+			setUnknown(crispv1alpha1.ConditionRegistered, "Pending", unregistered.Error())
+			set(crispv1alpha1.ConditionReady, true, "Serving", fmt.Sprintf("Serving %s.", servedPaths[0]))
+
+		default:
+			// Compiled and installed, but nothing can reach it. Ready used to
+			// be true here on the strength of the compile alone, so a
+			// projection whose APIService could not be created — or whose
+			// Service the aggregator could not dial — reported "Serving
+			// /apis/..." while every request for it returned NotFound.
+			set(crispv1alpha1.ConditionRegistered, false, "NotRouted", unregistered.Error())
+			set(crispv1alpha1.ConditionReady, false, "NotRegistered",
+				fmt.Sprintf("Compiled, but not reachable through the aggregation layer: %s", unregistered.Error()))
+		}
+	} else if servingPrevious {
+		// The generation in hand did not compile, so Ready is false for it —
+		// but the API group has not gone anywhere, and saying only
+		// "CompilationFailed" would send someone looking for an outage that is
+		// not happening.
+		set(crispv1alpha1.ConditionReady, false, "ServingPreviousConfiguration",
+			fmt.Sprintf("%s. The previously compiled configuration is still being served.", failure.Error()))
+	} else {
+		set(crispv1alpha1.ConditionReady, false, "CompilationFailed", failure.Error())
+	}
+
+	status := crispv1alpha1.CustomResourceProjectionStatus{
+		ObservedGeneration: generation,
+		Conditions:         conditions,
+		ServedPaths:        servedPaths,
+		// Reported whatever the projection's serving state, because a
+		// projection that failed to compile because its table is missing is
+		// exactly the one whose required schema someone wants to read.
+		RequiredSchema: projection.RequiredSchema(p.Spec),
+	}
+
+	// Against what this controller last wrote when it has written one, and only
+	// against the lister's copy on the first sync for this projection — where
+	// there is nothing else to go on, and the copy cannot be lagging a write
+	// this controller has not made.
+	if previous, written := c.lastStatus[p.Name]; written {
+		if statusUnchanged(previous, status) {
+			return nil
+		}
+	} else if statusUnchanged(p.Status, status) {
+		c.lastStatus[p.Name] = status
+		return nil
+	}
+
+	// Re-read and retry on conflict rather than reporting it and moving on. A
+	// conflict here is ordinary — the object is written by whoever applied it
+	// and by this controller — and dropping the write leaves the projection
+	// describing a state it is no longer in until something else happens to
+	// queue a sync. Observed doing exactly that: a rollout wrote
+	// Registered=False from a registration that had already recovered, the
+	// retry conflicted, and the projection reported an outage that was over.
+	client := c.client.CrispV1alpha1().CustomResourceProjections()
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := client.Get(ctx, p.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		// The conditions were computed against the generation this sync saw. If
+		// the object has moved on since, the next sync describes the new one
+		// and this write has nothing useful to say about it.
+		if current.Generation != p.Generation {
+			return nil
+		}
+		current.Status = status
+		_, err = client.UpdateStatus(ctx, current, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	c.lastStatus[p.Name] = status
+	return nil
+}
+
+// statusUnchanged reports whether writing the new status would be a no-op.
+// Without this check every status write would wake the informer and queue
+// another sync.
+func statusUnchanged(old, new crispv1alpha1.CustomResourceProjectionStatus) bool {
+	if old.ObservedGeneration != new.ObservedGeneration {
+		return false
+	}
+	if len(old.Conditions) != len(new.Conditions) || len(old.ServedPaths) != len(new.ServedPaths) {
+		return false
+	}
+	for i := range old.ServedPaths {
+		if old.ServedPaths[i] != new.ServedPaths[i] {
+			return false
+		}
+	}
+	for _, want := range new.Conditions {
+		got := apimeta.FindStatusCondition(old.Conditions, want.Type)
+		if got == nil ||
+			got.Status != want.Status ||
+			got.Reason != want.Reason ||
+			got.Message != want.Message ||
+			got.ObservedGeneration != want.ObservedGeneration {
+			return false
+		}
+	}
+
+	// Compared too, or a projection whose schema changed under an unchanged
+	// generation would go on reporting the old one. Both sides are built in a
+	// fixed order, so equality here is a comparison of content rather than of
+	// whichever order a map happened to produce.
+	return apiequality.Semantic.DeepEqual(old.RequiredSchema, new.RequiredSchema)
+}
+
+// warnAboutUnversionedProjections reports projections that cannot safely be
+// served by more than one replica.
+//
+// The resourceVersion a list reports is derived from the data when the
+// projection maps a version column, so every replica reading the same rows
+// reports the same thing. Without one it falls back to a counter that belongs
+// to this process — and two replicas then hand the same client versions that
+// mean different things, so a watch resumed against the other replica either
+// replays what the client has or skips what it does not.
+//
+// Documented as a limitation for a long time and checked by nothing, which is
+// the worst combination: the failure is silent, intermittent, and looks like a
+// client bug. It is a warning rather than a refusal because a single-replica
+// deployment is perfectly valid and this server cannot count its own peers —
+// leader election being on is the operator saying there are some.
+//
+// Warned once per projection rather than on every sync, since a sync happens
+// every time anything changes and this would otherwise be most of the log.
+func (c *Controller) warnIfUnversioned(p *crispv1alpha1.CustomResourceProjection) {
+	if !c.hasPeers || p == nil {
+		return
+	}
+
+	// Cleared when the projection is fixed. A gauge that can only be set is a
+	// gauge that cannot report that the condition ended, so an alert on it
+	// would fire until the process restarted — long after the resourceVersion
+	// column was added.
+	if p.Spec.Mapping.ResourceVersion != "" {
+		if c.warnedUnversioned[p.Name] {
+			delete(c.warnedUnversioned, p.Name)
+			crispmetrics.ProjectionsUnversioned.DeleteLabelValues(
+				p.Name, p.Spec.Resource.Plural+"."+p.Spec.Resource.Group)
+		}
+		return
+	}
+
+	resource := p.Spec.Resource.Plural + "." + p.Spec.Resource.Group
+	crispmetrics.ProjectionsUnversioned.WithLabelValues(p.Name, resource).Set(1)
+
+	if c.warnedUnversioned[p.Name] {
+		return
+	}
+	c.warnedUnversioned[p.Name] = true
+
+	klog.InfoS("projection maps no resourceVersion and this server has peers; "+
+		"the version a list reports comes from a per-replica counter, so two replicas "+
+		"give the same client versions that mean different things",
+		"projection", p.Name, "resource", resource,
+		"fix", "map a column that advances on every write to mapping.resourceVersion, "+
+			"or run a single replica")
+}

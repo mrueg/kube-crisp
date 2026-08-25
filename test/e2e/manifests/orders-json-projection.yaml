@@ -1,0 +1,69 @@
+# The same rows as the orders projection, but LIST is answered by a single
+# json_agg row so the database assembles the documents. Used by the benchmark
+# to compare row scanning against JSON aggregation.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: orders-json
+spec:
+  dataSource:
+    driver: postgres
+    secretRef:
+      name: orders-db
+      namespace: kube-crisp
+    dsnKey: dsn
+    maxOpenConns: 20
+    preparedStatements: true
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: JSONOrder
+    plural: jsonorders
+    singular: jsonorder
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            totalCents: {type: integer, format: int64}
+        status:
+          type: object
+          properties:
+            phase: {type: string}
+  queries:
+    list:
+      resultFormat: JSONArray
+      sql: |
+        SELECT COALESCE(json_agg(row_to_json(o) ORDER BY o.id), '[]'::json)
+        FROM (
+          SELECT id, tenant, customer, status, total_cents, updated_at
+          FROM orders
+          WHERE (:namespace::text IS NULL OR tenant = :namespace)
+          LIMIT COALESCE(:limit, 100000)
+        ) AS o
+      timeout: 60s
+      maxRows: 50000
+    get:
+      sql: |
+        SELECT id, tenant, customer, status, total_cents, updated_at
+        FROM orders
+        WHERE tenant = :namespace AND id = :name
+      timeout: 10s
+  # The benchmark lists this projection repeatedly; polling it on a timer would
+  # compete with the measurement.
+  watch:
+    disabled: true
+
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    labels:
+      store.example.com/status: status
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: total_cents, path: spec.totalCents, type: integer}
+      - {column: status, path: status.phase}

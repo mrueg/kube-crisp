@@ -1,0 +1,88 @@
+# The same machinery over MySQL. Note what is missing compared to the PostgreSQL
+# projection: no RETURNING, so writes are executed and the row is read back, and
+# no ::text casts, because MySQL binds ? placeholders positionally.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: widgets
+spec:
+  dataSource:
+    driver: mysql
+    secretRef:
+      name: widgets-db
+      namespace: kube-crisp
+    dsnKey: dsn
+    maxOpenConns: 10
+    maxConcurrentQueries: 10
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: Widget
+    plural: widgets
+    singular: widget
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            colour: {type: string}
+            weightGrams: {type: integer, format: int64}
+    additionalPrinterColumns:
+      - name: Colour
+        type: string
+        jsonPath: .spec.colour
+  queries:
+    list:
+      sql: |
+        SELECT id, tenant, colour, weight_grams, updated_at
+        FROM widgets
+        WHERE (:namespace IS NULL OR tenant = :namespace)
+          AND (:after IS NULL OR id > :after)
+        ORDER BY id
+        -- MySQL accepts only a literal or a placeholder after LIMIT, never an
+        -- expression, which is why :limit always carries a value.
+        LIMIT :limit
+      timeout: 30s
+    get:
+      sql: |
+        SELECT id, tenant, colour, weight_grams, updated_at
+        FROM widgets
+        WHERE tenant = :namespace AND id = :name
+      timeout: 10s
+    create:
+      sql: |
+        INSERT INTO widgets (id, tenant, colour, weight_grams, updated_at)
+        VALUES (:id, :tenant, :colour, :weight_grams,
+                CAST(UNIX_TIMESTAMP(NOW(6)) * 1000000 AS UNSIGNED))
+      timeout: 10s
+    delete:
+      sql: |
+        DELETE FROM widgets WHERE tenant = :namespace AND id = :name
+      timeout: 10s
+    count:
+      sql: SELECT COUNT(*) FROM widgets WHERE (:namespace IS NULL OR tenant = :namespace)
+      timeout: 10s
+  watch:
+    pollInterval: 1s
+    fullResyncInterval: 10s
+    # Incremental polling on MySQL too: updated_at is assigned by the statement
+    # below, so it moves forward on every write.
+    query:
+      sql: |
+        SELECT id, tenant, colour, weight_grams, updated_at
+        FROM widgets
+        -- updated_at is a VARCHAR here, and MySQL would compare it lexically,
+        -- so "1755..." would sort before "2". Compare as numbers.
+        WHERE (:since IS NULL OR CAST(updated_at AS UNSIGNED) > CAST(:since AS UNSIGNED))
+        ORDER BY CAST(updated_at AS UNSIGNED) ASC
+        LIMIT :limit
+      timeout: 30s
+  mapping:
+    name: id
+    namespace: tenant
+    resourceVersion: updated_at
+    fields:
+      - {column: colour, path: spec.colour}
+      - {column: weight_grams, path: spec.weightGrams, type: integer}

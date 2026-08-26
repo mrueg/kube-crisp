@@ -928,11 +928,11 @@ func (r *REST) getObject(ctx context.Context, name string, mode readMode) (runti
 	// The get query's parameters when there is one; otherwise the list's, since
 	// a projection with no get query filters the list instead and it is those
 	// bindings that scoped the row.
-	callerParams := r.list.parameters
+	callerQuery := r.list
 	if r.get != nil {
-		callerParams = r.get.parameters
+		callerQuery = r.get
 	}
-	key := objectKey(namespace, name) + sessionKey(session) + r.callerKey(ctx, callerParams)
+	key := objectKey(namespace, name) + sessionKey(session) + r.callerKey(ctx, callerQuery)
 	if mode == shared {
 		if cached, ok := r.cache.getObject(key); ok {
 			// Answered without touching the database; the cache has its own
@@ -1008,7 +1008,7 @@ func (r *REST) List(ctx context.Context, options *metainternalversion.ListOption
 
 	// A cached page may be older than the version the client insists on.
 	session := r.session(ctx, namespace, "")
-	key := listKey(namespace, options) + sessionKey(session) + r.callerKey(ctx, r.list.parameters)
+	key := listKey(namespace, options) + sessionKey(session) + r.callerKey(ctx, r.list)
 	if cached, ok := r.cache.getList(key); ok && r.freshEnough(cached, options) {
 		return cached, nil
 	}
@@ -1336,34 +1336,86 @@ func (r *REST) session(ctx context.Context, namespace, name string) []crispsql.S
 // Empty unless a query actually declares a caller-derived parameter, so a
 // projection that does not scope by identity pays nothing and keys exactly as
 // before.
-func (r *REST) callerKey(ctx context.Context, params []crispv1alpha1.QueryParameter) string {
-	var (
-		b      strings.Builder
-		caller map[string]any
-	)
-	for _, p := range params {
-		var key string
-		switch p.From {
-		case crispv1alpha1.ParameterSourceRequestUser:
-			key = "user"
-		case crispv1alpha1.ParameterSourceRequestUserUID:
-			key = "userUID"
-		case crispv1alpha1.ParameterSourceRequestUserGroups:
-			key = "userGroups"
-		case crispv1alpha1.ParameterSourceRequestUserExtra:
-			key = "userExtra"
-		default:
-			continue
-		}
-		if caller == nil {
-			caller = callerArgs(ctx)
-		}
+func (r *REST) callerKey(ctx context.Context, query *compiledQuery) string {
+	bindings := query.callerBindings()
+	if len(bindings) == 0 {
+		return ""
+	}
+
+	caller := callerArgs(ctx)
+	var b strings.Builder
+	for _, binding := range bindings {
 		b.WriteByte(0)
-		b.WriteString(p.Name)
+		b.WriteString(binding.name)
 		b.WriteByte('=')
-		writeBound(&b, caller[key])
+		writeBound(&b, caller[binding.source])
 	}
 	return b.String()
+}
+
+// callerBinding is one caller-derived value a query binds: the name it is bound
+// under, and which part of the caller it comes from.
+type callerBinding struct {
+	name   string
+	source string
+}
+
+// builtinCallerArgs are bound on every query whether or not it declares
+// anything, which is what makes them the documented way to scope rows to the
+// caller — "always available", per the reference.
+var builtinCallerArgs = map[string]bool{
+	"user": true, "userUID": true, "userGroups": true, "userExtra": true,
+}
+
+// callerBindings names every caller-derived value this query actually binds.
+//
+// Both ways of binding one count, and the second is the reason this exists.
+// Declaring a parameter with from: RequestUser is one way; writing :user
+// straight into the statement is the other, and it is the one the reference and
+// the shipped example use. Keying the read cache off the declared parameters
+// alone therefore gave every caller the same key for the second form, and the
+// second caller was served the first one's rows for the whole cacheTTL.
+//
+// Derived from what will be bound rather than from what was declared, which is
+// the same rule flightKey already follows for in-flight coalescing.
+func (c *compiledQuery) callerBindings() []*callerBinding {
+	if c == nil {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	var out []*callerBinding
+	add := func(name, source string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, &callerBinding{name: name, source: source})
+	}
+
+	for _, p := range c.parameters {
+		switch p.From {
+		case crispv1alpha1.ParameterSourceRequestUser:
+			add(p.Name, "user")
+		case crispv1alpha1.ParameterSourceRequestUserUID:
+			add(p.Name, "userUID")
+		case crispv1alpha1.ParameterSourceRequestUserGroups:
+			add(p.Name, "userGroups")
+		case crispv1alpha1.ParameterSourceRequestUserExtra:
+			add(p.Name, "userExtra")
+		}
+	}
+	for _, stmt := range c.all() {
+		for _, name := range stmt.Params {
+			if builtinCallerArgs[name] {
+				add(name, name)
+			}
+		}
+	}
+
+	// Stable, because this builds a cache key.
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
 }
 
 func sessionKey(session []crispsql.SessionVariable) string {

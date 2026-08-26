@@ -471,5 +471,9 @@ func (o *CrispServerOptions) RunCrispServer(ctx context.Context) error {
 		return err
 	}
 
+	// After serving, not from a pre-shutdown hook: those run before in-flight
+	// requests drain, and the requests still being answered need the database.
+	defer server.ClosePools()
+
 	return server.GenericAPIServer.PrepareRun().RunWithContext(ctx)
 }

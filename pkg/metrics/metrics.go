@@ -50,6 +50,18 @@ const (
 	ConnectionsWaited = "wait_count"
 )
 
+// Outcomes of one admission review.
+const (
+	// AdmissionAllowed is a projection the webhook had no objection to.
+	AdmissionAllowed = "allowed"
+	// AdmissionDenied is one it refused, which is the webhook working.
+	AdmissionDenied = "denied"
+	// AdmissionError is a request it could not answer at all — malformed, or
+	// not an admission review. Distinct from denied, because a request the
+	// webhook could not read says nothing about the projection in it.
+	AdmissionError = "error"
+)
+
 // Reasons a pooled connection was closed rather than returned to the pool.
 const (
 	ClosedMaxIdle     = "max_idle"
@@ -506,6 +518,63 @@ var (
 		[]string{"datasource", "state"},
 	)
 
+	// AdmissionReviews counts admission requests the projection webhook
+	// answered, by outcome.
+	//
+	// Nothing measured this path, and it is one that can fail silently: the
+	// webhook's policy is Ignore, so a configuration the kube-apiserver cannot
+	// call is a webhook that is skipped rather than one that errors. This
+	// series going flat at zero is what that looks like, and it is the only
+	// thing that would have shown it.
+	AdmissionReviews = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Namespace:      "kube_crisp",
+			Subsystem:      "admission",
+			Name:           "reviews_total",
+			Help:           "Admission reviews answered by the projection webhook, by result.",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"result"},
+	)
+
+	// AdmissionDuration is how long answering one took.
+	//
+	// The check reaches the database to ask whether it could run the
+	// projection's statements, so this is a database round trip inside an
+	// admission request — and an admission request the cluster gives ten
+	// seconds before it gives up on.
+	AdmissionDuration = metrics.NewHistogramVec(
+		&metrics.HistogramOpts{
+			Namespace:      "kube_crisp",
+			Subsystem:      "admission",
+			Name:           "duration_seconds",
+			Help:           "Time spent answering an admission review.",
+			Buckets:        metrics.ExponentialBuckets(0.005, 2, 10),
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"result"},
+	)
+
+	// ProjectionState reports the state of each projection by name.
+	//
+	// Projections counts them by state, which answers "is anything wrong" and
+	// not "what". An alert on it can say one projection failed and cannot say
+	// which, so the next step is always to go and look — and the controller
+	// knew the name all along, since it keeps the same list for the
+	// projections-degraded health check.
+	//
+	// One series per projection per state, with exactly one of them at 1.
+	ProjectionState = metrics.NewGaugeVec(
+		&metrics.GaugeOpts{
+			Namespace:      "kube_crisp",
+			Subsystem:      "",
+			Name:           "projection_state",
+			Help:           "Current state of each projection: 1 for the state it is in, 0 for the others.",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"projection", "resource", "state"},
+	)
+
 	// DataSourceConnectionsClosed counts connections the pool discarded instead
 	// of keeping, by reason.
 	//
@@ -580,6 +649,9 @@ func init() {
 		WatchMissedEvents,
 		WatchPollDuration,
 		WatchPollErrors,
+		AdmissionReviews,
+		AdmissionDuration,
+		ProjectionState,
 		DataSourceConnections,
 		DataSourceConnectionsClosed,
 		DataSourceWaitSeconds,

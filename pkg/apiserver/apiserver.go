@@ -346,6 +346,7 @@ func (s *CrispServer) installController(c CompletedConfig, compiler *dynamic.Com
 		SecretInformers:    secretInformers,
 		APIServiceInformer: apiServiceInformer,
 		Client:             c.ExtraConfig.CrispClient,
+		EventClient:        c.ExtraConfig.KubeClient,
 		DynamicClient:      c.ExtraConfig.DynamicClient,
 		Factory:            factory,
 		Compiler:           compiler,

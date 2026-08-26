@@ -28,18 +28,23 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
 	apidynamic "github.com/mrueg/kube-crisp/pkg/apiserver/dynamic"
+	crispscheme "github.com/mrueg/kube-crisp/pkg/apiserver/scheme"
 	crispclient "github.com/mrueg/kube-crisp/pkg/generated/clientset/versioned"
 	crispinformers "github.com/mrueg/kube-crisp/pkg/generated/informers/externalversions"
 	crisplisters "github.com/mrueg/kube-crisp/pkg/generated/listers/crisp/v1alpha1"
 	crispmetrics "github.com/mrueg/kube-crisp/pkg/metrics"
 	"github.com/mrueg/kube-crisp/pkg/projection"
+	projectionregistry "github.com/mrueg/kube-crisp/pkg/registry/projection"
 	crispsql "github.com/mrueg/kube-crisp/pkg/sql"
 )
 
@@ -122,6 +127,17 @@ type Controller struct {
 	hasPeers          bool
 	warnedUnversioned map[string]bool
 
+	// reportedStates names the projections that currently have a
+	// projection_state series, so the ones that go away take their series with
+	// them. Only ever touched from sync.
+	reportedStates []string
+
+	// recorder writes Events against projections; nil when no client was given.
+	// events remembers the last one written for each projection, so a state
+	// that has not changed is not re-announced on every sync.
+	recorder record.EventRecorder
+	events   map[string]string
+
 	// compiled remembers what each projection last compiled to, keyed by
 	// projection name. Only sync touches it, and sync runs on one worker.
 	//
@@ -195,6 +211,15 @@ type Options struct {
 	// APIServices controls whether this server registers the groups it serves
 	// with the aggregation layer, and how it describes itself when it does.
 	APIServices APIServiceOptions
+
+	// EventClient records Events against projections. Optional: without it the
+	// controller reports through conditions and the log only.
+	//
+	// Conditions say what a projection's state is now; an Event says that it
+	// changed and when. That is what kubectl describe shows, and what anything
+	// watching for failures reacts to — neither of which a condition alone
+	// reaches.
+	EventClient kubernetes.Interface
 }
 
 // New builds a controller. The caller owns starting the informer factory.
@@ -222,6 +247,17 @@ func New(opts Options) *Controller {
 		queue: workqueue.NewTypedRateLimitingQueue[string](
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 		),
+	}
+
+	if opts.EventClient != nil {
+		broadcaster := record.NewBroadcaster()
+		broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
+			Interface: opts.EventClient.CoreV1().Events(""),
+		})
+		projectionScheme, _ := crispscheme.New()
+		c.recorder = broadcaster.NewRecorder(
+			projectionScheme, corev1.EventSource{Component: "kube-crisp"})
+		c.events = map[string]string{}
 	}
 
 	_, _ = c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -580,6 +616,9 @@ func (c *Controller) sync(ctx context.Context) error {
 	}
 	crispmetrics.Projections.WithLabelValues(crispmetrics.ProjectionUnrouted).Set(float64(unrouted))
 
+	c.reportProjectionStates(candidates, failures, stale, unregistered)
+	c.recordProjectionEvents(candidates, failures, stale, unregistered)
+
 	// Look again shortly while any group version is unregistered or waiting to
 	// be dialled.
 	//
@@ -696,6 +735,136 @@ func (c *Controller) watchStaticDir(ctx context.Context) {
 }
 
 // updateStatus reports whether a projection is being served.
+// reportProjectionStates publishes the state of each projection by name.
+//
+// The aggregate counts answer whether anything is wrong; this answers which.
+// An alert on the counts can only say that one projection failed, and the next
+// step is always to go and look — while the name was here the whole time.
+//
+// Series for projections that have gone are removed, or a projection deleted
+// while it was failing would go on reporting that it is, forever.
+func (c *Controller) reportProjectionStates(
+	candidates []projectionCandidate,
+	failures map[string]error,
+	stale map[string]struct{},
+	unregistered map[schema.GroupVersion]error,
+) {
+	live := map[string]bool{}
+
+	for _, cand := range candidates {
+		name := cand.projection.Name
+		live[name] = true
+		resource := projectionregistry.ResourceLabel(cand.projection.Spec.Resource)
+
+		state := crispmetrics.ProjectionServing
+		switch {
+		case failures[name] != nil:
+			if _, servingPrevious := stale[name]; servingPrevious {
+				state = crispmetrics.ProjectionStale
+			} else {
+				state = crispmetrics.ProjectionFailed
+			}
+		case registrationError(cand.projection, unregistered) != nil &&
+			!errors.Is(registrationError(cand.projection, unregistered), errRegistrationPending):
+			state = crispmetrics.ProjectionUnrouted
+		}
+
+		// One series per state with exactly one of them set, so a query can ask
+		// for a state without knowing which states exist, and a transition
+		// leaves nothing behind claiming the old one.
+		for _, candidateState := range []string{
+			crispmetrics.ProjectionServing, crispmetrics.ProjectionFailed,
+			crispmetrics.ProjectionStale, crispmetrics.ProjectionUnrouted,
+		} {
+			value := 0.0
+			if candidateState == state {
+				value = 1
+			}
+			crispmetrics.ProjectionState.WithLabelValues(name, resource, candidateState).Set(value)
+		}
+	}
+
+	for _, name := range c.reportedStates {
+		if !live[name] {
+			crispmetrics.ProjectionState.DeletePartialMatch(map[string]string{"projection": name})
+		}
+	}
+	c.reportedStates = c.reportedStates[:0]
+	for name := range live {
+		c.reportedStates = append(c.reportedStates, name)
+	}
+}
+
+// recordProjectionEvents announces a projection changing state.
+//
+// Conditions say what the state is now, which is what a controller reconciling
+// against it needs. An Event says that it changed and when, which is what
+// kubectl describe shows and what anything watching for failures reacts to —
+// and a condition reaches neither.
+//
+// Only on a change. A sync runs every time anything moves and a projection's
+// state is usually the same as it was, so announcing it each time would bury
+// the one that matters under thousands that do not. Kubernetes aggregates
+// repeated Events, but aggregation is not a reason to send them.
+func (c *Controller) recordProjectionEvents(
+	candidates []projectionCandidate,
+	failures map[string]error,
+	stale map[string]struct{},
+	unregistered map[schema.GroupVersion]error,
+) {
+	if c.recorder == nil {
+		return
+	}
+
+	live := map[string]bool{}
+	for _, cand := range candidates {
+		// A projection loaded from a file has no object in the cluster to hang
+		// an Event on.
+		if cand.stored == nil {
+			continue
+		}
+		name := cand.projection.Name
+		live[name] = true
+
+		kind, reason, message := projectionEvent(cand.projection, failures[name], stale, unregistered)
+		if c.events[name] == reason+message {
+			continue
+		}
+		c.events[name] = reason + message
+		c.recorder.Event(cand.stored, kind, reason, message)
+	}
+
+	for name := range c.events {
+		if !live[name] {
+			delete(c.events, name)
+		}
+	}
+}
+
+// projectionEvent describes a projection's state as an Event.
+func projectionEvent(
+	p *crispv1alpha1.CustomResourceProjection,
+	failure error,
+	stale map[string]struct{},
+	unregistered map[schema.GroupVersion]error,
+) (kind, reason, message string) {
+	if failure != nil {
+		if _, servingPrevious := stale[p.Name]; servingPrevious {
+			return corev1.EventTypeWarning, "ServingPreviousConfiguration",
+				fmt.Sprintf("%s. The previously compiled configuration is still being served, "+
+					"so requests succeed and the spec answering them is not the spec that was applied.", failure)
+		}
+		return corev1.EventTypeWarning, "CompilationFailed", failure.Error()
+	}
+
+	if err := registrationError(p, unregistered); err != nil && !errors.Is(err, errRegistrationPending) {
+		return corev1.EventTypeWarning, "NotRouted", err.Error()
+	}
+
+	return corev1.EventTypeNormal, "Serving",
+		fmt.Sprintf("Serving %s.%s", p.Spec.Resource.Plural, p.Spec.Resource.Group)
+}
+
 // projectionCandidate is one projection under consideration for installation,
 // from the cluster or from a file.
 type projectionCandidate struct {

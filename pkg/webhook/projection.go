@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/klog/v2"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
+	crispmetrics "github.com/mrueg/kube-crisp/pkg/metrics"
 )
 
 // Path is where the projection webhook is served.
@@ -88,7 +90,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // review answers one admission request.
+//
+// Measured, because this path can fail without failing: the webhook's policy is
+// Ignore, so a configuration the kube-apiserver cannot call means admission is
+// skipped rather than erroring. A count that goes flat at zero is what that
+// looks like from here, and nothing else shows it.
 func (h *Handler) review(ctx context.Context, request *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
+	started := time.Now()
+	result := crispmetrics.AdmissionAllowed
+	defer func() {
+		crispmetrics.AdmissionReviews.WithLabelValues(result).Inc()
+		crispmetrics.AdmissionDuration.WithLabelValues(result).Observe(time.Since(started).Seconds())
+	}()
+
 	allowed := func() *admissionv1.AdmissionResponse {
 		return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
 	}
@@ -100,12 +114,15 @@ func (h *Handler) review(ctx context.Context, request *admissionv1.AdmissionRequ
 
 	var p crispv1alpha1.CustomResourceProjection
 	if err := json.Unmarshal(request.Object.Raw, &p); err != nil {
+		// Not a refusal of the projection: there was no projection to refuse.
+		result = crispmetrics.AdmissionError
 		return denied(request.UID, fmt.Sprintf("this is not a CustomResourceProjection: %v", err))
 	}
 
 	if err := h.Checker.Check(ctx, &p); err != nil {
 		klog.V(2).InfoS("rejecting a projection at admission",
 			"projection", p.Name, "err", err)
+		result = crispmetrics.AdmissionDenied
 		return denied(request.UID, err.Error())
 	}
 

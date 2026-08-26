@@ -253,6 +253,9 @@ Published on the apiserver's own `/metrics`, alongside the standard apiserver re
 | `kube_crisp_projections{state="failed"}` | Projections defined but not served |
 | `kube_crisp_projections{state="stale"}` | Projections still serving what they last compiled, having failed to recompile since |
 | `kube_crisp_watch_poll_duration_seconds` | Cost of one poll and diff |
+| `kube_crisp_projection_state` | The state of each projection **by name**, one series per state with exactly one set. `kube_crisp_projections` counts them and answers whether anything is wrong; this answers which |
+| `kube_crisp_admission_reviews_total` | Admission reviews the projection webhook answered, by result. Going flat at zero is how a webhook the cluster cannot call looks from here — its policy is `Ignore`, so nothing else reports it |
+| `kube_crisp_admission_duration_seconds` | Time to answer one. The check reaches the database, inside a request the cluster gives ten seconds |
 | `kube_crisp_datasource_connections` | Pool state, so exhaustion shows up before latency does |
 | `kube_crisp_datasource_connections_closed_total` | Connections discarded rather than reused, by reason — `max_idle` climbing with request volume means the pool is smaller than the concurrency it serves, and every query past the limit is paying to reconnect |
 | `kube_crisp_datasource_wait_seconds_total` | Time spent waiting for a connection — with the wait count, the average wait |
@@ -364,6 +367,29 @@ from, so a future version of component-base that changes them will not do it qui
 The same spans also nest into the trace lines the server already logs at `--v=2`, so a slow request
 shows its query breakdown in the log without a collector deployed at all.
 
+
+## Events
+
+A projection records an Event when its state changes: `Serving`, `CompilationFailed`,
+`ServingPreviousConfiguration`, `NotRouted`. Conditions say what the state is now, which is what a
+controller reconciling against it needs; an Event says that it changed and when, which is what
+`kubectl describe` shows and what anything watching for failures reacts to.
+
+```console
+$ kubectl describe crp orders | tail -4
+Events:
+  Type     Reason              Age   From        Message
+  ----     ------              ----  ----        -------
+  Warning  CompilationFailed   2m    kube-crisp  queries.list: the database cannot run this statement: ERROR: relation "orders" does not exist (SQLSTATE 42P01)
+```
+
+Only on a change. A sync runs whenever anything moves and a projection is usually where it was, so
+announcing every sync would bury the one that matters. Recording needs the `events` rule in
+`manifests/20-rbac.yaml`; without it the controller reports through conditions and the log alone, and
+carries on.
+
+A projection loaded from `--projection-dir` records nothing, because there is no object in the
+cluster to attach an Event to.
 
 ## Uninstalling
 

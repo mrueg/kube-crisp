@@ -68,6 +68,16 @@ for line in lines:
         out.append(f"{indent}base_image: gcr.io/distroless/base-debian12:nonroot")
         continue
 
+    # The e2e image's version is never read by anything, and deriving one from
+    # git makes every run depend on the repository's tags being semver. A
+    # backup tag, or anything else somebody tags a commit with, otherwise stops
+    # the whole suite with "invalid semantic version" and no hint that a tag is
+    # what did it.
+    if stripped.startswith("version_template:"):
+        indent = " " * (len(line) - len(line.lstrip()))
+        out.append(f'{indent}version_template: "0.0.0-e2e"')
+        continue
+
     if stripped in ("goos:", "goarch:", "platforms:"):
         indent = " " * (len(line) - len(line.lstrip()))
         out.append(line)

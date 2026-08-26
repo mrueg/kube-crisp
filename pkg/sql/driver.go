@@ -159,6 +159,24 @@ func init() {
 			Encrypted:        postgresEncrypted,
 		},
 		{
+			// CockroachDB speaks the PostgreSQL wire protocol, so it is the
+			// same driver and the same connection strings — but it has no
+			// LISTEN/NOTIFY.
+			//
+			// Registered separately for exactly that. Pointed at "postgres" it
+			// would be told notifications work, and a projection configuring
+			// watch.notify would subscribe to something that never fires and
+			// wait forever at its poll interval with nothing to say why. Named
+			// here, the same projection is refused at load time.
+			Name:             "cockroach",
+			SQLDriver:        "pgx",
+			Placeholders:     PlaceholderDollar,
+			SessionVariables: true,
+			StatementTimeout: true,
+			Notifications:    false,
+			Encrypted:        postgresEncrypted,
+		},
+		{
 			Name:             "mysql",
 			SQLDriver:        "mysql",
 			Placeholders:     PlaceholderQuestion,

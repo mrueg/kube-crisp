@@ -27,6 +27,7 @@ import (
 	apiservervalidation "k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	"k8s.io/apiextensions-apiserver/pkg/registry/customresource/tableconvertor"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -755,6 +756,9 @@ func compile(pool *crispsql.Pool, query *crispv1alpha1.Query, verb string) (*com
 		statement, err := pool.Prepare(source, durationOf(query.Timeout), maxRowsOf(query.MaxRows))
 		if err != nil {
 			return nil, fmt.Errorf("compiling %s query: %w", verb, err)
+		}
+		if declared := maxBytesOf(query.MaxBytes); declared > 0 {
+			statement.MaxBytes = declared
 		}
 		if last := i == len(sources)-1; last {
 			if query.ResultFormat == crispv1alpha1.ResultFormatJSONArray {
@@ -3225,3 +3229,23 @@ func maxRowsOf(v *int32) int {
 	}
 	return int(*v)
 }
+
+// maxBytesOf turns a declared quantity into a byte count, or 0 for the default.
+//
+// A negative or absurd value is treated as unset rather than refused, because
+// this bounds a read rather than describing one: the safe reading of a limit
+// nobody can have meant is the limit the server would have applied anyway.
+func maxBytesOf(q *resource.Quantity) int {
+	if q == nil {
+		return 0
+	}
+	value, ok := q.AsInt64()
+	if !ok || value <= 0 || value > maxInt {
+		return 0
+	}
+	return int(value)
+}
+
+// maxInt bounds the conversion below, since a quantity is an int64 and this
+// build's int may not be.
+const maxInt = int64(^uint(0) >> 1)

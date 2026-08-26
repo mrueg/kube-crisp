@@ -180,3 +180,48 @@ func TestEncryptedReadsTheConnectionString(t *testing.T) {
 		t.Error("sqlite reports on transport encryption, which would warn about a local file")
 	}
 }
+
+// TestCockroachIsPostgresWithoutNotifications is why it is registered at all.
+//
+// Pointed at "postgres" a CockroachDB projection is told notifications work.
+// It would then configure watch.notify, subscribe to something that never
+// fires, and fall back to its poll interval with nothing saying why. Named as
+// its own driver, the same projection is refused at load time.
+func TestCockroachIsPostgresWithoutNotifications(t *testing.T) {
+	cockroach, ok := Lookup("cockroach")
+	if !ok {
+		t.Fatal("the cockroach driver is not registered")
+	}
+	postgres, ok := Lookup("postgres")
+	if !ok {
+		t.Fatal("the postgres driver is not registered")
+	}
+
+	if SupportsNotifications("cockroach") {
+		t.Error("cockroach claims LISTEN/NOTIFY, which it does not have")
+	}
+	if !SupportsNotifications("postgres") {
+		t.Error("postgres lost LISTEN/NOTIFY")
+	}
+
+	// Everything else is the same database protocol, so anything that differs
+	// beyond notifications is a mistake rather than a decision.
+	if cockroach.SQLDriver != postgres.SQLDriver {
+		t.Errorf("cockroach uses driver %q, want %q", cockroach.SQLDriver, postgres.SQLDriver)
+	}
+	if cockroach.Placeholders != postgres.Placeholders {
+		t.Errorf("cockroach binds parameters differently from postgres")
+	}
+	if cockroach.SessionVariables != postgres.SessionVariables {
+		t.Errorf("cockroach disagrees with postgres about session variables")
+	}
+	if !SupportsStatementTimeout("cockroach") {
+		t.Error("cockroach cannot be asked to bound a statement")
+	}
+
+	// The same connection strings, so the unencrypted warning behaves the same.
+	const plain = "postgres://user:pass@db:26257/store?sslmode=disable"
+	if cockroach.Encrypted(plain) {
+		t.Error("an sslmode=disable connection was reported as encrypted")
+	}
+}

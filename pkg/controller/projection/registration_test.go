@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,13 +17,18 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/client-go/tools/cache"
+	metricstestutil "k8s.io/component-base/metrics/testutil"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
 	apidynamic "github.com/mrueg/kube-crisp/pkg/apiserver/dynamic"
 	crispfake "github.com/mrueg/kube-crisp/pkg/generated/clientset/versioned/fake"
 	crispinformers "github.com/mrueg/kube-crisp/pkg/generated/informers/externalversions"
+	crispmetrics "github.com/mrueg/kube-crisp/pkg/metrics"
 )
 
 // reportAvailability plays the part of the aggregation layer: it writes an
@@ -477,5 +484,149 @@ func TestStatusRewritesWhenTheRequiredSchemaChanges(t *testing.T) {
 	}
 	if !statusUnchanged(before, *before.DeepCopy()) {
 		t.Error("an unchanged status was treated as changed, which would write on every sync")
+	}
+}
+
+// TestProjectionStateNamesTheProjection is the gap this closes: the aggregate
+// counts answer whether anything is wrong and not which projection it is, so an
+// alert on them always ends with someone going to look.
+func TestProjectionStateNamesTheProjection(t *testing.T) {
+	crispmetrics.ProjectionState.Reset()
+	t.Cleanup(crispmetrics.ProjectionState.Reset)
+
+	f := newFixture(t, []runtime.Object{projectionObject("bins", "bins")})
+	f.syncUntil(t, func() bool { return len(f.router.ServedPaths()) == 1 })
+
+	serving, err := metricstestutil.GetGaugeMetricValue(crispmetrics.ProjectionState.WithLabelValues(
+		"bins", "bins.warehouse.example.com", crispmetrics.ProjectionServing))
+	if err != nil {
+		t.Fatalf("reading projection_state: %v", err)
+	}
+	if serving != 1 {
+		t.Errorf("projection_state{projection=bins,state=serving} = %v, want 1", serving)
+	}
+
+	// Exactly one state set, so a transition leaves nothing behind claiming the
+	// old one.
+	for _, other := range []string{
+		crispmetrics.ProjectionFailed, crispmetrics.ProjectionStale, crispmetrics.ProjectionUnrouted,
+	} {
+		got, err := metricstestutil.GetGaugeMetricValue(crispmetrics.ProjectionState.WithLabelValues(
+			"bins", "bins.warehouse.example.com", other))
+		if err != nil {
+			t.Fatalf("reading projection_state{state=%s}: %v", other, err)
+		}
+		if got != 0 {
+			t.Errorf("projection_state{state=%s} = %v, want 0", other, got)
+		}
+	}
+}
+
+// TestProjectionStateGoesWithTheProjection: a projection deleted while it was
+// failing would otherwise go on reporting that it is, for the life of the
+// process.
+func TestProjectionStateGoesWithTheProjection(t *testing.T) {
+	crispmetrics.ProjectionState.Reset()
+	t.Cleanup(crispmetrics.ProjectionState.Reset)
+
+	f := newFixture(t, []runtime.Object{projectionObject("bins", "bins")})
+	f.syncUntil(t, func() bool { return len(f.router.ServedPaths()) == 1 })
+
+	if got := testutil.CollectAndCount(crispmetrics.ProjectionState, "kube_crisp_projection_state"); got == 0 {
+		t.Fatal("the projection reports no state to begin with")
+	}
+
+	if err := f.client.CrispV1alpha1().CustomResourceProjections().Delete(
+		context.Background(), "bins", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("deleting the projection: %v", err)
+	}
+	f.syncUntil(t, func() bool { return len(f.router.ServedPaths()) == 0 })
+
+	if got := testutil.CollectAndCount(crispmetrics.ProjectionState, "kube_crisp_projection_state"); got != 0 {
+		t.Errorf("%d state series survived the projection being deleted", got)
+	}
+}
+
+// TestProjectionFailureIsAnnouncedAsAnEvent covers what conditions cannot do.
+//
+// A condition says what a projection's state is now, which is what a controller
+// reconciling against it needs. It does not say that the state changed, and it
+// is not what kubectl describe shows or what anything watching for failures
+// reacts to.
+func TestProjectionFailureIsAnnouncedAsAnEvent(t *testing.T) {
+	kube := k8sfake.NewSimpleClientset()
+	f := newFixtureWithEvents(t, kube, []runtime.Object{projectionObject("bins", "bins")})
+	f.syncUntil(t, func() bool { return len(f.router.ServedPaths()) == 1 })
+
+	events := recordedEvents(t, kube)
+	if len(events) == 0 {
+		t.Fatal("a projection came up and said nothing about it")
+	}
+	if events[0].Reason != "Serving" {
+		t.Errorf("first event reason = %q, want Serving", events[0].Reason)
+	}
+
+	// The same state again is not news. A sync runs whenever anything moves,
+	// and most syncs leave a projection exactly where it was.
+	//
+	// Counted through the Event's own Count rather than by counting objects:
+	// Kubernetes aggregates a repeat onto the existing Event and bumps that
+	// field, so the list stays one item long however many times it is sent.
+	// Asserting on the list length would pass whether or not this deduplicates.
+	before := totalEventCount(t, kube)
+	for i := 0; i < 3; i++ {
+		if err := f.controller.sync(context.Background()); err != nil {
+			t.Fatalf("sync() returned error: %v", err)
+		}
+	}
+	time.Sleep(time.Second)
+	if after := totalEventCount(t, kube); after != before {
+		t.Errorf("an unchanged projection announced itself again: total event count %d, was %d", after, before)
+	}
+}
+
+// totalEventCount sums the Count of every recorded Event, which is what grows
+// when the same one is sent twice.
+func totalEventCount(t *testing.T, kube *k8sfake.Clientset) int32 {
+	t.Helper()
+
+	var total int32
+	for _, event := range recordedEvents(t, kube) {
+		if event.Count == 0 {
+			total++
+			continue
+		}
+		total += event.Count
+	}
+	return total
+}
+
+// TestEventsAreOptional keeps the controller working where it was given no
+// client to record with — which is how every existing test runs it.
+func TestEventsAreOptional(t *testing.T) {
+	f := newFixture(t, []runtime.Object{projectionObject("bins", "bins")})
+	f.syncUntil(t, func() bool { return len(f.router.ServedPaths()) == 1 })
+
+	if f.controller.recorder != nil {
+		t.Error("a controller given no event client built a recorder anyway")
+	}
+}
+
+func recordedEvents(t *testing.T, kube *k8sfake.Clientset) []corev1.Event {
+	t.Helper()
+
+	// The broadcaster writes asynchronously.
+	var events []corev1.Event
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		list, err := kube.CoreV1().Events("").List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			t.Fatalf("listing events: %v", err)
+		}
+		events = list.Items
+		if len(events) > 0 || time.Now().After(deadline) {
+			return events
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

@@ -50,6 +50,14 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]
+  # Events say that a projection changed state and when, which is what kubectl
+  # describe shows and what anything watching for failures reacts to. The
+  # conditions on the projection say what the state is now; neither replaces the
+  # other. Patch as well as create, because Kubernetes aggregates a repeated
+  # Event onto the existing one rather than writing another.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
   {{- if .Values.crisp.manageAPIServices }}
   # The server registers the groups it serves with the aggregation layer and
   # withdraws the registration when the last projection in a group is deleted.

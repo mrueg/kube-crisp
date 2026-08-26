@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
@@ -117,6 +118,17 @@ type fixture struct {
 // projections, and the dynamic one for the APIServices it manages.
 func newFixture(t *testing.T, projections []runtime.Object, others ...runtime.Object) *fixture {
 	t.Helper()
+	return newFixtureWithEvents(t, nil, projections, others...)
+}
+
+// newFixtureWithEvents is newFixture with a client to record Events against.
+func newFixtureWithEvents(
+	t *testing.T,
+	events kubernetes.Interface,
+	projections []runtime.Object,
+	others ...runtime.Object,
+) *fixture {
+	t.Helper()
 
 	client := crispfake.NewSimpleClientset(projections...)
 	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
@@ -140,6 +152,7 @@ func newFixture(t *testing.T, projections []runtime.Object, others ...runtime.Ob
 	factory := crispinformers.NewSharedInformerFactory(client, 0)
 	controller := New(Options{
 		Client:        client,
+		EventClient:   events,
 		DynamicClient: dynamicClient,
 		Factory:       factory,
 		Compiler:      compiler,

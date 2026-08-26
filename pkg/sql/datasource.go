@@ -33,7 +33,15 @@ const (
 	// unbounded cache is unbounded state in the database as well as here.
 	DefaultMaxPreparedStatements = 256
 	DefaultMaxRows               = 5000
-	DefaultKeepAlive             = 30 * time.Second
+	// DefaultMaxBytes bounds a result set by size as well as by row count.
+	//
+	// maxRows alone does not bound memory: one row can carry a megabyte of
+	// JSON or text, and a JSON-aggregated read returns the whole collection as
+	// a single row, where maxRows never applies at all. Generous enough that an
+	// ordinary list never meets it, and low enough that one projection cannot
+	// take a server every other projection shares.
+	DefaultMaxBytes  = 64 << 20
+	DefaultKeepAlive = 30 * time.Second
 	// DefaultStatsInterval is how often pool statistics are republished. It is
 	// deliberately not DefaultKeepAlive: the two used to share a ticker, so
 	// keepAliveInterval: 0 — a supported setting, for a database behind a proxy
@@ -458,7 +466,10 @@ type Statement struct {
 	Params  []string
 	Timeout time.Duration
 	MaxRows int
-	Format  ResultFormat
+
+	// MaxBytes caps the size of the values a result set carries, in bytes.
+	MaxBytes int
+	Format   ResultFormat
 
 	// ReturnsRows records whether this statement answers with a result set, so
 	// a transaction knows whether to run it as a query or for its effect. The
@@ -496,11 +507,12 @@ func (p *Pool) Prepare(stmt string, timeout time.Duration, maxRows int) (*Statem
 		maxRows = DefaultMaxRows
 	}
 	return &Statement{
-		SQL:     rewritten,
-		Params:  names,
-		Timeout: timeout,
-		MaxRows: maxRows,
-		Format:  FormatRows,
+		SQL:      rewritten,
+		Params:   names,
+		Timeout:  timeout,
+		MaxRows:  maxRows,
+		MaxBytes: DefaultMaxBytes,
+		Format:   FormatRows,
 		// The pool's own settings, which are the defaults it was opened with.
 		// A projection that disagrees overrides them on the statement — see
 		// Statement.Prepared.
@@ -563,7 +575,7 @@ func (p *Pool) QueryWith(ctx context.Context, session []SessionVariable, stmt *S
 // row cap.
 func scanRows(rows *sql.Rows, stmt *Statement) ([]Row, error) {
 	if stmt.Format == FormatJSONArray {
-		return scanJSONArray(rows)
+		return scanJSONArray(rows, stmt.MaxBytes)
 	}
 
 	columns, err := rows.Columns()
@@ -586,7 +598,10 @@ func scanRows(rows *sql.Rows, stmt *Statement) ([]Row, error) {
 		scan[i] = &values[i]
 	}
 
-	var out []Row
+	var (
+		out   []Row
+		bytes int
+	)
 	for rows.Next() {
 		if len(out) >= stmt.MaxRows {
 			return nil, fmt.Errorf("result set exceeded maxRows (%d); narrow the query or raise the limit", stmt.MaxRows)
@@ -599,6 +614,15 @@ func scanRows(rows *sql.Rows, stmt *Statement) ([]Row, error) {
 		row := make(Row, len(columns))
 		for i, name := range columns {
 			row[name] = values[i]
+			bytes += valueSize(values[i])
+		}
+
+		// Counted as it accumulates rather than at the end, so a read that is
+		// going to be too large stops being read rather than being measured
+		// once it is already held.
+		if stmt.MaxBytes > 0 && bytes > stmt.MaxBytes {
+			return nil, fmt.Errorf("result set exceeded maxBytes (%d) after %d rows; "+
+				"narrow the query, select fewer columns, or raise the limit", stmt.MaxBytes, len(out)+1)
 		}
 		out = append(out, row)
 	}
@@ -925,7 +949,7 @@ func bind(stmt *Statement, args map[string]any) []any {
 // turns it into rows. This is the json_agg path: the database assembles the
 // documents and the server decodes one value instead of scanning every column
 // of every row.
-func scanJSONArray(rows *sql.Rows) ([]Row, error) {
+func scanJSONArray(rows *sql.Rows, maxBytes int) ([]Row, error) {
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("iterating rows: %w", err)
@@ -936,6 +960,15 @@ func scanJSONArray(rows *sql.Rows) ([]Row, error) {
 	var raw []byte
 	if err := rows.Scan(&raw); err != nil {
 		return nil, fmt.Errorf("scanning JSON aggregate: %w", err)
+	}
+
+	// Checked before decoding, which is where the cost doubles: the aggregate
+	// is already held once as bytes and is about to be held again as maps. This
+	// is the read maxRows cannot bound at all, because the whole collection
+	// arrives as one row.
+	if maxBytes > 0 && len(raw) > maxBytes {
+		return nil, fmt.Errorf("JSON aggregate exceeded maxBytes (%d bytes against a limit of %d); "+
+			"narrow the query or raise the limit", len(raw), maxBytes)
 	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
@@ -951,6 +984,25 @@ func scanJSONArray(rows *sql.Rows) ([]Row, error) {
 		out = append(out, Row(item))
 	}
 	return out, rows.Err()
+}
+
+// valueSize is roughly what a scanned value costs to hold.
+//
+// The variable-length types are what make a result set large; everything else
+// is a number, a bool, or a time, and counting those exactly would cost more
+// than it measures. Deliberately an estimate — it decides when to refuse a
+// read, not what to report.
+func valueSize(value any) int {
+	switch typed := value.(type) {
+	case nil:
+		return 0
+	case []byte:
+		return len(typed)
+	case string:
+		return len(typed)
+	default:
+		return 8
+	}
 }
 
 // PoolCache keeps one pool per data source key so that many projections

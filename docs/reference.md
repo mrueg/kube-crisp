@@ -882,6 +882,19 @@ table for this reason.
 CREATE INDEX orders_updated_at_idx ON orders (updated_at);
 ```
 
+**`maxRows` does not bound memory; `maxBytes` does.** A row can carry a megabyte of JSON or text, so
+a modest row count is still gigabytes — and `resultFormat: JSONArray` returns the whole collection as
+a single row, where `maxRows` never applies at all. `maxBytes` defaults to `64Mi` per result set and
+takes a quantity, so `512Ki` and `1Gi` both work. Exceeding it fails the read rather than truncating
+it, exactly as `maxRows` does.
+
+```yaml
+queries:
+  list:
+    maxBytes: 16Mi
+    sql: SELECT id, tenant, document FROM orders WHERE tenant = :namespace
+```
+
 **Raise `maxRows` for anything large.** A full resync reads the whole collection, so `queries.list`
 (or `watch.query`) has to be allowed to return all of it: a projection over 20,000 rows with the
 default `maxRows` of 5,000 fails every resync, and its watchers stop seeing deletions. The whole

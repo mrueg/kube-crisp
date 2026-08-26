@@ -541,6 +541,11 @@ func (in *Query) DeepCopyInto(out *Query) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.MaxBytes != nil {
+		in, out := &in.MaxBytes, &out.MaxBytes
+		x := (*in).DeepCopy()
+		*out = &x
+	}
 	return
 }
 

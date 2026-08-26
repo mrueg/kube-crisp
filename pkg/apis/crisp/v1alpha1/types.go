@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -683,6 +684,22 @@ type Query struct {
 	// MaxRows caps rows read from a single result set. Defaults to 5000.
 	// +optional
 	MaxRows *int32 `json:"maxRows,omitempty"`
+
+	// MaxBytes caps the size of the values a result set carries. Defaults to
+	// 64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+	//
+	// MaxRows does not bound memory on its own. One row can carry a megabyte
+	// of JSON or text, so a modest row count can still be gigabytes — and a
+	// query using resultFormat: JSONArray returns the whole collection as a
+	// single row, where MaxRows never applies at all. The server is shared by
+	// every projection, so a read that cannot be bounded is a read that can
+	// take the others with it.
+	//
+	// Exceeding it fails the read rather than truncating it, exactly as
+	// MaxRows does: a collection that silently omits rows is one a client
+	// cannot tell from a collection that genuinely has fewer.
+	// +optional
+	MaxBytes *resource.Quantity `json:"maxBytes,omitempty"`
 
 	// KeysetColumn names the column whose value the :after parameter carries
 	// between pages, for a list query that pages by key.

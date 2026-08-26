@@ -530,6 +530,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -651,6 +671,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -769,6 +809,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -890,6 +950,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -1011,6 +1091,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -1131,6 +1231,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -1253,6 +1373,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -1371,6 +1511,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -1492,6 +1652,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -2150,6 +2330,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.
@@ -2369,6 +2569,26 @@ spec:
                           repeat rows. Defaults to the column mapping.name reads, which is the
                           right answer for the usual "ORDER BY id" list.
                         type: string
+                      maxBytes:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxBytes caps the size of the values a result set carries. Defaults to
+                          64Mi. Written as a quantity, so "512Ki" and "1Gi" both work.
+
+                          MaxRows does not bound memory on its own. One row can carry a megabyte
+                          of JSON or text, so a modest row count can still be gigabytes — and a
+                          query using resultFormat: JSONArray returns the whole collection as a
+                          single row, where MaxRows never applies at all. The server is shared by
+                          every projection, so a read that cannot be bounded is a read that can
+                          take the others with it.
+
+                          Exceeding it fails the read rather than truncating it, exactly as
+                          MaxRows does: a collection that silently omits rows is one a client
+                          cannot tell from a collection that genuinely has fewer.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       maxRows:
                         description: MaxRows caps rows read from a single result set.
                           Defaults to 5000.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,10 @@ type Mapper struct {
 	// a ten thousand row list allocate forty thousand slices to say something
 	// the projection stated once.
 	fields []mappedField
+
+	// shared are the columns mapped both as a label or annotation and as a
+	// field, where only one of them can win a write.
+	shared []sharedColumn
 }
 
 // mappedField is one column-to-field rule with its destination pre-split.
@@ -118,7 +123,115 @@ func NewMapper(res crispv1alpha1.ProjectedResource, mapping crispv1alpha1.Mappin
 		namespaced: namespaced,
 		separator:  separator,
 		fields:     fields,
+		shared:     sharedColumns(mapping, fields),
 	}, nil
+}
+
+// sharedColumn is a column the projection reads twice: once through a label or
+// annotation key, and once through a field path.
+//
+// Reading it twice is a reasonable thing to want — select on it as a label,
+// show it as a field — and on the way out both are filled from the same column,
+// so they always agree. Writing is where they can disagree, and only one of
+// them can win.
+type sharedColumn struct {
+	column string
+
+	// kind is "label" or "annotation", and key is the one it is read under.
+	kind string
+	key  string
+
+	// path is where the field mapping reads the same column from.
+	path []string
+}
+
+// sharedColumns finds the columns a projection maps both ways.
+func sharedColumns(mapping crispv1alpha1.Mapping, fields []mappedField) []sharedColumn {
+	byColumn := make(map[string][]string, len(fields))
+	for i := range fields {
+		byColumn[fields[i].column] = fields[i].path
+	}
+
+	var shared []sharedColumn
+	for key, column := range mapping.Labels {
+		if path, ok := byColumn[column]; ok {
+			shared = append(shared, sharedColumn{column: column, kind: "label", key: key, path: path})
+		}
+	}
+	for key, column := range mapping.Annotations {
+		if path, ok := byColumn[column]; ok {
+			shared = append(shared, sharedColumn{column: column, kind: "annotation", key: key, path: path})
+		}
+	}
+
+	// A map has no order and this ends up in a warning message and a log line.
+	sort.Slice(shared, func(i, j int) bool {
+		if shared[i].column != shared[j].column {
+			return shared[i].column < shared[j].column
+		}
+		return shared[i].key < shared[j].key
+	})
+	return shared
+}
+
+// SharedColumns describes the columns this projection maps both as a
+// label or annotation and as a field, for reporting when a projection loads.
+func (m *Mapper) SharedColumns() []string {
+	out := make([]string, 0, len(m.shared))
+	for _, sc := range m.shared {
+		out = append(out, fmt.Sprintf("column %q is both %s %q and field %s",
+			sc.column, sc.kind, sc.key, strings.Join(sc.path, ".")))
+	}
+	return out
+}
+
+// DroppedOnWrite reports the labels and annotations a write would discard.
+//
+// A column mapped both ways can only be written from one of them, and the field
+// is the one that wins: Params binds the label first and the field mapping
+// overwrites it. That is a defensible choice — the field names an exact path
+// while the label is a view of it — but it is not one anybody can see. Changing
+// the label alone was answered 200, and kubectl said "labeled", and the row did
+// not move.
+//
+// So the write still goes through as it always did, and the client is told what
+// of it was ignored.
+func (m *Mapper) DroppedOnWrite(obj *unstructured.Unstructured) []string {
+	if len(m.shared) == 0 {
+		return nil
+	}
+
+	labels := obj.GetLabels()
+	annotations := obj.GetAnnotations()
+
+	var dropped []string
+	for _, sc := range m.shared {
+		asMetadata, present := labels[sc.key]
+		if sc.kind == "annotation" {
+			asMetadata, present = annotations[sc.key]
+		}
+
+		value, found, err := unstructured.NestedFieldNoCopy(obj.Object, sc.path...)
+		if err != nil {
+			continue
+		}
+		asField := ""
+		if found && value != nil {
+			asField = fmt.Sprint(value)
+		}
+
+		// Absent on both sides is agreement, not a conflict.
+		if !present && !found {
+			continue
+		}
+		if asMetadata == asField {
+			continue
+		}
+		dropped = append(dropped, fmt.Sprintf(
+			"%s %q was not written: it shares column %q with field %s, which the write set to %q",
+			sc.kind, sc.key, sc.column, strings.Join(sc.path, "."), asField))
+	}
+	return dropped
 }
 
 // DefaultNameSeparator joins the parts of a composite name.

@@ -1033,6 +1033,27 @@ func (c *PoolCache) Get(key string, open func() (*Pool, error)) (*Pool, error) {
 	return p, nil
 }
 
+// EvictIf closes and removes the pool for key, but only if it is still the pool
+// the caller was using.
+//
+// Evicting by key alone is unsafe from anywhere that does not hold the pool it
+// means to drop: the entry may have been replaced since, and closing the
+// replacement takes the database away from every projection now serving through
+// it. The admission check does exactly that — it retries after a pool is closed
+// underneath it, and by then the key may hold a live pool.
+func (c *PoolCache) EvictIf(key string, pool *Pool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	existing, ok := c.pools[key]
+	if !ok || existing != pool {
+		return false
+	}
+	_ = existing.Close()
+	delete(c.pools, key)
+	return true
+}
+
 // Evict closes and removes the pool for key.
 func (c *PoolCache) Evict(key string) {
 	c.mu.Lock()

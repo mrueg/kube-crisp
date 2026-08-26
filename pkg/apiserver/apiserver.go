@@ -220,6 +220,23 @@ func (c CompletedConfig) New() (*CrispServer, error) {
 		serving := c.GenericConfig.SecureServing
 		client := c.ExtraConfig.KubeClient
 
+		// A server on its way out must stop correcting the configuration.
+		//
+		// The certificate in it belongs to whichever pod wrote it, so a
+		// terminating pod whose reconcile fires during a rolling update points
+		// the cluster back at a certificate it is about to stop serving. Its
+		// replacement is already serving a different one, so admission then
+		// fails TLS — silently, because the policy is Ignore — until the next
+		// reconcile happens to correct it again.
+		//
+		// Pre-shutdown hooks run before anything drains, which is exactly when
+		// this should stop.
+		leaving := make(chan struct{})
+		genericServer.AddPreShutdownHookOrDie("kube-crisp-stop-webhook-reconcile", func() error {
+			close(leaving)
+			return nil
+		})
+
 		// Registered from a post-start hook rather than here: the certificate
 		// is loaded as part of starting to serve, so before that there is
 		// nothing to point the cluster at.
@@ -250,6 +267,11 @@ func (c CompletedConfig) New() (*CrispServer, error) {
 				// when the configuration has drifted from what this server can
 				// actually answer.
 				go wait.UntilWithContext(hookCtx.Context, func(ctx context.Context) {
+					select {
+					case <-leaving:
+						return
+					default:
+					}
 					if err := reconcileWebhookConfiguration(ctx, client, opts); err != nil {
 						klog.V(2).InfoS("could not reconcile the projection webhook configuration", "err", err)
 					}

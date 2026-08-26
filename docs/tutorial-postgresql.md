@@ -340,6 +340,71 @@ one a selector can filter on in the database — kube-crisp binds
 `kubectl get orders -l store.example.com/status in (shipped,pending)` becomes a
 query rather than a filter over everything.
 
+## Setting labels and annotations
+
+Labels and annotations are not read-only. Every mapped column is bound on writes
+as well as reads, so `kubectl label` and `kubectl annotate` reach the database —
+if the write statement sets the column. Annotations work the same way through
+`mapping.annotations` and `mapping.annotationsFrom`.
+
+```sql
+ALTER TABLE orders ADD COLUMN annotations jsonb;
+```
+
+```yaml
+  queries:
+    update:
+      sql: |
+        UPDATE orders
+        SET customer = :customer,
+            total_cents = :total_cents,
+            labels = :labels,
+            annotations = :annotations,
+            updated_at = (extract(epoch from clock_timestamp()) * 1000000)::bigint::text
+        WHERE tenant = :namespace AND id = :name
+          AND (:resourceVersion::text IS NULL OR updated_at = :resourceVersion)
+        RETURNING id, tenant, customer, labels, annotations, total_cents, updated_at
+
+  mapping:
+    labelsFrom: labels
+    annotationsFrom: annotations
+```
+
+```console
+$ kubectl label order order-1001 -n acme team=platform region=eu
+order.store.example.com/order-1001 labeled
+$ kubectl annotate order order-1001 -n acme owner=ada
+order.store.example.com/order-1001 annotated
+```
+
+```
+ labels                                | annotations
+---------------------------------------+------------------
+ {"team": "platform", "region": "eu"}   | {"owner": "ada"}
+```
+
+Removing one persists too: `kubectl label order order-1001 region-` rewrites the
+column without that key. The JSON column holds only what has no column of its
+own, so a key promoted into `mapping.labels` is not stored twice, and an object
+carrying no labels writes `NULL` rather than `{}`.
+
+**One column cannot be written from two places.** In the projection at the top
+of this tutorial `status` is mapped twice — as the label
+`store.example.com/status` and as the field `status.phase`. That is a good way
+to *read* it, and on the way out both are filled from the same column so they
+always agree. On a write only one of them can reach the column, and the field is
+the one that does:
+
+```console
+$ kubectl label order order-1001 -n acme store.example.com/status=cancelled --overwrite
+order.store.example.com/order-1001 labeled
+Warning: label "store.example.com/status" was not written: it shares column
+"status" with field status.phase, which the write set to "shipped"
+```
+
+The change to `status.phase` is what moves that column, and the label follows it
+on the next read. Map the key only one way if you want to write it as a label.
+
 ## Noticing a deletion without re-reading everything
 
 The incremental watch above reads forward from `:since`, so it never sees a row

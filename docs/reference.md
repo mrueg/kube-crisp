@@ -134,6 +134,29 @@ Fields the schema does not describe are pruned. What happens next follows the re
 `fieldValidation`: the default warns, `Strict` rejects, `Ignore` is silent. Dropping a field a user
 wrote without telling them is the thing worth avoiding.
 
+### Writing labels and annotations
+
+Every mapped column is bound on writes as well as reads, so `kubectl label` and `kubectl annotate`
+persist — provided the write statement sets the column. `mapping.labels` and `mapping.annotations`
+bind one column per key, with `NULL` rather than `""` for a key the object does not carry;
+`mapping.labelsFrom` and `mapping.annotationsFrom` bind a JSON column holding whatever has no column
+of its own, and `NULL` rather than `{}` for an object with none.
+
+**A column can only be written from one place.** Mapping one column both as a label and as a field is
+a reasonable way to read it — select on it as a label, show it as a field — and on the way out both
+are filled from the same column, so they always agree. On a write only one of them reaches the
+column, and the field does, because it names an exact path while the label is a view of it.
+
+The write still succeeds, and says what it ignored:
+
+```
+Warning: label "store.example.com/status" was not written: it shares column "status"
+with field status.phase, which the write set to "shipped"
+```
+
+Without that the request was answered `200`, `kubectl` reported `labeled`, and the row had not
+moved. The projection also says so once when it loads, naming the columns mapped both ways.
+
 ### Which verbs are advertised
 
 Discovery offers exactly the verbs a projection has queries for, and nothing else:

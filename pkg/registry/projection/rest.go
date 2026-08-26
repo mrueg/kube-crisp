@@ -510,6 +510,7 @@ func New(
 
 	writable := &WritableREST{REST: r}
 	writable.reportUnguardedUpdate(spec)
+	writable.reportSharedColumns()
 
 	storages := &Storages{Resource: newProjectionStorage(r, writable), read: r, writable: writable}
 	if r.statusSubresource {
@@ -541,6 +542,25 @@ func New(
 // which is what this is for. Only for projections that map a resourceVersion at
 // all, since without one there is no precondition to enforce and clients cannot
 // assert it.
+// reportSharedColumns says so when a projection maps one column both as a
+// label or annotation and as a field.
+//
+// Reading it twice is a reasonable thing to want: select on it as a label, show
+// it as a field. Writing is where they part company, because only one of them
+// can reach the column and the field is the one that does. Nothing is refused —
+// the read pattern is legitimate and common — but the author is told that half
+// of what they mapped is read-only, rather than finding out when kubectl says
+// "labeled" and the row has not moved.
+func (w *WritableREST) reportSharedColumns() {
+	shared := w.mapper.SharedColumns()
+	if len(shared) == 0 {
+		return
+	}
+	klog.InfoS("projection maps a column both as metadata and as a field; writes take the field and the label or annotation is read-only",
+		"projection", w.projection, "resource", w.label, "columns", shared,
+		"fix", "drop one of the two mappings, or expect to change the field rather than the label")
+}
+
 func (w *WritableREST) reportUnguardedUpdate(spec crispv1alpha1.CustomResourceProjectionSpec) {
 	if spec.Mapping.ResourceVersion == "" {
 		return
@@ -2360,6 +2380,13 @@ func (w *WritableREST) write(ctx context.Context, query *compiledQuery, obj *uns
 	params, err := w.mapper.Params(obj)
 	if err != nil {
 		return nil, 0, errors.NewInvalid(w.gvk.GroupKind(), name, nil)
+	}
+	// A column mapped both as a label and as a field can only be written from
+	// one of them, and the field wins. Said out loud, because the write is
+	// answered 200 either way and the part that was ignored is otherwise
+	// invisible — kubectl reports "labeled" for a row that did not move.
+	if dropped := w.mapper.DroppedOnWrite(obj); len(dropped) > 0 {
+		warning.AddWarning(ctx, "", strings.Join(dropped, "; "))
 	}
 	for k, v := range params {
 		args[k] = v

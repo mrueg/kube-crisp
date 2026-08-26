@@ -12,8 +12,10 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	metricstestutil "k8s.io/component-base/metrics/testutil"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
+	crispmetrics "github.com/mrueg/kube-crisp/pkg/metrics"
 )
 
 type stubChecker struct {
@@ -143,4 +145,74 @@ func TestRejectsMalformedInput(t *testing.T) {
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET returned %d, want 405", recorder.Code)
 	}
+}
+
+// TestAdmissionIsMeasured is why this path is instrumented at all.
+//
+// The webhook's failure policy is Ignore, so a configuration the kube-apiserver
+// cannot call means admission is skipped rather than failing. Nothing errors,
+// nothing logs, and a projection that would have been refused is accepted. A
+// count that stays at zero is what that looks like from here, and it is the
+// only thing that shows it.
+func TestAdmissionIsMeasured(t *testing.T) {
+	crispmetrics.AdmissionReviews.Reset()
+	t.Cleanup(crispmetrics.AdmissionReviews.Reset)
+
+	count := func(t *testing.T, result string) float64 {
+		t.Helper()
+		value, err := metricstestutil.GetCounterMetricValue(
+			crispmetrics.AdmissionReviews.WithLabelValues(result))
+		if err != nil {
+			t.Fatalf("reading admission_reviews_total{result=%s}: %v", result, err)
+		}
+		return value
+	}
+
+	allowing := &Handler{Checker: checkerFunc(func(context.Context, *crispv1alpha1.CustomResourceProjection) error {
+		return nil
+	})}
+	refusing := &Handler{Checker: checkerFunc(func(context.Context, *crispv1alpha1.CustomResourceProjection) error {
+		return errors.New("queries.list: the database cannot run this statement")
+	})}
+
+	request := func(raw string) *admissionv1.AdmissionRequest {
+		return &admissionv1.AdmissionRequest{
+			UID:       "probe",
+			Operation: admissionv1.Create,
+			Object:    runtime.RawExtension{Raw: []byte(raw)},
+		}
+	}
+	const valid = `{"apiVersion":"crisp.kubecrisp.io/v1alpha1","kind":"CustomResourceProjection","metadata":{"name":"bins"}}`
+
+	if response := allowing.review(context.Background(), request(valid)); !response.Allowed {
+		t.Fatal("a projection the checker accepted was refused")
+	}
+	if got := count(t, crispmetrics.AdmissionAllowed); got != 1 {
+		t.Errorf("allowed reviews = %v, want 1", got)
+	}
+
+	if response := refusing.review(context.Background(), request(valid)); response.Allowed {
+		t.Fatal("a projection the checker rejected was allowed")
+	}
+	if got := count(t, crispmetrics.AdmissionDenied); got != 1 {
+		t.Errorf("denied reviews = %v, want 1", got)
+	}
+
+	// A request that is not a projection at all is counted apart from one that
+	// is and was refused: the first says nothing about any projection.
+	if response := allowing.review(context.Background(), request(`{"this":`)); response.Allowed {
+		t.Fatal("a malformed request was allowed")
+	}
+	if got := count(t, crispmetrics.AdmissionError); got != 1 {
+		t.Errorf("errored reviews = %v, want 1", got)
+	}
+	if got := count(t, crispmetrics.AdmissionDenied); got != 1 {
+		t.Errorf("a malformed request was counted as a denial; denied = %v, want 1", got)
+	}
+}
+
+type checkerFunc func(context.Context, *crispv1alpha1.CustomResourceProjection) error
+
+func (f checkerFunc) Check(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) error {
+	return f(ctx, p)
 }

@@ -150,3 +150,54 @@ func TestClosingAPoolRemovesItsMetrics(t *testing.T) {
 		t.Errorf("%d prepared-statement series survived the pool being closed", after)
 	}
 }
+
+// TestEvictIfLeavesAReplacedPoolAlone is what makes eviction safe from a
+// caller that does not hold the cache lock.
+//
+// The admission check retries after a pool is closed underneath it, and by the
+// time it retries the key may hold a different, live pool — one that installed
+// projections are serving through. Evicting by key alone would close that.
+func TestEvictIfLeavesAReplacedPoolAlone(t *testing.T) {
+	cache := NewPoolCache()
+	t.Cleanup(cache.Close)
+
+	open := func(t *testing.T) *Pool {
+		t.Helper()
+		pool, err := Open(PoolOptions{Driver: "sqlite", DSN: filepath.Join(t.TempDir(), "evict.db")})
+		if err != nil {
+			t.Fatalf("opening the pool: %v", err)
+		}
+		return pool
+	}
+
+	first := open(t)
+	if _, err := cache.Get("k", func() (*Pool, error) { return first, nil }); err != nil {
+		t.Fatalf("seeding the cache: %v", err)
+	}
+
+	// Replaced, the way a later sync would.
+	cache.Evict("k")
+	second := open(t)
+	if _, err := cache.Get("k", func() (*Pool, error) { return second, nil }); err != nil {
+		t.Fatalf("re-seeding the cache: %v", err)
+	}
+
+	// A late caller still holding the first pool must not take the second away.
+	if cache.EvictIf("k", first) {
+		t.Error("EvictIf dropped the entry for a pool that had already been replaced")
+	}
+	if err := second.Ping(t.Context()); err != nil {
+		t.Errorf("the live pool was closed by an eviction meant for its predecessor: %v", err)
+	}
+
+	// And it still drops the pool it was actually given.
+	if !cache.EvictIf("k", second) {
+		t.Error("EvictIf did not drop the pool it was given")
+	}
+	if err := second.Ping(t.Context()); err == nil {
+		t.Error("EvictIf reported success without closing the pool")
+	}
+	if cache.Len() != 0 {
+		t.Errorf("the cache still holds %d pools", cache.Len())
+	}
+}

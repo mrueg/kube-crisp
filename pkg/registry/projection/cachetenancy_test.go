@@ -127,7 +127,7 @@ func TestReadCacheKeyIsUnchangedWithoutCallerParameters(t *testing.T) {
 		t.Fatal("expected a read-only projection")
 	}
 
-	if got := store.callerKey(userContext("acme", "ada"), store.list.parameters); got != "" {
+	if got := store.callerKey(userContext("acme", "ada"), store.list); got != "" {
 		t.Errorf("callerKey = %q for a projection with no caller-derived parameter, want empty "+
 			"so the key is what it always was", got)
 	}
@@ -144,5 +144,76 @@ func TestReadCacheKeyIsUnchangedWithoutCallerParameters(t *testing.T) {
 	if after := store.cache.Len(); after != before {
 		t.Errorf("the cache grew from %d to %d for a projection whose rows do not depend on the "+
 			"caller; identity is being keyed on when it need not be", before, after)
+	}
+}
+
+// builtinCallerSpec scopes rows to the caller by binding :user straight into
+// the statement, without declaring a parameter.
+//
+// This is the documented way to do it — the reference calls the caller bindings
+// "always available" and the shipped example uses them — which is what made
+// keying the cache off declared parameters alone a hole rather than a corner.
+func builtinCallerSpec() crispv1alpha1.CustomResourceProjectionSpec {
+	spec := testSpec()
+	spec.CacheTTL = &metav1.Duration{Duration: time.Minute}
+	spec.Watch = &crispv1alpha1.WatchSpec{Disabled: true}
+	spec.Queries.Get = nil
+	spec.Queries.List = crispv1alpha1.Query{
+		SQL: `SELECT id, tenant, customer, status, total_cents, line_items, updated_at
+		      FROM orders WHERE tenant = :namespace AND customer = :user`,
+	}
+	return spec
+}
+
+// TestReadCacheDoesNotCrossTenantsForBuiltinBindings is the same leak as above,
+// through the binding a projection gets without asking for it.
+//
+// callerKey used to walk the declared parameters, so a projection binding :user
+// directly produced one key for every caller and the second was served the
+// first one's rows for the whole cacheTTL. Reproduced before the fix: ada
+// listed her own row, then grace listed and was handed ada's.
+func TestReadCacheDoesNotCrossTenantsForBuiltinBindings(t *testing.T) {
+	store, ok := newStorage(t, builtinCallerSpec()).(*REST)
+	if !ok {
+		t.Fatal("expected a read-only projection")
+	}
+
+	customers := func(who string) []string {
+		t.Helper()
+
+		obj, err := store.List(userContext("acme", who), &metainternalversion.ListOptions{})
+		if err != nil {
+			t.Fatalf("List() as %s returned error: %v", who, err)
+		}
+		list, isList := obj.(*unstructured.UnstructuredList)
+		if !isList {
+			t.Fatalf("List() returned %T", obj)
+		}
+		out := make([]string, 0, len(list.Items))
+		for i := range list.Items {
+			customer, _, _ := unstructured.NestedString(list.Items[i].Object, "spec", "customer")
+			out = append(out, customer)
+		}
+		return out
+	}
+
+	if got := customers("ada"); len(got) != 1 || got[0] != "ada" {
+		t.Fatalf("ada was served %v, want her own row", got)
+	}
+	for _, customer := range customers("grace") {
+		if customer != "grace" {
+			t.Errorf("grace was served %q from the read cache", customer)
+		}
+	}
+
+	// The key has to distinguish them, and it is what will be bound that
+	// decides — not what was declared, which here is nothing.
+	ada := store.callerKey(userContext("acme", "ada"), store.list)
+	grace := store.callerKey(userContext("acme", "grace"), store.list)
+	if ada == "" {
+		t.Error("callerKey is empty for a query that binds :user")
+	}
+	if ada == grace {
+		t.Errorf("callerKey is %q for both callers", ada)
 	}
 }

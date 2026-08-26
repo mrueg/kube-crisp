@@ -118,7 +118,7 @@ func (c *Compiler) Prepare(ctx context.Context, p *crispv1alpha1.CustomResourceP
 // either way; refusing on it would make every projection unapplyable while a
 // database was down, including the ones that would fix it.
 func (c *Compiler) Check(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) error {
-	err := c.check(ctx, p)
+	used, err := c.check(ctx, p)
 
 	// A pool closed underneath the check is this server's bookkeeping, not
 	// anything about the projection.
@@ -136,13 +136,16 @@ func (c *Compiler) Check(ctx context.Context, p *crispv1alpha1.CustomResourcePro
 	if isClosedPool(err) {
 		klog.V(2).InfoS("the data source pool was closed while checking a projection; retrying",
 			"projection", p.Name)
-		if prepared, prepErr := c.Prepare(ctx, p); prepErr == nil {
-			c.Pools.Evict(prepared.PoolKey)
-			if prepared.ReadPoolKey != "" {
-				c.Pools.Evict(prepared.ReadPoolKey)
+		if used != nil {
+			// Compare-and-delete, so a pool that has already been replaced is
+			// left alone. Evicting by key would close whichever pool is under
+			// it now, which may be one live projections are serving through.
+			c.Pools.EvictIf(used.PoolKey, used.Pool)
+			if used.ReadPoolKey != "" && used.ReadPool != nil {
+				c.Pools.EvictIf(used.ReadPoolKey, used.ReadPool)
 			}
 		}
-		if err = c.check(ctx, p); isClosedPool(err) {
+		if _, err = c.check(ctx, p); isClosedPool(err) {
 			klog.V(2).InfoS("the data source pool was closed again while checking a projection; not objecting",
 				"projection", p.Name)
 			return nil
@@ -151,32 +154,33 @@ func (c *Compiler) Check(ctx context.Context, p *crispv1alpha1.CustomResourcePro
 	return err
 }
 
-// check is one attempt at Check.
-func (c *Compiler) check(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) error {
+// check is one attempt at Check, reporting which pools it used so the caller can
+// drop exactly those and no others if they turn out to have been closed.
+func (c *Compiler) check(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) (*Prepared, error) {
 	prepared, err := c.Prepare(ctx, p)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := prepared.Pool.Ping(ctx); err != nil {
 		// A closed pool is not an unreachable database, and treating it as one
 		// would quietly skip the check. Returned so the caller can drop it and
 		// try again with a live one.
 		if isClosedPool(err) {
-			return err
+			return prepared, err
 		}
 		klog.V(2).InfoS("data source unreachable while checking a projection; not objecting",
 			"projection", p.Name, "err", err)
-		return nil
+		return prepared, nil
 	}
 
 	if err := checkStatements(ctx, prepared.Pool, p); err != nil {
 		var unreachable *unreachableError
 		if goerrors.As(err, &unreachable) {
-			return nil
+			return prepared, nil
 		}
-		return err
+		return prepared, err
 	}
-	return nil
+	return prepared, nil
 }
 
 // isClosedPool reports whether an error is a pool that was closed while it was

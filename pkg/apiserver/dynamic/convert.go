@@ -128,8 +128,22 @@ const schemeName = "kube-crisp"
 // after whichever kind the scheme happened to return first, however the
 // endpoint itself was configured.
 //
-// Only the convertor is replaced. Which media types are supported, and how they
-// are negotiated, stays with the factory.
+// The media types are narrowed too. Projected objects are unstructured, and
+// unstructured cannot be encoded to protobuf — so offering it means the server
+// advertises a format it will then fail to produce, with a 406 at encode time
+// rather than a clean refusal during negotiation.
+//
+// That is not a cosmetic difference. The namespace controller's metadata client
+// lists protobuf among the formats it accepts, so it negotiated protobuf for
+// every deletecollection it issues while emptying a namespace, and got back
+// "object *unstructured.UnstructuredList does not implement the protobuf
+// marshalling interface". The controller retries forever and the namespace
+// never leaves Terminating — for every namespace in the cluster, not only ones
+// holding projected objects, because the controller sweeps every resource that
+// advertises deletecollection regardless of whether that namespace has any.
+//
+// apiextensions does the same thing for the same reason, with the comment
+// "CRDs explicitly do not support protobuf".
 type projectedSerializer struct {
 	runtime.NegotiatedSerializer
 
@@ -138,6 +152,24 @@ type projectedSerializer struct {
 }
 
 var _ runtime.NegotiatedSerializer = projectedSerializer{}
+
+// protobufMediaType is the one a projected object cannot be encoded to.
+const protobufMediaType = "application/vnd.kubernetes.protobuf"
+
+// SupportedMediaTypes offers only the formats a projected object can actually
+// be encoded to, so a client that cannot use them is told during negotiation
+// instead of being handed a 406 after the work is done.
+func (s projectedSerializer) SupportedMediaTypes() []runtime.SerializerInfo {
+	all := s.NegotiatedSerializer.SupportedMediaTypes()
+	supported := make([]runtime.SerializerInfo, 0, len(all))
+	for _, info := range all {
+		if info.MediaType == protobufMediaType {
+			continue
+		}
+		supported = append(supported, info)
+	}
+	return supported
+}
 
 // EncoderForVersion returns an encoder that restates a projected object's group
 // version without losing its kind.

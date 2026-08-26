@@ -969,6 +969,24 @@ That mistake is easy to make and silent, so it is checked rather than left to do
 
 `kube_crisp_watch_polls_total{mode}` shows whether a projection really is polling incrementally.
 
+## Media types
+
+Projected objects are served as JSON, YAML or CBOR, and never as protobuf. They are unstructured,
+and unstructured has no protobuf encoding — which is why custom resources cannot be served as
+protobuf either. Every Kubernetes client already handles this for custom resources, so nothing needs
+configuring.
+
+It is worth knowing what happens if a server does offer it. Advertising a format that cannot be
+produced turns a clean refusal during content negotiation into a `406` after the response has been
+assembled — and the namespace controller's metadata client accepts protobuf, so it negotiated
+protobuf for the `deletecollection` it issues while emptying a namespace and got an encoding error
+every time. It retries indefinitely, and the namespace never leaves `Terminating`.
+
+Not only namespaces holding projected objects: the controller sweeps every resource that advertises
+`deletecollection`, so a namespace containing nothing but a ConfigMap was stuck in exactly the same
+way. Installing a server that made that mistake stopped every namespace in the cluster from being
+deleted.
+
 ## What a projection needs from the database
 
 kube-crisp does not create tables. A projection whose table is missing compiles against the database

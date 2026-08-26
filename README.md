@@ -283,6 +283,9 @@ attaches build provenance.
 
 ## Limitations
 
+- **Projected objects are not served as protobuf.** They are unstructured, and unstructured cannot be
+  encoded to protobuf — the same reason custom resources cannot be. Clients negotiate JSON, YAML or
+  CBOR instead, which is what every Kubernetes client already does for a custom resource.
 - **Adding a driver is a registration, within limits.** `spec.dataSource.driver` names a registered
   driver and the registry is open, which covers a database that differs only in placeholders,
   session variables, or whether it can be told to abort a statement — CockroachDB ships as its own

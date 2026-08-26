@@ -1062,6 +1062,18 @@ func (c *PoolCache) RetainOnly(keep map[string]struct{}) int {
 	return evicted
 }
 
+// All returns every open pool, in no particular order.
+func (c *PoolCache) All() []*Pool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make([]*Pool, 0, len(c.pools))
+	for _, p := range c.pools {
+		out = append(out, p)
+	}
+	return out
+}
+
 // Len reports how many pools are open.
 func (c *PoolCache) Len() int {
 	c.mu.Lock()

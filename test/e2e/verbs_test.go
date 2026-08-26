@@ -307,11 +307,60 @@ func restartAPIServer(t *testing.T) {
 			AbsPath("/apis/store.example.com/v1alpha1/namespaces/" + acmeNamespace + "/orders").
 			Do(ctx).Error()
 		if err == nil {
-			return
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the projected API never came back after the restart: %v", err)
 		}
 		time.Sleep(time.Second)
+	}
+
+	awaitWebhookInForce(t)
+}
+
+// awaitWebhookInForce waits until the projection webhook refuses something
+// again.
+//
+// A restart replaces the certificate the server signs itself with, and the
+// configuration naming the old one is corrected by the pod that comes up. Until
+// that lands the webhook cannot be called, and because its policy is Ignore
+// that is silent: a projection it would refuse is accepted instead. A test
+// after a restart that depends on the webhook then fails on the timing rather
+// than on what it is testing, which is exactly what happened.
+//
+// Asks for a table that does not exist, which is the webhook's whole purpose
+// and something only it can object to, through a server-side dry run that
+// reaches admission and writes nothing.
+func awaitWebhookInForce(t *testing.T) {
+	t.Helper()
+
+	probe := []byte(`{
+	  "apiVersion": "crisp.kubecrisp.io/v1alpha1",
+	  "kind": "CustomResourceProjection",
+	  "metadata": {"name": "e2e-webhook-inforce-probe"},
+	  "spec": {
+	    "dataSource": {"driver": "postgres", "secretRef": {"name": "orders-db", "namespace": "kube-crisp"}},
+	    "resource": {"group": "store.example.com", "version": "v1alpha1", "kind": "WebhookProbe",
+	                 "plural": "webhookprobes", "scope": "Namespaced", "schema": {"type": "object"}},
+	    "queries": {"list": {"sql": "SELECT id, tenant FROM no_such_table_for_the_probe WHERE tenant = :namespace"}},
+	    "mapping": {"name": "id", "namespace": "tenant"}
+	  }
+	}`)
+
+	ctx := context.Background()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		err := discoveryClient.RESTClient().Post().
+			AbsPath("/apis/crisp.kubecrisp.io/v1alpha1/customresourceprojections").
+			Param("dryRun", "All").
+			Body(probe).
+			Do(ctx).Error()
+		if err != nil && strings.Contains(err.Error(), "no_such_table_for_the_probe") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the projection webhook never came back into force after the restart (last: %v)", err)
+		}
+		time.Sleep(2 * time.Second)
 	}
 }

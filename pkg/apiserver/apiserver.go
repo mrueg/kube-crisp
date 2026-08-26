@@ -129,6 +129,22 @@ type CrispServer struct {
 	pools  *crispsql.PoolCache
 }
 
+// ClosePools releases every connection pool.
+//
+// Called after serving has finished rather than from a pre-shutdown hook.
+// Pre-shutdown hooks run before in-flight requests drain — the sequence is
+// hooks, then stop accepting, then wait for the request and watch wait groups
+// — so closing pools there pulled the database out from under every request
+// that was still being answered, and every watch poll until the last watcher
+// went away. They got "sql: database is closed", which is not something a
+// client can do anything about and not something a retry reaches.
+//
+// Shutting down gracefully is the whole point of the drain, and the drain needs
+// the database.
+func (s *CrispServer) ClosePools() {
+	s.pools.Close()
+}
+
 // New builds the server and installs the projected API surface.
 // webhookReconcileInterval is how often the projection webhook configuration is
 // checked against what this server serves. Short, because until the two agree
@@ -204,6 +220,23 @@ func (c CompletedConfig) New() (*CrispServer, error) {
 		serving := c.GenericConfig.SecureServing
 		client := c.ExtraConfig.KubeClient
 
+		// A server on its way out must stop correcting the configuration.
+		//
+		// The certificate in it belongs to whichever pod wrote it, so a
+		// terminating pod whose reconcile fires during a rolling update points
+		// the cluster back at a certificate it is about to stop serving. Its
+		// replacement is already serving a different one, so admission then
+		// fails TLS — silently, because the policy is Ignore — until the next
+		// reconcile happens to correct it again.
+		//
+		// Pre-shutdown hooks run before anything drains, which is exactly when
+		// this should stop.
+		leaving := make(chan struct{})
+		genericServer.AddPreShutdownHookOrDie("kube-crisp-stop-webhook-reconcile", func() error {
+			close(leaving)
+			return nil
+		})
+
 		// Registered from a post-start hook rather than here: the certificate
 		// is loaded as part of starting to serve, so before that there is
 		// nothing to point the cluster at.
@@ -234,6 +267,11 @@ func (c CompletedConfig) New() (*CrispServer, error) {
 				// when the configuration has drifted from what this server can
 				// actually answer.
 				go wait.UntilWithContext(hookCtx.Context, func(ctx context.Context) {
+					select {
+					case <-leaving:
+						return
+					default:
+					}
 					if err := reconcileWebhookConfiguration(ctx, client, opts); err != nil {
 						klog.V(2).InfoS("could not reconcile the projection webhook configuration", "err", err)
 					}
@@ -246,11 +284,6 @@ func (c CompletedConfig) New() (*CrispServer, error) {
 	// schemas installed before that are published again here.
 	genericServer.AddPostStartHookOrDie("kube-crisp-openapi", func(genericapiserver.PostStartHookContext) error {
 		s.router.PublishOpenAPI()
-		return nil
-	})
-
-	genericServer.AddPreShutdownHookOrDie("kube-crisp-close-pools", func() error {
-		s.pools.Close()
 		return nil
 	})
 

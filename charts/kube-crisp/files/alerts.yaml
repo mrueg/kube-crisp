@@ -25,14 +25,14 @@
               the requested resource". Each projection's status conditions say why.
 
         - alert: KubeCrispProjectionStale
-          expr: max by (state) (kube_crisp_projections{state="stale"}) > 0
+          expr: max by (projection, resource) (kube_crisp_projection_state{state="stale"}) > 0
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: A projection is serving configuration it can no longer recompile.
+            summary: Projection {{ $labels.projection }} is serving configuration it can no longer recompile.
             description: >-
-              {{ $value }} projection(s) failed to compile and are still answering
+              It failed to compile and is still answering
               from what they compiled to last time. Requests succeed, so nothing
               else looks wrong — but the spec being served is not the spec in the
               cluster. Usually a data source Secret that has gone away or a
@@ -230,16 +230,15 @@
           # Compiled and installed here, and unreachable from outside: the
           # aggregation layer is not sending requests for it. Ready is false
           # too, but this says which half is broken.
-          expr: max (kube_crisp_projections{state="unrouted"}) > 0
+          expr: max by (projection, resource) (kube_crisp_projection_state{state="unrouted"}) > 0
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: A projected API group is not reachable through the aggregation layer.
+            summary: Projection {{ $labels.projection }} is not reachable through the aggregation layer.
             description: >-
-              {{ $value }} projected group version(s) compiled and installed here,
-              but their APIService is not available, so requests for them never
-              arrive. The projection's Registered condition carries the
+              It compiled and installed here, but its APIService is not
+              available, so requests for {{ $labels.resource }} never arrive. The projection's Registered condition carries the
               aggregator's own message: usually a Service with no endpoints, a CA
               bundle that no longer matches the serving certificate, or a
               certificate that does not name the Service.

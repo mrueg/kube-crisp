@@ -3,6 +3,7 @@
 package projection
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -3394,15 +3395,32 @@ func decodeContinue(encoded string) (continueToken, error) {
 		return continueToken{}, fmt.Errorf("invalid continue token")
 	}
 
+	// JSON has one number type, and decoding it into an any gives a float64.
+	// A key that left as an integer has to come back as one, or the database
+	// compares it against a float — and above 2^53 a float64 cannot hold it at
+	// all. Rounding it first and then checking whether the result is a whole
+	// number says yes to a value that has already lost its last digits, so the
+	// next page starts from a key that was never in the table.
+	// CockroachDB's unique_rowid() is squarely in that range.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+
 	var token continueToken
-	if err := json.Unmarshal(raw, &token); err != nil || token.Offset < 0 || token.Consumed < 0 {
+	if err := decoder.Decode(&token); err != nil || token.Offset < 0 || token.Consumed < 0 {
 		return continueToken{}, fmt.Errorf("invalid continue token")
 	}
 
-	// JSON has one number type; a key that left as an integer has to come back
-	// as one, or the database compares it against a float.
-	if value, ok := token.After.(float64); ok && value == float64(int64(value)) {
-		token.After = int64(value)
+	if number, ok := token.After.(json.Number); ok {
+		switch value, err := number.Int64(); {
+		case err == nil:
+			token.After = value
+		default:
+			fractional, err := number.Float64()
+			if err != nil {
+				return continueToken{}, fmt.Errorf("invalid continue token")
+			}
+			token.After = fractional
+		}
 	}
 	return token, nil
 }

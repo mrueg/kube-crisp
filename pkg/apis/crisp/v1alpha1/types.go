@@ -18,12 +18,14 @@ import (
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// CustomResourceProjection declares a read-only custom resource kind whose
-// objects are constructed on demand from queries against a SQL database.
+// CustomResourceProjection declares a custom resource kind whose objects are
+// constructed on demand from queries against a SQL database.
 //
 // The projection is served by kube-crisp-apiserver through the Kubernetes
-// aggregation layer, so no objects are ever written to etcd: every GET and
-// LIST is answered by executing the configured SQL against the data source.
+// aggregation layer, so no objects are ever written to etcd: every request is
+// answered by executing the configured SQL against the data source. A
+// projection that declares only read queries is read-only; one that declares
+// create, update or delete statements serves those verbs too.
 type CustomResourceProjection struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

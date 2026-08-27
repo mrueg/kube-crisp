@@ -18,6 +18,7 @@ import (
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/metadata"
 	"k8s.io/component-base/logs"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
@@ -376,6 +377,11 @@ func (o *CrispServerOptions) Config() (*apiserver.Config, error) {
 		return nil, err
 	}
 
+	metadataClient, err := o.metadataClient(serverConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	var crispClient crispclient.Interface
 	if dynamicClient != nil {
 		if crispClient, err = crispclient.NewForConfig(serverConfig.ClientConfig); err != nil {
@@ -414,6 +420,7 @@ func (o *CrispServerOptions) Config() (*apiserver.Config, error) {
 			ProjectionDir:             o.ProjectionDir,
 			CrispClient:               crispClient,
 			DynamicClient:             dynamicClient,
+			MetadataClient:            metadataClient,
 			DSNResolver:               resolver,
 			Pools:                     crispsql.NewPoolCache(),
 			APIServices:               apiServices,
@@ -437,6 +444,24 @@ func (o *CrispServerOptions) dynamicClient(serverConfig *genericapiserver.Recomm
 		return nil, fmt.Errorf("--watch-projections requires a kubeconfig; pass --watch-projections=false to serve only --projection-dir")
 	}
 	return dynamic.NewForConfig(serverConfig.ClientConfig)
+}
+
+// metadataClient builds the client that watches CustomResourceDefinitions for
+// changes to a borrowed schema.
+//
+// Metadata only, and deliberately: the schema itself is read through the
+// dynamic client when a projection is prepared, so this watch carries object
+// metadata rather than a copy of every CRD schema in the cluster — which on a
+// cluster running a few large operators is hundreds of megabytes held to notice
+// an edit.
+//
+// It follows --watch-projections, since a server serving only --projection-dir
+// has no cluster to watch.
+func (o *CrispServerOptions) metadataClient(serverConfig *genericapiserver.RecommendedConfig) (metadata.Interface, error) {
+	if !o.WatchProjections || serverConfig.ClientConfig == nil {
+		return nil, nil
+	}
+	return metadata.NewForConfig(serverConfig.ClientConfig)
 }
 
 func (o *CrispServerOptions) dsnResolver(serverConfig *genericapiserver.RecommendedConfig) (projection.DSNResolver, error) {

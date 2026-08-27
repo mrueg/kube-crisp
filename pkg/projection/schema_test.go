@@ -52,7 +52,7 @@ func crdObject() *unstructured.Unstructured {
 func newResolver(objects ...runtime.Object) *CRDSchemaResolver {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"},
+		map[schema.GroupVersionResource]string{CRDGVR: "CustomResourceDefinitionList"},
 		objects...,
 	)
 	return &CRDSchemaResolver{Client: client}

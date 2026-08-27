@@ -3449,10 +3449,10 @@ func decodeContinue(encoded string) (continueToken, error) {
 	}
 
 	if number, ok := token.After.(json.Number); ok {
-		switch value, err := number.Int64(); {
-		case err == nil:
+		value, err := number.Int64()
+		if err == nil {
 			token.After = value
-		default:
+		} else {
 			fractional, err := number.Float64()
 			if err != nil {
 				return continueToken{}, fmt.Errorf("invalid continue token")

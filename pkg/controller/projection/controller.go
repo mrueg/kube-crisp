@@ -93,6 +93,12 @@ type Controller struct {
 	// apiServiceInformer backs the registration reconciler's reads.
 	apiServiceInformer cache.SharedIndexInformer
 
+	// crds watch the CustomResourceDefinitions projections borrow schemas
+	// from. A change to one is a reason to recompile: the borrowed schema is
+	// part of what identifies a compiled projection, so an edited CRD gets
+	// fresh storage validating and explaining the new shape.
+	crds cache.SharedIndexInformer
+
 	compiler    *apidynamic.Compiler
 	router      *apidynamic.Router
 	apiServices *apiServiceManager
@@ -187,6 +193,14 @@ type Options struct {
 	// reads through the client.
 	APIServiceInformer cache.SharedIndexInformer
 
+	// CRDInformer watches the CustomResourceDefinitions that projections
+	// borrow schemas from, so an edited one is picked up when it changes
+	// rather than at the next resync. Metadata only: the schema itself is read
+	// through the client when a projection is prepared, and caching every
+	// schema in the cluster is a cost this server has no reason to pay.
+	// Optional: with none, an edit still lands within ResyncPeriod.
+	CRDInformer cache.SharedIndexInformer
+
 	// Compiler turns projections into servable resources; Router installs them.
 	Compiler *apidynamic.Compiler
 	Router   *apidynamic.Router
@@ -228,6 +242,7 @@ func New(opts Options) *Controller {
 
 	c := &Controller{
 		apiServiceInformer: opts.APIServiceInformer,
+		crds:               opts.CRDInformer,
 
 		client:            opts.Client,
 		dynamicClient:     opts.DynamicClient,
@@ -303,6 +318,24 @@ func New(opts Options) *Controller {
 		})
 	}
 
+	if c.crds != nil {
+		_, _ = c.crds.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    func(obj any) { c.queueIfBorrowed(obj) },
+			DeleteFunc: func(obj any) { c.queueIfBorrowed(obj) },
+			UpdateFunc: func(old, new any) {
+				// A relist is not a change. Compared on resourceVersion
+				// because this informer carries metadata only, and every edit
+				// to a CustomResourceDefinition moves it.
+				oldMeta, okOld := old.(*metav1.PartialObjectMetadata)
+				newMeta, okNew := new.(*metav1.PartialObjectMetadata)
+				if okOld && okNew && oldMeta.ResourceVersion == newMeta.ResourceVersion {
+					return
+				}
+				c.queueIfBorrowed(new)
+			},
+		})
+	}
+
 	for _, secrets := range c.secrets {
 		_, _ = secrets.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(any) { c.queue.Add(syncKey) },
@@ -321,6 +354,69 @@ func New(opts Options) *Controller {
 	}
 
 	return c
+}
+
+// queueIfBorrowed syncs when the CustomResourceDefinition that changed is one a
+// projection takes its schema from.
+//
+// A cluster has a great many CRDs and they are edited by things that have
+// nothing to do with this server, so syncing on all of them would re-prepare
+// every projection — a read per data source — for changes none of them can see.
+func (c *Controller) queueIfBorrowed(obj any) {
+	meta, ok := obj.(*metav1.PartialObjectMetadata)
+	if !ok {
+		tombstone, isTombstone := obj.(cache.DeletedFinalStateUnknown)
+		if !isTombstone {
+			return
+		}
+		if meta, ok = tombstone.Obj.(*metav1.PartialObjectMetadata); !ok {
+			return
+		}
+	}
+
+	// The static projections too: a file on disk borrows a schema exactly as an
+	// object in the cluster does.
+	for i := range c.static {
+		if borrowsFrom(&c.static[i], meta.Name) {
+			c.queue.Add(syncKey)
+			return
+		}
+	}
+
+	// Serving only --projection-dir: the static projections above are all there
+	// are to check.
+	if c.lister == nil {
+		return
+	}
+
+	projections, err := c.lister.List(labels.Everything())
+	if err != nil {
+		// The cache is not readable, which the sync itself will report. Erring
+		// towards a sync is the safe direction: an unnecessary one costs a
+		// fingerprint comparison.
+		c.queue.Add(syncKey)
+		return
+	}
+	for _, p := range projections {
+		if borrowsFrom(p, meta.Name) {
+			c.queue.Add(syncKey)
+			return
+		}
+	}
+}
+
+// borrowsFrom reports whether any version of a projection takes its schema from
+// the named CustomResourceDefinition.
+func borrowsFrom(p *crispv1alpha1.CustomResourceProjection, crd string) bool {
+	if ref := p.Spec.Resource.SchemaFrom; ref != nil && ref.Name == crd {
+		return true
+	}
+	for _, version := range p.Spec.Resource.Versions {
+		if ref := version.SchemaFrom; ref != nil && ref.Name == crd {
+			return true
+		}
+	}
+	return false
 }
 
 // sameRegistration reports whether two versions of an APIService say the same
@@ -376,6 +472,9 @@ func (c *Controller) Run(ctx context.Context) {
 		// Reconciling reads this cache, and reading it before it has synced
 		// would look like every registration is missing.
 		synced = append(synced, c.apiServiceInformer.HasSynced)
+	}
+	if c.crds != nil {
+		synced = append(synced, c.crds.HasSynced)
 	}
 	if !cache.WaitForCacheSync(ctx.Done(), synced...) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))

@@ -2,7 +2,6 @@ package v1alpha1_test
 
 import (
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -12,13 +11,16 @@ import (
 	crispsql "github.com/mrueg/kube-crisp/pkg/sql"
 )
 
+// crdPath is the served CRD, relative to this package. A constant so that
+// nothing can be read here but the file this test is about.
+const crdPath = "../../../../manifests/10-crd-customresourceprojection.yaml"
+
 // The CRD's driver enum is what a projection is actually validated against, and
 // it is written by hand on the field. A driver registered in pkg/sql but left
 // out of it is rejected by the API server before it reaches any of the code
 // that supports it — which is how the cockroach driver shipped unusable.
 func TestTheDriverEnumListsEveryRegisteredDriver(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "..", "manifests", "10-crd-customresourceprojection.yaml")
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(crdPath)
 	if err != nil {
 		t.Fatalf("reading the CRD: %v", err)
 	}

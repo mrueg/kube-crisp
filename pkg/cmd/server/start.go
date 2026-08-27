@@ -140,7 +140,7 @@ func NewCrispServerOptions(out, errOut io.Writer) *CrispServerOptions {
 	// and a slow database queues the requests that caused it rather than
 	// everything. It watches FlowSchemas and PriorityLevelConfigurations,
 	// which is a cluster-wide grant worth opting into rather than assuming:
-	// manifests/70-flowcontrol-rbac.yaml carries it.
+	// manifests/optional/flowcontrol-rbac.yaml carries it.
 	//
 	// Without it the only backpressure is a projection's own concurrency
 	// limit, which sheds whatever arrives when it is full rather than the
@@ -223,7 +223,7 @@ func NewCommandStartCrispServer(ctx context.Context, defaults *CrispServerOption
 	flags.Int32Var(&o.APIServices.Port, "apiservice-service-port", o.APIServices.Port,
 		"Service port that fronts this server.")
 	flags.BoolVar(&o.EnableAdmission, "enable-admission", o.EnableAdmission,
-		"Run the admission chain for projected writes, so ValidatingAdmissionPolicy, admission webhooks, and namespace lifecycle apply to them. Requires the extra RBAC in manifests/60-admission-rbac.yaml, since the plugins watch webhook configurations, admission policies, and namespaces.")
+		"Run the admission chain for projected writes, so ValidatingAdmissionPolicy, admission webhooks, and namespace lifecycle apply to them. Requires the extra RBAC in manifests/optional/admission-rbac.yaml, since the plugins watch webhook configurations, admission policies, and namespaces.")
 	flags.StringSliceVar(&o.DataSourceNamespaces, "datasource-namespaces", o.DataSourceNamespaces,
 		"Namespaces a projection may take its data source Secret from. Defaults to $POD_NAMESPACE. Empty allows any namespace, which is only safe when this server's RBAC is already narrow.")
 	flags.BoolVar(&o.RequireDataSourceOptIn, "require-datasource-optin", o.RequireDataSourceOptIn,
@@ -241,7 +241,7 @@ func NewCommandStartCrispServer(ctx context.Context, defaults *CrispServerOption
 	flags.StringVar(&o.LeaderElection.Name, "leader-election-name", o.LeaderElection.Name,
 		"Name of the Lease that decides which replica polls.")
 	flags.BoolVar(&o.ProjectionWebhook.Enabled, "enable-projection-webhook", o.ProjectionWebhook.Enabled,
-		"Serve an admission webhook that checks a CustomResourceProjection against its database before the cluster accepts it, so SQL the database cannot run is refused at kubectl apply rather than reported afterwards in the projection's status. Needs the RBAC in manifests/80-webhook-rbac.yaml.")
+		"Serve an admission webhook that checks a CustomResourceProjection against its database before the cluster accepts it, so SQL the database cannot run is refused at kubectl apply rather than reported afterwards in the projection's status. Needs the RBAC in manifests/optional/webhook-rbac.yaml.")
 	flags.BoolVar(&o.ProjectionWebhook.Manage, "manage-projection-webhook", o.ProjectionWebhook.Manage,
 		"Create and correct the ValidatingWebhookConfiguration that points the cluster at this server, and keep correcting it: a generated certificate belongs to the pod that generated it, so a rolling update can otherwise leave the cluster trusting one nothing serves. Only a configuration labelled as managed by kube-crisp is ever modified. With more than one replica and no --projection-webhook-ca-bundle-file, every replica signs its own certificate and the configuration can name only one, so give them a shared certificate or run the webhook on a single replica.")
 	flags.StringVar(&o.ProjectionWebhook.Name, "projection-webhook-name", o.ProjectionWebhook.Name,

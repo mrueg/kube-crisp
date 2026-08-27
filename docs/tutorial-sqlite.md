@@ -36,10 +36,12 @@ CREATE TABLE items (
 );
 CREATE INDEX items_tenant_idx ON items (tenant);
 -- The column mapped to resourceVersion, because the watch query filters and
--- orders by it on every poll. Without this the poll is a sequential scan and a
--- sort of the whole table, once per pollInterval: measured at 10,000 rows, 6.0ms
--- and 116 buffers per poll against 0.16ms and 10 with the index, and the gap
--- grows with the table rather than staying flat.
+-- orders by it on every poll. Without this, EXPLAIN QUERY PLAN says
+-- "SCAN items" and "USE TEMP B-TREE FOR ORDER BY" — the whole table read and
+-- sorted, once per pollInterval. With it, "SEARCH items USING INDEX
+-- items_updated_at_idx (updated_at>?)": measured at 10,000 rows, 1.3ms against
+-- 0.55ms for a 500-row page, and the gap grows with the table rather than
+-- staying flat, because the scan is the part that grows.
 CREATE INDEX items_updated_at_idx ON items (updated_at);
 ```
 

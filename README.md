@@ -291,7 +291,10 @@ attaches build provenance.
   session variables, or whether it can be told to abort a statement — CockroachDB ships as its own
   driver for exactly that reason, being PostgreSQL without `LISTEN`/`NOTIFY`. It does not cover one
   that writes back rows differently: detecting whether a statement returns rows looks for
-  `RETURNING`, so SQL Server's `OUTPUT` needs more than a registration.
+  `RETURNING`, so SQL Server's `OUTPUT` needs more than a registration. Registering one is not quite
+  all of it either — `spec.dataSource.driver` carries an enum, so the CRD has to list the name as
+  well or the API server rejects the projection before any of this is reached. A test compares the
+  two.
 - **The table has to exist.** kube-crisp projects rows; it does not create or migrate tables. A
   projection whose table is missing reports `CompilationFailed` with the database's own message and
   keeps retrying, so it starts serving once the table appears — and `status.requiredSchema` says what

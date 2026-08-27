@@ -19,6 +19,8 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	metadataclient "k8s.io/client-go/metadata"
+	"k8s.io/client-go/metadata/metadatainformer"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-openapi/pkg/handler3"
@@ -55,6 +57,13 @@ type ExtraConfig struct {
 	// status, which is what lets API groups be installed and removed while the
 	// server runs. When nil, only the static projections are served.
 	CrispClient crispclient.Interface
+
+	// MetadataClient watches CustomResourceDefinitions for changes to a
+	// borrowed schema. Metadata only: the schema is read through DynamicClient
+	// when a projection is prepared, so nothing here holds a copy of every CRD
+	// in the cluster. Optional; without it an edited CRD is picked up at the
+	// next resync instead of when it changes.
+	MetadataClient metadataclient.Interface
 
 	// DynamicClient reads CustomResourceDefinitions for borrowed schemas and
 	// manages the APIServices this server registers.
@@ -369,6 +378,20 @@ func (s *CrispServer) installController(c CompletedConfig, compiler *dynamic.Com
 		apiServiceInformer = apiServiceFactory.ForResource(projectioncontroller.APIServiceGVR).Informer()
 	}
 
+	// The CustomResourceDefinitions a projection may borrow a schema from.
+	// Watched so an edit is picked up when it happens rather than at the next
+	// resync, and watched as metadata so noticing costs the memory of a name
+	// rather than a copy of every schema in the cluster.
+	var (
+		crdFactory  metadatainformer.SharedInformerFactory
+		crdInformer cache.SharedIndexInformer
+	)
+	if c.ExtraConfig.MetadataClient != nil {
+		crdFactory = metadatainformer.NewSharedInformerFactory(
+			c.ExtraConfig.MetadataClient, projectioncontroller.ResyncPeriod)
+		crdInformer = crdFactory.ForResource(projection.CRDGVR).Informer()
+	}
+
 	// The resolver reads a connection string once per projection on every
 	// sync. Backed by the informers above, that stops being a request each.
 	if resolver, ok := c.ExtraConfig.DSNResolver.(*projection.SecretDSNResolver); ok && secrets != nil {
@@ -378,6 +401,7 @@ func (s *CrispServer) installController(c CompletedConfig, compiler *dynamic.Com
 	controller := projectioncontroller.New(projectioncontroller.Options{
 		SecretInformers:    secretInformers,
 		APIServiceInformer: apiServiceInformer,
+		CRDInformer:        crdInformer,
 		Client:             c.ExtraConfig.CrispClient,
 		EventClient:        c.ExtraConfig.KubeClient,
 		DynamicClient:      c.ExtraConfig.DynamicClient,
@@ -407,6 +431,9 @@ func (s *CrispServer) installController(c CompletedConfig, compiler *dynamic.Com
 		}
 		if apiServiceFactory != nil {
 			apiServiceFactory.Start(hookCtx.Done())
+		}
+		if crdFactory != nil {
+			crdFactory.Start(hookCtx.Done())
 		}
 		go controller.Run(hookCtx.Context)
 		return nil

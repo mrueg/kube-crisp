@@ -48,9 +48,14 @@ server is running without one.
 Editing the referenced CustomResourceDefinition is picked up. The borrowed schema is part of what
 identifies a compiled projection, alongside its spec and the connection string its data source
 resolves to, so a changed one rebuilds the storage exactly as a changed spec would — and an
-unchanged one does not, which is what keeps a watch cache alive across a sync. The change lands at
-the next resync rather than the moment the CRD is saved: up to `ResyncPeriod`, the same backstop
-credential rotation has when no Secret informer is configured.
+unchanged one does not, which is what keeps a watch cache alive across a sync.
+
+The CustomResourceDefinitions projections borrow from are watched, so an edit is picked up when it
+happens. The watch carries metadata only — the schema itself is read when a projection is prepared,
+and holding a copy of every CRD in the cluster to notice an edit is a cost with no return. Only a
+CRD some projection actually names is worth a sync; the rest of a cluster's CRDs are edited by
+things that have nothing to do with this server. Running without a cluster connection, or with
+`--watch-projections=false`, an edit still lands within `ResyncPeriod`.
 
 Schemas are published to `/openapi/v3` only. The v2 document is served, because the aggregation
 layer downloads it regardless, but it carries no projected schemas: a client old enough to read

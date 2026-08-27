@@ -14,8 +14,10 @@ import (
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
 )
 
-// crdGVR is the resource a borrowed schema is read from.
-var crdGVR = schema.GroupVersionResource{
+// CRDGVR is the resource a borrowed schema is read from. Exported because the
+// informer that watches for changes to one has to name the same resource, and
+// two spellings that agree by habit is one more than is needed.
+var CRDGVR = schema.GroupVersionResource{
 	Group:    "apiextensions.k8s.io",
 	Version:  "v1",
 	Resource: "customresourcedefinitions",
@@ -42,7 +44,7 @@ func (r *CRDSchemaResolver) Resolve(ctx context.Context, ref crispv1alpha1.CRDRe
 		return nil, fmt.Errorf("schemaFrom.name is required")
 	}
 
-	crd, err := r.Client.Resource(crdGVR).Get(ctx, ref.Name, metav1.GetOptions{})
+	crd, err := r.Client.Resource(CRDGVR).Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("reading CustomResourceDefinition %s: %w", ref.Name, err)
 	}

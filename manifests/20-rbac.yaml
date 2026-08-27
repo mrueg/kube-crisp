@@ -48,6 +48,9 @@ rules:
   - apiGroups: ["crisp.kubecrisp.io"]
     resources: ["customresourceprojections/status"]
     verbs: ["get", "update", "patch"]
+  # Read for a projection's schemaFrom, and watched so that editing the
+  # CustomResourceDefinition it borrows from is picked up when it happens
+  # rather than at the next resync. The watch carries metadata only.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]

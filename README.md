@@ -1,8 +1,8 @@
 # kube-crisp
 
-![kube-crisp: a crisp packet branded with a ship's wheel around a database, SQL flavour, 100% custom resources](logo.png)
-
 **C**ustom **R**esource **I**nterface for **S**QL **P**rojections — serve any SQL database as Kubernetes custom resources.
+
+![kube-crisp: a crisp packet branded with a ship's wheel around a database, SQL flavour, 100% custom resources](logo.png)
 
 kube-crisp is an aggregated Kubernetes API server. You give it a resource shape and a set of
 queries; it answers `kubectl get` by executing those queries against your database and mapping

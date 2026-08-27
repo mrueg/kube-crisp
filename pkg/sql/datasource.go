@@ -670,12 +670,21 @@ func (p *Pool) queryContext(ctx context.Context, stmt *Statement, values []any) 
 			klog.V(3).InfoS("falling back to an unprepared query", "driver", p.driver, "err", err)
 		} else {
 			rows, err := prepared.QueryContext(ctx, values...)
-			if !isStatementClosed(err) {
+			switch {
+			case isStalePlan(err):
+				// The schema moved under it. Dropped from the cache so the
+				// next request prepares against the schema that exists now;
+				// nothing has been read yet, so this one runs unprepared.
+				p.evictStatement(stmt.SQL)
+				klog.InfoS("the schema changed under a prepared statement; preparing it again",
+					"driver", p.driver, "err", err)
+			case isStatementClosed(err):
+				// Evicted between the lookup and the call. Nothing has been
+				// read yet, so running it unprepared is the same query.
+				klog.V(4).InfoS("retrying an evicted prepared statement unprepared", "driver", p.driver)
+			default:
 				return rows, err
 			}
-			// Evicted between the lookup and the call. Nothing has been read
-			// yet, so running it unprepared is the same query.
-			klog.V(4).InfoS("retrying an evicted prepared statement unprepared", "driver", p.driver)
 		}
 	}
 	return p.db.QueryContext(ctx, stmt.SQL, values...)
@@ -690,6 +699,28 @@ func (p *Pool) queryContext(ctx context.Context, stmt *Statement, values []any) 
 // caller the real error instead of a retry.
 func isStatementClosed(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "statement is closed")
+}
+
+// isStalePlan reports whether a prepared statement failed because the schema it
+// was planned against has changed.
+//
+// PostgreSQL raises "cached plan must not change result type" when a column is
+// added to or dropped from a table a prepared statement reads, which is what a
+// migration does. The statement is bound to a plan the server will not run
+// again, so it is not a transient failure: without evicting it, every request
+// through this projection fails identically until the process is restarted —
+// a migration taking the projection down and leaving it down.
+//
+// Matched by text, like the case above: the message is stable, it reaches here
+// wrapped by two drivers, and a miss costs only the retry.
+func isStalePlan(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "cached plan must not change result type")
+}
+
+// evictStatement drops one entry from the statement cache, closing it through
+// the cache's eviction function.
+func (p *Pool) evictStatement(text string) {
+	p.stmts.Remove(text)
 }
 
 // Exec runs a statement that does not return rows and reports how many rows it
@@ -725,9 +756,20 @@ func (p *Pool) ExecWith(ctx context.Context, session []SessionVariable, stmt *St
 		} else {
 			result, err = prepared.ExecContext(ctx, values...)
 		}
-		if prepErr != nil || isStatementClosed(err) {
+		if isStalePlan(err) {
+			// The schema moved under it, and the statement is bound to a plan
+			// this database will not run again. Dropped so the next request
+			// prepares afresh. It is raised while revalidating the plan, before
+			// anything is written, so running it unprepared is not a second
+			// attempt at a write that already happened.
+			p.evictStatement(stmt.SQL)
+			klog.InfoS("the schema changed under a prepared statement; preparing it again",
+				"driver", p.driver, "err", err)
+		}
+		if prepErr != nil || isStatementClosed(err) || isStalePlan(err) {
 			// Either it could not be prepared, or it was evicted between the
-			// lookup and the call. Nothing has been written yet either way.
+			// lookup and the call, or the plan it held is no longer valid.
+			// Nothing has been written in any of those cases.
 			result, err = p.db.ExecContext(ctx, stmt.SQL, values...)
 		}
 	} else {

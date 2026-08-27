@@ -29,9 +29,8 @@ Those objects are rows in a PostgreSQL table.
 
 ![Listing a thousand films out of PostgreSQL and reading one of them with kubectl](docs/demo/pagila.gif)
 
-A thousand of them, out of [Pagila](docs/tutorial-pagila.md) — the DVD-rental sample database,
-projected whole — listed, sliced by label, and read in full. No CRD, no controller, and nothing
-copied into etcd.
+A thousand of them, out of a [DVD-rental sample database](docs/tutorial-pagila.md) projected whole —
+listed, sliced by label, and read in full. No CRD, no controller, and nothing copied into etcd.
 
 ## Why not a controller that syncs rows into CRs?
 
@@ -138,10 +137,10 @@ spec:
       - {column: rentals_to_breakeven, path: status.rentalsToBreakEven, type: integer}
 ```
 
-The full version is in [`examples/pagila/`](examples/pagila), which projects the whole of Pagila as
-ten kinds — the [tutorial](docs/tutorial-pagila.md) walks through why each one is shaped the way it
-is. A smaller, writable, single-table example is in [`examples/orders/`](examples/orders), with its
-table in [`examples/orders/schema.sql`](examples/orders/schema.sql).
+The full version is in [`examples/pagila/`](examples/pagila), which projects that whole schema as ten
+kinds — the [tutorial](docs/tutorial-pagila.md) walks through why each one is shaped the way it is.
+A smaller, writable, single-table example is in [`examples/orders/`](examples/orders), with its table
+in [`examples/orders/schema.sql`](examples/orders/schema.sql).
 
 Every field a projection can carry — bind parameters, schemas, subresources,
 writes, row-level security, finalizers, selectors, versions, caching, replicas,
@@ -160,10 +159,9 @@ pagination, and watch — is in **[docs/reference.md](docs/reference.md)**.
 
 ## Quick start
 
-These project [Pagila](https://github.com/xzilla/pagila), which is vendored in
-[`third_party/pagila/`](third_party/pagila) — load it into a PostgreSQL 18 server first, or point
-the DSN at a database of your own and apply [`examples/orders/`](examples/orders) instead, which
-needs one `CREATE TABLE`.
+These project the sample database vendored in [`third_party/pagila/`](third_party/pagila) — load it
+into a PostgreSQL 18 server first, or point the DSN at a database of your own and apply
+[`examples/orders/`](examples/orders) instead, which needs one `CREATE TABLE`.
 
 Local, against a database you can already reach:
 
@@ -241,7 +239,7 @@ The e2e suite is split so it does not have to be run whole. `make e2e-up` provis
 the three databases; after that:
 
 ```console
-$ make e2e-correctness              # 62 tests, a few minutes
+$ make e2e-correctness              # 89 tests, a few minutes
 $ make e2e-bench SHARD=reads        # one benchmark shard
 $ make bench                        # every benchmark
 $ make e2e                          # all of it
@@ -251,8 +249,6 @@ A projection can be checked without any of that:
 
 ```console
 $ kube-crisp-apiserver validate examples/pagila/
-ok  examples/pagila/10-catalogue.yaml: pagila-actors (actors.pagila.example.com/v1alpha1)
-ok  examples/pagila/10-catalogue.yaml: pagila-categories (categories.pagila.example.com/v1alpha1)
 ok  examples/pagila/10-catalogue.yaml: pagila-films (films.pagila.example.com/v1alpha1)
 ...
 ok  examples/pagila/50-reporting.yaml: pagila-store-sales (storesales.pagila.example.com/v1alpha1)
@@ -311,7 +307,7 @@ attaches build provenance.
 | `manifests/` | CRD, RBAC, Deployment, Service — everything `kubectl apply -f manifests/` should install |
 | `manifests/optional/` | Monitoring, network policy, and the RBAC for features that are off by default: each needs a decision or a cluster's own details |
 | `examples/orders/` | One writable table projected end to end: its schema, its Secret, and the projection |
-| `examples/pagila/` | The ten projections this README shows, and the [Pagila tutorial](docs/tutorial-pagila.md) walks through: a whole schema nobody designed for this |
+| `examples/pagila/` | The ten projections this README shows and the [tutorial](docs/tutorial-pagila.md) walks through: a whole schema nobody designed for this |
 | `examples/apiservice.yaml` | A hand-written `APIService`, for the rare case of registering groups yourself |
 | `test/e2e` | Cluster suite: three drivers, watch, admission, a database outage, and the benchmarks |
 | `docs/` | Tutorials per driver, plus the reference, operating and performance documents |
@@ -383,7 +379,7 @@ attaches build provenance.
 ## Status
 
 Early, and interfaces will change. Reads, writes, watch, dynamic registration, admission, tracing,
-and the mapping layer are implemented and covered by 414 unit tests plus a 74-test e2e suite that
+and the mapping layer are implemented and covered by 538 unit tests plus a 101-test e2e suite that
 runs against PostgreSQL, MySQL and SQLite in a kind cluster — including a database outage, row-level
 security, finalizer flows, server-side apply conflicts, a dropped `LISTEN`/`NOTIFY` subscription, and
 a run against a server built with the race detector. The correctness half of that suite takes a few

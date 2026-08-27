@@ -2125,10 +2125,20 @@ func (w *WritableREST) deleteObject(
 		return nil, false, errors.NewInternalError(err)
 	}
 
+	// Under the projection's concurrency limit, like every other statement. A
+	// delete that skipped it was a way past the only bound on how much work one
+	// projection can have in flight — and kubectl delete --all is the request
+	// most likely to find it.
+	release, err := w.acquire(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+
 	ctx, done := w.startQuery(ctx, "delete")
 	_, affected, err := w.run(ctx, w.delete, args, w.session(ctx, namespace, name))
-	w.cache.invalidate(namespace)
+	release()
 	w.flights.detach(namespace)
+	w.cache.invalidate(namespace)
 	w.auditWrite(ctx, "delete", w.delete, affected)
 	// A driver that cannot report a count gives -1, which is not a row count.
 	removed := affected
@@ -2137,7 +2147,12 @@ func (w *WritableREST) deleteObject(
 	}
 	done(int(removed), err)
 	if err != nil {
-		return nil, false, errors.NewInternalError(fmt.Errorf("deleting %s/%s: %w", namespace, name, err))
+		// Translated like any other write. Wrapping it in an internal error
+		// made every delete failure a 500: a row something else references
+		// answered "internal error" rather than 409, an unreachable database
+		// answered 500 rather than 503 with a Retry-After, and a shed request
+		// lost the 429 it had already been given.
+		return nil, false, translateWriteError(err, w.groupResource(), name, "delete")
 	}
 	if affected == 0 {
 		return nil, false, errors.NewNotFound(w.groupResource(), name)

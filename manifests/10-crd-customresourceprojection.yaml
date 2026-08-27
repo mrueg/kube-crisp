@@ -99,10 +99,12 @@ spec:
                       to 30m.
                     type: string
                   driver:
-                    description: 'Driver selects the database/sql driver. One of:
-                      postgres, mysql, sqlite.'
+                    description: |-
+                      Driver selects the database/sql driver. One of: postgres, cockroach,
+                      mysql, sqlite.
                     enum:
                     - postgres
+                    - cockroach
                     - mysql
                     - sqlite
                     type: string
@@ -302,11 +304,11 @@ spec:
                 - secretRef
                 type: object
                 x-kubernetes-validations:
-                - message: 'statementTimeout is supported on the postgres driver only:
-                    MySQL bounds read-only SELECTs rather than every statement, and
-                    SQLite has no equivalent'
+                - message: 'statementTimeout is supported on the postgres and cockroach
+                    drivers only: MySQL bounds read-only SELECTs rather than every
+                    statement, and SQLite has no equivalent'
                   rule: '!has(self.statementTimeout) || !self.statementTimeout ||
-                    self.driver == ''postgres'''
+                    self.driver == ''postgres'' || self.driver == ''cockroach'''
               mapping:
                 description: Mapping describes how a result row becomes an API object.
                 properties:

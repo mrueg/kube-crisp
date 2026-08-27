@@ -115,8 +115,8 @@ spec:
       - {column: status,   path: status.phase}
 ```
 
-The full version is in [`examples/orders-projection.yaml`](examples/orders-projection.yaml), with
-its table in [`examples/schema.sql`](examples/schema.sql).
+The full version is in [`examples/orders/`](examples/orders), with its table in
+[`examples/orders/schema.sql`](examples/orders/schema.sql).
 
 Every field a projection can carry — bind parameters, schemas, subresources,
 writes, row-level security, finalizers, selectors, versions, caching, replicas,
@@ -148,8 +148,8 @@ In a cluster, with Helm:
 
 ```console
 $ helm install kube-crisp ./charts/kube-crisp --namespace kube-crisp --create-namespace
-$ kubectl apply -f examples/orders-db-secret.yaml   # edit the DSN first
-$ kubectl apply -f examples/orders-projection.yaml
+$ kubectl apply -f examples/orders/00-secret.yaml   # edit the DSN first
+$ kubectl apply -f examples/orders/10-projection.yaml
 $ kubectl get orders -n acme                        # the APIService registers itself
 ```
 
@@ -160,8 +160,8 @@ Or with plain manifests:
 
 ```console
 $ kubectl apply -f manifests/
-$ kubectl apply -f examples/orders-db-secret.yaml   # edit the DSN first
-$ kubectl apply -f examples/orders-projection.yaml
+$ kubectl apply -f examples/orders/00-secret.yaml   # edit the DSN first
+$ kubectl apply -f examples/orders/10-projection.yaml
 $ kubectl get orders -n acme                        # the APIService registers itself
 ```
 
@@ -220,16 +220,16 @@ $ make e2e                          # all of it
 A projection can be checked without any of that:
 
 ```console
-$ kube-crisp-apiserver validate examples/ path/to/projection.yaml
-ok  examples/: orders (orders.store.example.com/v1alpha1)
+$ kube-crisp-apiserver validate examples/orders/
+ok  examples/orders/10-projection.yaml: orders (orders.store.example.com/v1alpha1)
 
 1 projection(s) validated
 ```
 
-It needs no cluster and no database, exits non-zero if anything is rejected, and reports every
-projection rather than stopping at the first — so it works as a commit gate. What it cannot check is
-whether the database can run the statements; that needs the database, and the server checks it when
-the projection is compiled.
+It takes files and directories, needs no cluster and no database, exits non-zero if anything is
+rejected, and reports every projection rather than stopping at the first — so it works as a commit
+gate. What it cannot check is whether the database can run the statements; that needs the database,
+and the server checks it when the projection is compiled.
 
 The correctness half is the part that says whether the code works, and it answers in a minute; the
 rest is benchmarks, which take twenty. CI runs the five shards as parallel jobs with `BENCH_RUNS=1`,
@@ -276,7 +276,8 @@ attaches build provenance.
 | `charts/kube-crisp/` | Helm chart, with the optional pieces behind values |
 | `manifests/` | CRD, RBAC, Deployment, Service — everything `kubectl apply -f manifests/` should install |
 | `manifests/optional/` | Monitoring, network policy, and the RBAC for features that are off by default: each needs a decision or a cluster's own details |
-| `examples/` | A projection, its table, its Secret, and a hand-written `APIService` for the rare case of registering groups yourself |
+| `examples/orders/` | The projection the README walks through: its table, its Secret, and the projection itself |
+| `examples/apiservice.yaml` | A hand-written `APIService`, for the rare case of registering groups yourself |
 | `test/e2e` | Cluster suite: three drivers, watch, admission, a database outage, and the benchmarks |
 | `docs/` | Tutorials per driver, plus the reference, operating and performance documents |
 | `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md` | How to contribute, the [CNCF Community Code of Conduct](CODE_OF_CONDUCT.md) this project follows, and how to report a vulnerability |

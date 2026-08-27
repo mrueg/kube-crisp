@@ -99,37 +99,49 @@ And one that is not about a driver at all:
 apiVersion: crisp.kubecrisp.io/v1alpha1
 kind: CustomResourceProjection
 metadata:
-  name: orders
+  name: pagila-films
 spec:
   dataSource:
     driver: postgres
-    secretRef: {name: orders-db, namespace: kube-crisp}
+    secretRef: {name: pagila-db, namespace: kube-crisp}
   resource:
-    group: store.example.com
+    group: pagila.example.com
     version: v1alpha1
-    kind: Order
-    plural: orders
-    scope: Namespaced
+    kind: Film
+    plural: films
+    scope: Cluster
     schema: {...}
+    # Bound into the statement, so the database does the filtering rather than
+    # the server discarding rows it has already read.
+    selectableFields:
+      - {jsonPath: .spec.rating, column: rating}
   queries:
     list:
-      sql: SELECT id, tenant, customer, status FROM orders WHERE tenant = :namespace
-    get:
-      sql: SELECT id, tenant, customer, status FROM orders WHERE tenant = :namespace AND id = :name
-    create:
       sql: |
-        INSERT INTO orders (id, tenant, customer, status) VALUES (:id, :tenant, :customer, :status)
-        RETURNING id, tenant, customer, status
+        SELECT f.film_id,
+               lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS slug,
+               f.title, f.rating::text AS rating, f.rentals_to_breakeven
+        FROM film f
+        WHERE (:rating::text IS NULL OR f.rating::text = :rating)
+        ORDER BY f.film_id
+    get:
+      sql: ...
   mapping:
-    name: id
-    namespace: tenant
+    name: slug          # ACADEMY DINOSAUR is not a valid object name
+    uid: film_id
+    labels:
+      pagila.example.com/rating: rating
     fields:
-      - {column: customer, path: spec.customer}
-      - {column: status,   path: status.phase}
+      - {column: title,  path: spec.title}
+      - {column: rating, path: spec.rating}
+      # A generated column: PostgreSQL computes it, so it belongs in status.
+      - {column: rentals_to_breakeven, path: status.rentalsToBreakEven, type: integer}
 ```
 
-The full version is in [`examples/orders/`](examples/orders), with its table in
-[`examples/orders/schema.sql`](examples/orders/schema.sql).
+The full version is in [`examples/pagila/`](examples/pagila), which projects the whole of Pagila as
+ten kinds — the [tutorial](docs/tutorial-pagila.md) walks through why each one is shaped the way it
+is. A smaller, writable, single-table example is in [`examples/orders/`](examples/orders), with its
+table in [`examples/orders/schema.sql`](examples/orders/schema.sql).
 
 Every field a projection can carry — bind parameters, schemas, subresources,
 writes, row-level security, finalizers, selectors, versions, caching, replicas,
@@ -148,12 +160,17 @@ pagination, and watch — is in **[docs/reference.md](docs/reference.md)**.
 
 ## Quick start
 
+These project [Pagila](https://github.com/xzilla/pagila), which is vendored in
+[`third_party/pagila/`](third_party/pagila) — load it into a PostgreSQL 18 server first, or point
+the DSN at a database of your own and apply [`examples/orders/`](examples/orders) instead, which
+needs one `CREATE TABLE`.
+
 Local, against a database you can already reach:
 
 ```console
-$ export ORDERS_DB_DSN='postgres://user:pass@localhost:5432/store?sslmode=disable'
+$ export PAGILA_DB_DSN='postgres://user:pass@localhost:5432/pagila?sslmode=disable'
 $ go run ./cmd/kube-crisp-apiserver \
-    --projection-dir=examples --local-dsn-from-env \
+    --projection-dir=examples/pagila --local-dsn-from-env \
     --watch-projections=false --secure-port=8443 --authentication-skip-lookup
 ```
 
@@ -161,9 +178,9 @@ In a cluster, with Helm:
 
 ```console
 $ helm install kube-crisp ./charts/kube-crisp --namespace kube-crisp --create-namespace
-$ kubectl apply -f examples/orders/00-secret.yaml   # edit the DSN first
-$ kubectl apply -f examples/orders/10-projection.yaml
-$ kubectl get orders -n acme                        # the APIService registers itself
+$ kubectl apply -f examples/pagila/00-secret.yaml     # edit the DSN first
+$ kubectl apply -f examples/pagila/10-catalogue.yaml
+$ kubectl get films                                   # the APIService registers itself
 ```
 
 `helm show values ./charts/kube-crisp` lists what can be turned on: admission,
@@ -173,9 +190,9 @@ Or with plain manifests:
 
 ```console
 $ kubectl apply -f manifests/
-$ kubectl apply -f examples/orders/00-secret.yaml   # edit the DSN first
-$ kubectl apply -f examples/orders/10-projection.yaml
-$ kubectl get orders -n acme                        # the APIService registers itself
+$ kubectl apply -f examples/pagila/00-secret.yaml     # edit the DSN first
+$ kubectl apply -f examples/pagila/10-catalogue.yaml
+$ kubectl get films                                   # the APIService registers itself
 ```
 
 `manifests/optional/` is deliberately not picked up by the apply above — `kubectl apply -f` on a
@@ -233,10 +250,14 @@ $ make e2e                          # all of it
 A projection can be checked without any of that:
 
 ```console
-$ kube-crisp-apiserver validate examples/orders/
-ok  examples/orders/10-projection.yaml: orders (orders.store.example.com/v1alpha1)
+$ kube-crisp-apiserver validate examples/pagila/
+ok  examples/pagila/10-catalogue.yaml: pagila-actors (actors.pagila.example.com/v1alpha1)
+ok  examples/pagila/10-catalogue.yaml: pagila-categories (categories.pagila.example.com/v1alpha1)
+ok  examples/pagila/10-catalogue.yaml: pagila-films (films.pagila.example.com/v1alpha1)
+...
+ok  examples/pagila/50-reporting.yaml: pagila-store-sales (storesales.pagila.example.com/v1alpha1)
 
-1 projection(s) validated
+10 projection(s) validated
 ```
 
 It takes files and directories, needs no cluster and no database, exits non-zero if anything is
@@ -289,8 +310,8 @@ attaches build provenance.
 | `charts/kube-crisp/` | Helm chart, with the optional pieces behind values |
 | `manifests/` | CRD, RBAC, Deployment, Service — everything `kubectl apply -f manifests/` should install |
 | `manifests/optional/` | Monitoring, network policy, and the RBAC for features that are off by default: each needs a decision or a cluster's own details |
-| `examples/orders/` | The projection the README walks through: its table, its Secret, and the projection itself |
-| `examples/pagila/` | The ten projections of the [Pagila tutorial](docs/tutorial-pagila.md), over a schema nobody designed for this |
+| `examples/orders/` | One writable table projected end to end: its schema, its Secret, and the projection |
+| `examples/pagila/` | The ten projections this README shows, and the [Pagila tutorial](docs/tutorial-pagila.md) walks through: a whole schema nobody designed for this |
 | `examples/apiservice.yaml` | A hand-written `APIService`, for the rare case of registering groups yourself |
 | `test/e2e` | Cluster suite: three drivers, watch, admission, a database outage, and the benchmarks |
 | `docs/` | Tutorials per driver, plus the reference, operating and performance documents |

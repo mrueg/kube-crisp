@@ -589,13 +589,13 @@ func (e *unreachableError) Unwrap() error { return e.err }
 // and for the same reason: it cannot work, and saying so where the author is
 // looking is the whole point.
 func checkStatements(ctx context.Context, pool *crispsql.Pool, p *crispv1alpha1.CustomResourceProjection) error {
-	for _, q := range namedQueries(&p.Spec.Queries) {
+	for _, q := range namedQueries(&p.Spec) {
 		for _, statement := range q.statements() {
 			if err := pool.Check(ctx, statement); err != nil {
 				if crispsql.IsUnavailable(err) {
 					return &unreachableError{err: err}
 				}
-				return fmt.Errorf("queries.%s: the database cannot run this statement: %w", q.name, err)
+				return fmt.Errorf("%s: the database cannot run this statement: %w", q.name, err)
 			}
 		}
 	}
@@ -625,24 +625,46 @@ func (q namedQuery) statements() []string {
 // rather than by reflection, so a query added to the API without being checked
 // here is a compile error rather than a statement that quietly stops being
 // validated.
-func namedQueries(qs *crispv1alpha1.Queries) []namedQuery {
-	out := []namedQuery{{name: "list", query: &qs.List}}
+//
+// Taking the whole spec rather than spec.queries, because that is what the
+// promise above turned out to be worth: watch.query and watch.deletedQuery live
+// on the watch settings, so adding them was not a compile error here and
+// neither was ever checked against the database. A projection whose watch SQL
+// had outlived the schema reported Ready and failed every poll.
+func namedQueries(spec *crispv1alpha1.CustomResourceProjectionSpec) []namedQuery {
+	qs := &spec.Queries
+	out := []namedQuery{{name: "queries.list", query: &qs.List}}
 	for _, candidate := range []struct {
 		name  string
 		query *crispv1alpha1.Query
 	}{
-		{"get", qs.Get},
-		{"create", qs.Create},
-		{"update", qs.Update},
-		{"delete", qs.Delete},
-		{"markDeleted", qs.MarkDeleted},
-		{"deleteCollection", qs.DeleteCollection},
-		{"updateStatus", qs.UpdateStatus},
-		{"count", qs.Count},
+		{"queries.get", qs.Get},
+		{"queries.create", qs.Create},
+		{"queries.update", qs.Update},
+		{"queries.delete", qs.Delete},
+		{"queries.markDeleted", qs.MarkDeleted},
+		{"queries.deleteCollection", qs.DeleteCollection},
+		{"queries.updateStatus", qs.UpdateStatus},
+		{"queries.count", qs.Count},
 	} {
 		if candidate.query != nil {
 			out = append(out, namedQuery{name: candidate.name, query: candidate.query})
 		}
 	}
+
+	if spec.Watch != nil {
+		for _, candidate := range []struct {
+			name  string
+			query *crispv1alpha1.Query
+		}{
+			{"watch.query", spec.Watch.Query},
+			{"watch.deletedQuery", spec.Watch.DeletedQuery},
+		} {
+			if candidate.query != nil {
+				out = append(out, namedQuery{name: candidate.name, query: candidate.query})
+			}
+		}
+	}
+
 	return out
 }

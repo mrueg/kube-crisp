@@ -43,7 +43,7 @@ func newTestCompiler(t *testing.T) *Compiler {
 		t.Fatalf("opening sqlite: %v", err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE orders (id TEXT PRIMARY KEY, tenant TEXT NOT NULL)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE orders (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '1')`); err != nil {
 		t.Fatalf("creating the table: %v", err)
 	}
 

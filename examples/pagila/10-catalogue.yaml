@@ -1,0 +1,356 @@
+# The catalogue: what the chain rents, rather than what any one store does with
+# it. Cluster-scoped, because a film is not the property of a store.
+---
+# Store is cluster-scoped and its name is the namespace every other projection
+# here uses, so `kubectl get stores` lists the namespaces.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-stores
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: Store
+    plural: stores
+    singular: store
+    scope: Cluster
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            manager: {type: string}
+            address: {type: string}
+            district: {type: string}
+            city: {type: string}
+            country: {type: string}
+            phone: {type: string}
+    additionalPrinterColumns:
+      - {name: Manager, type: string, jsonPath: .spec.manager}
+      - {name: City, type: string, jsonPath: .spec.city}
+      - {name: Country, type: string, jsonPath: .spec.country}
+  queries:
+    list:
+      sql: |
+        SELECT 'store-' || s.store_id                    AS name,
+               st.first_name || ' ' || st.last_name      AS manager,
+               a.address, a.district, a.phone,
+               c.city, co.country,
+               (extract(epoch FROM s.last_update) * 1000000)::bigint::text AS version
+        FROM store s
+        JOIN staff   st ON st.staff_id   = s.manager_staff_id
+        JOIN address a  ON a.address_id  = s.address_id
+        JOIN city    c  ON c.city_id     = a.city_id
+        JOIN country co ON co.country_id = c.country_id
+        ORDER BY s.store_id
+    get:
+      sql: |
+        SELECT 'store-' || s.store_id                    AS name,
+               st.first_name || ' ' || st.last_name      AS manager,
+               a.address, a.district, a.phone,
+               c.city, co.country,
+               (extract(epoch FROM s.last_update) * 1000000)::bigint::text AS version
+        FROM store s
+        JOIN staff   st ON st.staff_id   = s.manager_staff_id
+        JOIN address a  ON a.address_id  = s.address_id
+        JOIN city    c  ON c.city_id     = a.city_id
+        JOIN country co ON co.country_id = c.country_id
+        WHERE 'store-' || s.store_id = :name
+  mapping:
+    name: name
+    resourceVersion: version
+    fields:
+      - {column: manager,  path: spec.manager}
+      - {column: address,  path: spec.address}
+      - {column: district, path: spec.district}
+      - {column: city,     path: spec.city}
+      - {column: country,  path: spec.country}
+      - {column: phone,    path: spec.phone}
+---
+# Film is the flagship read: a slug for a name, labels worth selecting on, two
+# arrays gathered from join tables, and PostgreSQL's own generated columns
+# reported as status — which is exactly what status is for, a value the object's
+# owner computes rather than one a client sets.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-films
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: Film
+    plural: films
+    singular: film
+    shortNames: [fl]
+    categories: [pagila]
+    scope: Cluster
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            title: {type: string}
+            description: {type: string}
+            releaseYear: {type: integer}
+            language: {type: string}
+            rating: {type: string}
+            lengthMinutes: {type: integer}
+            rentalRate: {type: string}
+            rentalDuration: {type: integer}
+            replacementCost: {type: string}
+            specialFeatures: {type: array, items: {type: string}}
+            categories: {type: array, items: {type: string}}
+            actors: {type: array, items: {type: string}}
+        status:
+          type: object
+          properties:
+            # Both are generated columns in Pagila: the database computes them,
+            # and nothing here can write them.
+            rentalsToBreakEven: {type: integer}
+            revenueProjection: {type: string}
+    additionalPrinterColumns:
+      - {name: Title, type: string, jsonPath: .spec.title}
+      - {name: Rating, type: string, jsonPath: .spec.rating}
+      - {name: Rate, type: string, jsonPath: .spec.rentalRate}
+      - {name: Minutes, type: integer, jsonPath: .spec.lengthMinutes}
+      - {name: Break-even, type: integer, jsonPath: .status.rentalsToBreakEven}
+    # Declaring the column as well as the path is what lets the selector reach
+    # the database: the requested value is bound under that name, and the query
+    # can filter on it instead of the server discarding rows it already read.
+    selectableFields:
+      - {jsonPath: .spec.rating, column: rating}
+  queries:
+    list:
+      sql: |
+        SELECT f.film_id,
+               lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS slug,
+               f.title, f.description,
+               f.release_year::text  AS release_year,
+               f.rating::text        AS rating,
+               btrim(l.name)         AS language,
+               f.rental_rate::text   AS rental_rate,
+               f.rental_duration, f.length,
+               f.replacement_cost::text AS replacement_cost,
+               to_jsonb(coalesce(f.special_features, '{}')) AS special_features,
+               (SELECT to_jsonb(coalesce(array_agg(c.name ORDER BY c.name), '{}'))
+                  FROM film_category fc
+                  JOIN category c ON c.category_id = fc.category_id
+                 WHERE fc.film_id = f.film_id) AS categories,
+               (SELECT to_jsonb(coalesce(array_agg(a.first_name || ' ' || a.last_name
+                                                   ORDER BY a.last_name, a.first_name), '{}'))
+                  FROM film_actor fa
+                  JOIN actor a ON a.actor_id = fa.actor_id
+                 WHERE fa.film_id = f.film_id) AS actors,
+               (SELECT c.name FROM film_category fc
+                  JOIN category c ON c.category_id = fc.category_id
+                 WHERE fc.film_id = f.film_id ORDER BY c.name LIMIT 1) AS primary_category,
+               f.rentals_to_breakeven,
+               f.revenue_projection::text AS revenue_projection,
+               (extract(epoch FROM f.last_update) * 1000000)::bigint::text AS version
+        FROM film f
+        JOIN language l ON l.language_id = f.language_id
+        WHERE (:rating::text     IS NULL OR f.rating::text  = :rating)
+          AND (:rating_not::text IS NULL OR f.rating::text <> :rating_not)
+        ORDER BY f.film_id
+        LIMIT COALESCE(:limit, 2000) OFFSET COALESCE(:offset, 0)
+      maxRows: 5000
+      timeout: 10s
+    get:
+      sql: |
+        SELECT f.film_id,
+               lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS slug,
+               f.title, f.description,
+               f.release_year::text  AS release_year,
+               f.rating::text        AS rating,
+               btrim(l.name)         AS language,
+               f.rental_rate::text   AS rental_rate,
+               f.rental_duration, f.length,
+               f.replacement_cost::text AS replacement_cost,
+               to_jsonb(coalesce(f.special_features, '{}')) AS special_features,
+               (SELECT to_jsonb(coalesce(array_agg(c.name ORDER BY c.name), '{}'))
+                  FROM film_category fc
+                  JOIN category c ON c.category_id = fc.category_id
+                 WHERE fc.film_id = f.film_id) AS categories,
+               (SELECT to_jsonb(coalesce(array_agg(a.first_name || ' ' || a.last_name
+                                                   ORDER BY a.last_name, a.first_name), '{}'))
+                  FROM film_actor fa
+                  JOIN actor a ON a.actor_id = fa.actor_id
+                 WHERE fa.film_id = f.film_id) AS actors,
+               (SELECT c.name FROM film_category fc
+                  JOIN category c ON c.category_id = fc.category_id
+                 WHERE fc.film_id = f.film_id ORDER BY c.name LIMIT 1) AS primary_category,
+               f.rentals_to_breakeven,
+               f.revenue_projection::text AS revenue_projection,
+               (extract(epoch FROM f.last_update) * 1000000)::bigint::text AS version
+        FROM film f
+        JOIN language l ON l.language_id = f.language_id
+        WHERE lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) = :name
+      timeout: 5s
+  # Nothing polls the catalogue: it changes when someone edits it, which is not
+  # often enough to be worth a query every few seconds.
+  watch:
+    disabled: true
+  mapping:
+    name: slug
+    uid: film_id
+    resourceVersion: version
+    labels:
+      pagila.example.com/rating: rating
+      pagila.example.com/language: language
+      pagila.example.com/category: primary_category
+    fields:
+      - {column: title,             path: spec.title}
+      - {column: description,       path: spec.description}
+      - {column: release_year,      path: spec.releaseYear, type: integer}
+      - {column: language,          path: spec.language}
+      - {column: rating,            path: spec.rating}
+      - {column: length,            path: spec.lengthMinutes, type: integer}
+      - {column: rental_rate,       path: spec.rentalRate}
+      - {column: rental_duration,   path: spec.rentalDuration, type: integer}
+      - {column: replacement_cost,  path: spec.replacementCost}
+      - {column: special_features,  path: spec.specialFeatures, type: json}
+      - {column: categories,        path: spec.categories, type: json}
+      - {column: actors,            path: spec.actors, type: json}
+      - {column: rentals_to_breakeven, path: status.rentalsToBreakEven, type: integer}
+      - {column: revenue_projection,   path: status.revenueProjection}
+---
+# Actor is where a slug stops being enough. Pagila has two actors called Susan
+# Davis (101 and 110), so a name built from the slug alone would have two rows
+# claiming one object. The id goes on the end, which is ugly and correct — an
+# object name has to identify exactly one row.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-actors
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: Actor
+    plural: actors
+    singular: actor
+    categories: [pagila]
+    scope: Cluster
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            firstName: {type: string}
+            lastName: {type: string}
+            fullName: {type: string}
+        status:
+          type: object
+          properties:
+            films: {type: integer}
+    additionalPrinterColumns:
+      - {name: Full name, type: string, jsonPath: .spec.fullName}
+      - {name: Films, type: integer, jsonPath: .status.films}
+  queries:
+    list:
+      sql: |
+        SELECT lower(regexp_replace(a.first_name || '-' || a.last_name, '[^a-zA-Z0-9]+', '-', 'g'))
+                 || '-' || a.actor_id                    AS name,
+               a.actor_id, a.first_name, a.last_name,
+               a.first_name || ' ' || a.last_name        AS full_name,
+               (SELECT count(*) FROM film_actor fa WHERE fa.actor_id = a.actor_id) AS films,
+               (extract(epoch FROM a.last_update) * 1000000)::bigint::text AS version
+        FROM actor a
+        ORDER BY a.actor_id
+        LIMIT COALESCE(:limit, 1000) OFFSET COALESCE(:offset, 0)
+      maxRows: 5000
+    get:
+      sql: |
+        SELECT lower(regexp_replace(a.first_name || '-' || a.last_name, '[^a-zA-Z0-9]+', '-', 'g'))
+                 || '-' || a.actor_id                    AS name,
+               a.actor_id, a.first_name, a.last_name,
+               a.first_name || ' ' || a.last_name        AS full_name,
+               (SELECT count(*) FROM film_actor fa WHERE fa.actor_id = a.actor_id) AS films,
+               (extract(epoch FROM a.last_update) * 1000000)::bigint::text AS version
+        FROM actor a
+        WHERE lower(regexp_replace(a.first_name || '-' || a.last_name, '[^a-zA-Z0-9]+', '-', 'g'))
+                || '-' || a.actor_id = :name
+  watch:
+    disabled: true
+  mapping:
+    name: name
+    uid: actor_id
+    resourceVersion: version
+    fields:
+      - {column: first_name, path: spec.firstName}
+      - {column: last_name,  path: spec.lastName}
+      - {column: full_name,  path: spec.fullName}
+      - {column: films,      path: status.films, type: integer}
+---
+# Category is the smallest projection here, and the vocabulary the film labels
+# are drawn from.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-categories
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: Category
+    plural: categories
+    singular: category
+    categories: [pagila]
+    scope: Cluster
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            name: {type: string}
+        status:
+          type: object
+          properties:
+            films: {type: integer}
+    additionalPrinterColumns:
+      - {name: Category, type: string, jsonPath: .spec.name}
+      - {name: Films, type: integer, jsonPath: .status.films}
+  queries:
+    list:
+      sql: |
+        SELECT lower(regexp_replace(c.name, '[^a-zA-Z0-9]+', '-', 'g')) AS slug,
+               c.category_id, c.name,
+               (SELECT count(*) FROM film_category fc WHERE fc.category_id = c.category_id) AS films,
+               (extract(epoch FROM c.last_update) * 1000000)::bigint::text AS version
+        FROM category c
+        ORDER BY c.name
+    get:
+      sql: |
+        SELECT lower(regexp_replace(c.name, '[^a-zA-Z0-9]+', '-', 'g')) AS slug,
+               c.category_id, c.name,
+               (SELECT count(*) FROM film_category fc WHERE fc.category_id = c.category_id) AS films,
+               (extract(epoch FROM c.last_update) * 1000000)::bigint::text AS version
+        FROM category c
+        WHERE lower(regexp_replace(c.name, '[^a-zA-Z0-9]+', '-', 'g')) = :name
+  watch:
+    disabled: true
+  mapping:
+    name: slug
+    uid: category_id
+    resourceVersion: version
+    fields:
+      - {column: name,  path: spec.name}
+      - {column: films, path: status.films, type: integer}

@@ -1,0 +1,220 @@
+# Rental is the writable one, and the shape of the write comes from the data:
+# Pagila stores a rental as a tsrange, so renting a film opens the range and
+# returning it closes the upper bound. Which makes returning a film a status
+# write — exactly the Kubernetes idiom, arrived at from the schema rather than
+# imposed on it.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-rentals
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: Rental
+    plural: rentals
+    singular: rental
+    categories: [pagila]
+    scope: Namespaced
+    subresources:
+      # Returning a film writes status and nothing else, so it cannot
+      # accidentally reassign the rental to another customer on the way past.
+      status: {}
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            # The film to rent, by the same slug `kubectl get films` prints.
+            film: {type: string}
+            customer: {type: string}
+            staff: {type: string}
+          required: [film, customer]
+        status:
+          type: object
+          properties:
+            phase: {type: string, enum: [Out, Returned]}
+            rentedAt: {type: string}
+            returnedAt: {type: string}
+    additionalPrinterColumns:
+      - {name: Film, type: string, jsonPath: .spec.film}
+      - {name: Customer, type: string, jsonPath: .spec.customer}
+      - {name: Phase, type: string, jsonPath: .status.phase}
+      - {name: Rented, type: string, jsonPath: .status.rentedAt}
+      - {name: Returned, type: string, jsonPath: .status.returnedAt}
+    selectableFields:
+      - {jsonPath: .status.phase, column: phase}
+  queries:
+    list:
+      sql: |
+        SELECT 'rental-' || r.rental_id        AS name,
+               'store-' || i.store_id          AS store_ns,
+               r.rental_id,
+               lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS film,
+               c.first_name || ' ' || c.last_name AS customer,
+               s.username                      AS staff,
+               lower(r.rental_period)::text    AS rented_at,
+               CASE WHEN upper_inf(r.rental_period) THEN NULL
+                    ELSE upper(r.rental_period)::text END AS returned_at,
+               CASE WHEN upper_inf(r.rental_period) THEN 'Out' ELSE 'Returned' END AS phase,
+               (extract(epoch FROM r.last_update) * 1000000)::bigint::text AS version
+        FROM rental r
+        JOIN inventory i ON i.inventory_id = r.inventory_id
+        JOIN film f      ON f.film_id      = i.film_id
+        JOIN customer c  ON c.customer_id  = r.customer_id
+        JOIN staff s     ON s.staff_id     = r.staff_id
+        WHERE (:namespace::text IS NULL OR 'store-' || i.store_id = :namespace)
+          AND (:phase::text IS NULL OR
+               CASE WHEN upper_inf(r.rental_period) THEN 'Out' ELSE 'Returned' END = :phase)
+        ORDER BY r.rental_id DESC
+        LIMIT COALESCE(:limit, 500) OFFSET COALESCE(:offset, 0)
+      maxRows: 20000
+      timeout: 10s
+    get:
+      sql: |
+        SELECT 'rental-' || r.rental_id        AS name,
+               'store-' || i.store_id          AS store_ns,
+               r.rental_id,
+               lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS film,
+               c.first_name || ' ' || c.last_name AS customer,
+               s.username                      AS staff,
+               lower(r.rental_period)::text    AS rented_at,
+               CASE WHEN upper_inf(r.rental_period) THEN NULL
+                    ELSE upper(r.rental_period)::text END AS returned_at,
+               CASE WHEN upper_inf(r.rental_period) THEN 'Out' ELSE 'Returned' END AS phase,
+               (extract(epoch FROM r.last_update) * 1000000)::bigint::text AS version
+        FROM rental r
+        JOIN inventory i ON i.inventory_id = r.inventory_id
+        JOIN film f      ON f.film_id      = i.film_id
+        JOIN customer c  ON c.customer_id  = r.customer_id
+        JOIN staff s     ON s.staff_id     = r.staff_id
+        WHERE 'store-' || i.store_id = :namespace AND 'rental-' || r.rental_id = :name
+    # Renting: the client names a film and a customer, and the statement finds a
+    # copy of that film in this store that nobody has out. If there is none the
+    # INSERT matches no row and kube-crisp answers 404 — which is the truth,
+    # since the object the client asked to create does not exist to be created.
+    #
+    # RETURNING is what makes this work at all: the database assigns the id the
+    # object is named after, so without it there would be nothing to read the
+    # new object back by. The subqueries are allowed to reach the joined tables
+    # that the inserted row only references.
+    create:
+      sql: |
+        INSERT INTO rental (inventory_id, customer_id, staff_id, rental_period)
+        SELECT i.inventory_id, c.customer_id, s.staff_id, tsrange(now()::timestamp, NULL)
+        FROM inventory i
+        JOIN film f     ON f.film_id = i.film_id
+        JOIN customer c ON 'store-' || c.store_id = :namespace
+        JOIN staff s    ON 'store-' || s.store_id = :namespace
+        WHERE 'store-' || i.store_id = :namespace
+          AND lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) = :film
+          AND c.first_name || ' ' || c.last_name = :customer
+          AND s.username = COALESCE(:staff, (SELECT username FROM staff
+                                              WHERE 'store-' || store_id = :namespace
+                                              ORDER BY staff_id LIMIT 1))
+          AND NOT EXISTS (SELECT 1 FROM rental r
+                           WHERE r.inventory_id = i.inventory_id
+                             AND upper_inf(r.rental_period))
+        ORDER BY i.inventory_id
+        LIMIT 1
+        RETURNING 'rental-' || rental_id AS name,
+                  (SELECT 'store-' || i2.store_id FROM inventory i2
+                    WHERE i2.inventory_id = rental.inventory_id) AS store_ns,
+                  rental_id,
+                  (SELECT lower(regexp_replace(f2.title, '[^a-zA-Z0-9]+', '-', 'g'))
+                     FROM inventory i2 JOIN film f2 ON f2.film_id = i2.film_id
+                    WHERE i2.inventory_id = rental.inventory_id) AS film,
+                  (SELECT c2.first_name || ' ' || c2.last_name FROM customer c2
+                    WHERE c2.customer_id = rental.customer_id) AS customer,
+                  (SELECT s2.username FROM staff s2 WHERE s2.staff_id = rental.staff_id) AS staff,
+                  lower(rental_period)::text AS rented_at,
+                  NULL::text AS returned_at,
+                  'Out' AS phase,
+                  (extract(epoch FROM last_update) * 1000000)::bigint::text AS version
+      timeout: 10s
+    # Returning a film: close the range. A rental already returned matches
+    # nothing, so returning twice is a 404 rather than a silent success.
+    updateStatus:
+      sql: |
+        UPDATE rental
+        SET rental_period = tsrange(lower(rental_period), now()::timestamp)
+        WHERE 'rental-' || rental_id = :name
+          AND upper_inf(rental_period)
+          AND rental_id IN (SELECT r.rental_id FROM rental r
+                              JOIN inventory i ON i.inventory_id = r.inventory_id
+                             WHERE 'store-' || i.store_id = :namespace)
+        RETURNING 'rental-' || rental_id AS name,
+                  (SELECT 'store-' || i2.store_id FROM inventory i2
+                    WHERE i2.inventory_id = rental.inventory_id) AS store_ns,
+                  rental_id,
+                  (SELECT lower(regexp_replace(f2.title, '[^a-zA-Z0-9]+', '-', 'g'))
+                     FROM inventory i2 JOIN film f2 ON f2.film_id = i2.film_id
+                    WHERE i2.inventory_id = rental.inventory_id) AS film,
+                  (SELECT c2.first_name || ' ' || c2.last_name FROM customer c2
+                    WHERE c2.customer_id = rental.customer_id) AS customer,
+                  (SELECT s2.username FROM staff s2 WHERE s2.staff_id = rental.staff_id) AS staff,
+                  lower(rental_period)::text AS rented_at,
+                  upper(rental_period)::text AS returned_at,
+                  'Returned' AS phase,
+                  (extract(epoch FROM last_update) * 1000000)::bigint::text AS version
+      timeout: 10s
+    # Deleting a rental that has a payment against it is refused by the
+    # database, and kube-crisp turns a foreign key violation into 409 Conflict
+    # — so the constraint reaches the client as a constraint rather than as an
+    # internal error. Nothing here restates the rule; the schema already has it.
+    delete:
+      sql: |
+        DELETE FROM rental
+        WHERE 'rental-' || rental_id = :name
+          AND rental_id IN (SELECT r.rental_id FROM rental r
+                              JOIN inventory i ON i.inventory_id = r.inventory_id
+                             WHERE 'store-' || i.store_id = :namespace)
+      timeout: 10s
+  # Watched, because this is the table that actually changes. The tutorial adds
+  # an index on rental.last_update before turning this on; without one every
+  # poll is a sequential scan of the whole table.
+  watch:
+    pollInterval: 5s
+    query:
+      sql: |
+        SELECT 'rental-' || r.rental_id        AS name,
+               'store-' || i.store_id          AS store_ns,
+               r.rental_id,
+               lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS film,
+               c.first_name || ' ' || c.last_name AS customer,
+               s.username                      AS staff,
+               lower(r.rental_period)::text    AS rented_at,
+               CASE WHEN upper_inf(r.rental_period) THEN NULL
+                    ELSE upper(r.rental_period)::text END AS returned_at,
+               CASE WHEN upper_inf(r.rental_period) THEN 'Out' ELSE 'Returned' END AS phase,
+               (extract(epoch FROM r.last_update) * 1000000)::bigint::text AS version
+        FROM rental r
+        JOIN inventory i ON i.inventory_id = r.inventory_id
+        JOIN film f      ON f.film_id      = i.film_id
+        JOIN customer c  ON c.customer_id  = r.customer_id
+        JOIN staff s     ON s.staff_id     = r.staff_id
+        WHERE :since::text IS NULL
+           OR (extract(epoch FROM r.last_update) * 1000000)::bigint > :since::bigint
+        ORDER BY r.last_update
+        LIMIT COALESCE(:limit, 1000)
+      maxRows: 20000
+  mapping:
+    name: name
+    namespace: store_ns
+    uid: rental_id
+    resourceVersion: version
+    # No label for the phase, deliberately. A column mapped as both a label and
+    # a field can only be written from one of them — the field wins — and
+    # kube-crisp warns on every write that the label was ignored. The phase is
+    # a selectable field instead, which is the half that can actually change.
+    fields:
+      - {column: film,        path: spec.film}
+      - {column: customer,    path: spec.customer}
+      - {column: staff,       path: spec.staff}
+      - {column: phase,       path: status.phase}
+      - {column: rented_at,   path: status.rentedAt}
+      - {column: returned_at, path: status.returnedAt}

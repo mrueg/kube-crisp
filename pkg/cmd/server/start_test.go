@@ -6,8 +6,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
 	"testing"
 	"time"
+
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
+	genericoptions "k8s.io/apiserver/pkg/server/options"
 
 	genericapiserver "k8s.io/apiserver/pkg/server"
 
@@ -94,10 +99,10 @@ func TestPriorityAndFairnessIsOffUnlessAskedFor(t *testing.T) {
 	}
 
 	// Turning it on has to reach the generic machinery rather than being
-	// quietly cleared. These options have no core client — that is what makes
-	// them offline — and the filter needs one for its informers, so the
-	// complaint about the missing client is the proof that the setting
-	// survived. Config() succeeding here would mean the flag does nothing.
+	// quietly cleared. These options have no cluster — that is what makes them
+	// offline — and the filter is driven by FlowSchemas, so the refusal is the
+	// proof that the setting survived. Config() succeeding here would mean the
+	// flag does nothing.
 	asked := offlineOptions(t)
 	asked.RecommendedOptions.Features.EnablePriorityAndFairness = true
 
@@ -105,8 +110,8 @@ func TestPriorityAndFairnessIsOffUnlessAskedFor(t *testing.T) {
 	if err == nil {
 		t.Fatal("Config() ignored the enabled filter")
 	}
-	if !strings.Contains(err.Error(), "priority and fairness") {
-		t.Errorf("Config() error = %v, want it to name the filter", err)
+	if !strings.Contains(err.Error(), "--enable-priority-and-fairness requires a kubeconfig") {
+		t.Errorf("Config() error = %v, want it to name the filter and what it needs", err)
 	}
 }
 
@@ -183,8 +188,16 @@ func TestDSNResolverNeedsAClusterOrTheEnvironment(t *testing.T) {
 func offlineOptions(t *testing.T) *CrispServerOptions {
 	t.Helper()
 
+	// Not in a cluster, whatever this test is running inside: the standalone
+	// path is chosen by asking rest.InClusterConfig, and a suite running in a
+	// pod would otherwise take the other branch and try to reach a real API
+	// server. This helper used to set CoreAPI = nil by hand, which is precisely
+	// the step production was missing — so every test passed while the binary
+	// could not start outside a cluster at all.
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+
 	o := NewCrispServerOptions(os.Stdout, os.Stderr)
-	o.RecommendedOptions.CoreAPI = nil
 	o.RecommendedOptions.SecureServing.BindPort = 0
 	// Config() generates self-signed certificates, and the default directory is
 	// relative to the working directory — which is the package source tree
@@ -429,5 +442,90 @@ func TestServingDNSNamesCoverTheService(t *testing.T) {
 func TestServingDNSNamesAreEmptyWithoutAService(t *testing.T) {
 	if names := (&CrispServerOptions{}).servingDNSNames(); len(names) != 0 {
 		t.Errorf("servingDNSNames() = %v with no Service configured, want none", names)
+	}
+}
+
+// A server with no cluster behind it has to start. --projection-dir with
+// --local-dsn-from-env needs no Kubernetes at all, and that is the shape of
+// every "try it against your own database" instruction — but the recommended
+// options build their core client from the in-cluster environment and return
+// that error rather than leaving the client unset, so the binary stopped at
+// "unable to load in-cluster configuration" before reaching any of the checks
+// that would have explained themselves.
+func TestConfigStartsWithNoClusterAtAll(t *testing.T) {
+	config, err := offlineOptions(t).Config()
+	if err != nil {
+		t.Fatalf("Config() returned error: %v", err)
+	}
+
+	if config.GenericConfig.ClientConfig != nil {
+		t.Error("a server with no kubeconfig and no service account built a client anyway")
+	}
+	if config.GenericConfig.SharedInformerFactory != nil {
+		t.Error("a server with no cluster started informers against it")
+	}
+}
+
+// With no cluster there is no SubjectAccessReview to ask, so delegated
+// authorization holds no opinion on a resource request and the fallback denies
+// it. That produced a server which came up and refused every read — a worse
+// failure than not coming up, because it reads as a permissions problem the
+// operator can fix. Nothing about it is fixable without a cluster.
+func TestStandaloneAllowsRequestsBecauseThereIsNothingToAsk(t *testing.T) {
+	config, err := offlineOptions(t).Config()
+	if err != nil {
+		t.Fatalf("Config() returned error: %v", err)
+	}
+
+	decision, _, err := config.GenericConfig.Authorization.Authorizer.Authorize(
+		t.Context(),
+		authorizer.AttributesRecord{
+			User:            &user.DefaultInfo{Name: "system:anonymous"},
+			Verb:            "list",
+			APIGroup:        "store.example.com",
+			Resource:        "orders",
+			Namespace:       "acme",
+			ResourceRequest: true,
+		})
+	if err != nil {
+		t.Fatalf("Authorize() returned error: %v", err)
+	}
+	if decision != authorizer.DecisionAllow {
+		t.Errorf("a read of a projected collection was %v, want it allowed on a server with no cluster to ask", decision)
+	}
+}
+
+// The other half, and the one that matters for a real deployment: an explicit
+// --kubeconfig is the operator asserting there is a cluster. Failing to reach
+// it has to stay loud rather than being downgraded to a server that allows
+// everything and cannot read a Secret.
+func TestAKubeconfigIsNeverDowngradedToStandalone(t *testing.T) {
+	o := offlineOptions(t)
+	o.RecommendedOptions.CoreAPI = genericoptions.NewCoreAPIOptions()
+	o.RecommendedOptions.CoreAPI.CoreAPIKubeconfigPath = filepath.Join(t.TempDir(), "kubeconfig")
+
+	if o.standalone() {
+		t.Fatal("an explicit --kubeconfig was treated as having no cluster")
+	}
+
+	// And it is used rather than ignored: the path does not exist, so this has
+	// to fail, and fail about that file.
+	if _, err := o.Config(); err == nil {
+		t.Error("Config() accepted a --kubeconfig naming a file that is not there")
+	}
+}
+
+// Admission needs a cluster, and said so several layers down in a message about
+// a nil shared informer. It says so here instead.
+func TestAdmissionNeedsAClusterAndSaysSo(t *testing.T) {
+	o := offlineOptions(t)
+	o.EnableAdmission = true
+
+	_, err := o.Config()
+	if err == nil {
+		t.Fatal("Config() accepted --enable-admission with no cluster to watch")
+	}
+	if !strings.Contains(err.Error(), "--enable-admission requires a kubeconfig") {
+		t.Errorf("Config() error = %v, want it to name the flag and what it needs", err)
 	}
 }

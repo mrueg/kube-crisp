@@ -40,10 +40,17 @@ that depend on the request are refused alongside watch for the same reason.
 `spec.resource.schema` is not decoration. It is compiled into a validator that rejects writes which
 do not match it, and published as OpenAPI v3 for the group version, which is what makes
 `kubectl explain orders.spec.customer` return something. A projection that borrows its schema with
-`schemaFrom` is resolved from the named CustomResourceDefinition when it is compiled, and is then
-validated and explained exactly as a declared one is — the CRD is only read, never served for the
-projected group. Resolution needs a cluster connection, so `schemaFrom` is refused rather than
-ignored when the server is running without one.
+`schemaFrom` is resolved from the named CustomResourceDefinition, and is then validated and
+explained exactly as a declared one is — the CRD is only read, never served for the projected group.
+Resolution needs a cluster connection, so `schemaFrom` is refused rather than ignored when the
+server is running without one.
+
+Editing the referenced CustomResourceDefinition is picked up. The borrowed schema is part of what
+identifies a compiled projection, alongside its spec and the connection string its data source
+resolves to, so a changed one rebuilds the storage exactly as a changed spec would — and an
+unchanged one does not, which is what keeps a watch cache alive across a sync. The change lands at
+the next resync rather than the moment the CRD is saved: up to `ResyncPeriod`, the same backstop
+credential rotation has when no Secret informer is configured.
 
 Schemas are published to `/openapi/v3` only. The v2 document is served, because the aggregation
 layer downloads it regardless, but it carries no projected schemas: a client old enough to read

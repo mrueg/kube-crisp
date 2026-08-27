@@ -880,9 +880,12 @@ func (p *Pool) transact(
 		count, countErr := result.RowsAffected()
 		if countErr != nil {
 			count = -1
-		} else {
-			affected += count
 		}
+		// Recorded on its own span and nowhere else. The count this function
+		// reports is the last statement's, because that is the one the caller
+		// asked about: a write decides "matched nothing" from it, and a
+		// bookkeeping statement that always touches a row would otherwise stand
+		// in for an update that matched none.
 		stmtSpan.endAffected(count, nil)
 	}
 
@@ -906,7 +909,7 @@ func (p *Pool) transact(
 		if err != nil {
 			return nil, 0, err
 		}
-		affected += int64(len(out))
+		affected = int64(len(out))
 	} else {
 		_, stmtSpan := p.startSpan(ctx, "exec", last.SQL)
 		result, err := tx.ExecContext(ctx, last.SQL, bind(last, args)...)
@@ -921,7 +924,7 @@ func (p *Pool) transact(
 			count = -1
 		}
 		stmtSpan.endAffected(count, nil)
-		affected += count
+		affected = count
 	}
 
 	// Before the commit, for the same reason as on the read path.

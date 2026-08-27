@@ -55,11 +55,21 @@ type Prepared struct {
 	ReadPoolKey string
 
 	// Fingerprint changes whenever anything the compiled resources depend on
-	// does: the projection's spec, or the connection string its data source
-	// resolves to. Equal fingerprints mean a recompile would produce the same
-	// storage, so the existing storage can be kept — along with its watch
-	// cache, its read cache, and the queries it has in flight.
+	// does: the projection's spec, the connection string its data source
+	// resolves to, or the schema it borrows from a CustomResourceDefinition.
+	// Equal fingerprints mean a recompile would produce the same storage, so
+	// the existing storage can be kept — along with its watch cache, its read
+	// cache, and the queries it has in flight.
 	Fingerprint string
+
+	// Borrowed holds the schema resolved for each version that declares
+	// schemaFrom, keyed by version name.
+	//
+	// Resolved here rather than during the compile so it can reach the
+	// fingerprint, and carried across so the compile uses the same one: two
+	// reads either side of a CRD being edited would otherwise fingerprint one
+	// schema and serve another.
+	Borrowed map[string]*apiextensionsv1.JSONSchemaProps
 }
 
 // Prepare resolves a projection's data source and reports what identifies the
@@ -96,14 +106,64 @@ func (c *Compiler) Prepare(ctx context.Context, p *crispv1alpha1.CustomResourceP
 		prepared.ReadPool, prepared.ReadPoolKey = readPool, readKey
 	}
 
+	// A borrowed schema belongs in the fingerprint for the same reason the
+	// connection string does: it is not in the projection's spec, and it can
+	// change without the projection changing. Without it, editing the
+	// referenced CustomResourceDefinition left the projection validating and
+	// explaining against the shape it read when it first compiled, until
+	// something else about it changed or the process restarted — with nothing
+	// reporting that it had.
+	borrowed, err := c.borrowedSchemas(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	prepared.Borrowed = borrowed
+
 	spec, err := json.Marshal(p.Spec)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprinting projection %s: %w", p.Name, err)
 	}
-	digest := sha256.Sum256(append(spec, []byte("\x00"+poolKey+"\x00"+prepared.ReadPoolKey)...))
+	schemas, err := json.Marshal(borrowed)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprinting the borrowed schemas of %s: %w", p.Name, err)
+	}
+	digest := sha256.Sum256(append(spec, []byte("\x00"+poolKey+"\x00"+prepared.ReadPoolKey+"\x00")...))
+	digest = sha256.Sum256(append(digest[:], schemas...))
 	prepared.Fingerprint = hex.EncodeToString(digest[:])
 
 	return prepared, nil
+}
+
+// borrowedSchemas resolves every schema this projection borrows, keyed by the
+// version that borrows it. Empty for a projection that declares its own.
+func (c *Compiler) borrowedSchemas(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) (map[string]*apiextensionsv1.JSONSchemaProps, error) {
+	res := p.Spec.Resource
+
+	refs := map[string]*crispv1alpha1.CRDReference{}
+	if res.Schema == nil && res.SchemaFrom != nil {
+		refs[res.Version] = res.SchemaFrom
+	}
+	for _, extra := range res.Versions {
+		if extra.Served != nil && !*extra.Served {
+			continue
+		}
+		if extra.Schema == nil && extra.SchemaFrom != nil {
+			refs[extra.Name] = extra.SchemaFrom
+		}
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+
+	borrowed := make(map[string]*apiextensionsv1.JSONSchemaProps, len(refs))
+	for version, ref := range refs {
+		schema, err := c.borrow(ctx, *ref)
+		if err != nil {
+			return nil, fmt.Errorf("version %s: %w", version, err)
+		}
+		borrowed[version] = schema
+	}
+	return borrowed, nil
 }
 
 // Check reports whether a projection could be served, without building anything
@@ -250,7 +310,7 @@ func (c *Compiler) CompileWith(ctx context.Context, p *crispv1alpha1.CustomResou
 		}
 	}
 
-	versions, err := c.versions(ctx, p)
+	versions, err := c.versions(p, prepared)
 	if err != nil {
 		return nil, err
 	}
@@ -334,9 +394,9 @@ type compiledVersion struct {
 	PrinterColumns []apiextensionsv1.CustomResourceColumnDefinition
 }
 
-// versions expands a projection into the versions it serves, resolving any
-// schema borrowed from a CustomResourceDefinition along the way.
-func (c *Compiler) versions(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) ([]compiledVersion, error) {
+// versions expands a projection into the versions it serves, taking any
+// borrowed schema from the ones Prepare resolved.
+func (c *Compiler) versions(p *crispv1alpha1.CustomResourceProjection, prepared *Prepared) ([]compiledVersion, error) {
 	res := p.Spec.Resource
 
 	primary := compiledVersion{
@@ -345,11 +405,10 @@ func (c *Compiler) versions(ctx context.Context, p *crispv1alpha1.CustomResource
 		PrinterColumns: res.AdditionalPrinterColumns,
 	}
 	if primary.Schema == nil && res.SchemaFrom != nil {
-		borrowed, err := c.borrow(ctx, *res.SchemaFrom)
-		if err != nil {
-			return nil, fmt.Errorf("version %s: %w", res.Version, err)
+		primary.Schema = prepared.Borrowed[res.Version]
+		if primary.Schema == nil {
+			return nil, fmt.Errorf("version %s: no schema was resolved for schemaFrom", res.Version)
 		}
-		primary.Schema = borrowed
 	}
 
 	versions := []compiledVersion{primary}
@@ -371,11 +430,10 @@ func (c *Compiler) versions(ctx context.Context, p *crispv1alpha1.CustomResource
 			compiled.PrinterColumns = res.AdditionalPrinterColumns
 		}
 		if compiled.Schema == nil && extra.SchemaFrom != nil {
-			borrowed, err := c.borrow(ctx, *extra.SchemaFrom)
-			if err != nil {
-				return nil, fmt.Errorf("version %s: %w", extra.Name, err)
+			compiled.Schema = prepared.Borrowed[extra.Name]
+			if compiled.Schema == nil {
+				return nil, fmt.Errorf("version %s: no schema was resolved for schemaFrom", extra.Name)
 			}
-			compiled.Schema = borrowed
 		}
 		if compiled.Schema == nil {
 			return nil, fmt.Errorf("version %s: one of schema or schemaFrom is required", extra.Name)

@@ -1685,9 +1685,9 @@ func (w *WritableREST) Update(
 	ctx context.Context,
 	name string,
 	objInfo rest.UpdatedObjectInfo,
-	_ rest.ValidateObjectFunc,
+	createValidation rest.ValidateObjectFunc,
 	updateValidation rest.ValidateObjectUpdateFunc,
-	_ bool,
+	forceAllowCreate bool,
 	options *metav1.UpdateOptions,
 ) (runtime.Object, bool, error) {
 	if w.update == nil {
@@ -1700,7 +1700,59 @@ func (w *WritableREST) Update(
 		merge = specOnly
 	}
 
-	return w.applyUpdate(ctx, name, objInfo, updateValidation, options, w.update, merge)
+	result, created, err := w.applyUpdate(ctx, name, objInfo, updateValidation, options, w.update, merge)
+	if !forceAllowCreate || w.create == nil || !errors.IsNotFound(err) {
+		return result, created, err
+	}
+	return w.createOnUpdate(ctx, name, objInfo, createValidation, options)
+}
+
+// createOnUpdate is how server-side apply creates an object that is not there
+// yet: it asks for it through Update rather than by posting to the collection.
+//
+// kubectl apply --server-side is how most objects are written now, so a
+// projection that declares a create statement answering it with 404 makes the
+// ordinary way of writing one fail. A projection that declares no create
+// statement still refuses, as it does everywhere else.
+//
+// Only reached for the resource itself. Status and scale write to a row that
+// has to exist already, and neither goes through here.
+func (w *WritableREST) createOnUpdate(
+	ctx context.Context,
+	name string,
+	objInfo rest.UpdatedObjectInfo,
+	createValidation rest.ValidateObjectFunc,
+	options *metav1.UpdateOptions,
+) (runtime.Object, bool, error) {
+	// Against an empty object of the projected kind, which is what the
+	// kube-apiserver's own store passes when the object does not exist.
+	updated, err := objInfo.UpdatedObject(ctx, w.New())
+	if err != nil {
+		return nil, false, err
+	}
+
+	incoming, ok := updated.(*unstructured.Unstructured)
+	if !ok {
+		return nil, false, errors.NewInternalError(fmt.Errorf("expected an unstructured object, got %T", updated))
+	}
+	incoming = incoming.DeepCopy()
+	// The name comes from the request path, and a patch need not repeat it.
+	if incoming.GetName() == "" {
+		incoming.SetName(name)
+	}
+
+	create := &metav1.CreateOptions{}
+	if options != nil {
+		create.DryRun = options.DryRun
+		create.FieldManager = options.FieldManager
+		create.FieldValidation = options.FieldValidation
+	}
+
+	result, err := w.Create(ctx, incoming, createValidation, create)
+	if err != nil {
+		return nil, false, err
+	}
+	return result, true, nil
 }
 
 // applyUpdate is the shared path for writes to the resource and to its status.

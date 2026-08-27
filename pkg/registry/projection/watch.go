@@ -608,6 +608,24 @@ func (c *watchCache) applyLocked(
 			c.highestVersion = version
 		}
 	}
+	// Tombstones move it too. Deletions are read forward from the same mark, so
+	// a tombstone sitting above every live row — nothing else in the table is
+	// changing — is returned by every poll, and the row it names is no longer
+	// in the cache to stop it being reported as a fresh deletion each time. An
+	// informer is handed the same removal for as long as the tombstone is
+	// retained.
+	//
+	// Only a tombstone that carries the mapped resourceVersion can say where
+	// the mark should be; one holding the identity columns alone leaves it
+	// where it was, as before.
+	for _, identity := range removed {
+		if identity.object == nil {
+			continue
+		}
+		if version := identity.object.GetResourceVersion(); movesForward(c.highestVersion, version) {
+			c.highestVersion = version
+		}
+	}
 	if full && c.incremental != nil {
 		c.lastFullResync = time.Now()
 	}

@@ -186,6 +186,25 @@ var (
 		[]string{"projection", "resource"},
 	)
 
+	// RowsOutOfNamespace counts rows a namespaced read was not served because
+	// the query returned them from a different namespace.
+	//
+	// The filter belongs in the query, and a projection whose query has it
+	// never increments this. One that does not is handing every caller rows
+	// from namespaces they were never granted, which is exactly what
+	// mapping.namespace exists to prevent — so this is not a tuning signal, it
+	// is a projection to go and fix.
+	RowsOutOfNamespace = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Namespace:      "kube_crisp",
+			Subsystem:      "query",
+			Name:           "rows_out_of_namespace_total",
+			Help:           "Rows withheld from a namespaced read because the query returned them from another namespace.",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"projection", "resource"},
+	)
+
 	// QueriesRouted counts reads by the database that answered them.
 	//
 	// A projection with a read replica is trading freshness for load, and this
@@ -637,6 +656,7 @@ func init() {
 		ReplicaFallbacks,
 		PollLeader,
 		RowsUnmappable,
+		RowsOutOfNamespace,
 		Watchers,
 		WatchEvents,
 		WatchPolls,

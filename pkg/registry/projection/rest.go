@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -2413,13 +2414,6 @@ func (w *WritableREST) releasedByUpdate(previous, updated *unstructured.Unstruct
 // RETURNING clause produced, or the affected count otherwise — so the caller
 // records what happened rather than assuming one row.
 func (w *WritableREST) write(ctx context.Context, query *compiledQuery, obj *unstructured.Unstructured, verb string) (runtime.Object, int64, error) {
-	// A cached read must never outlive the write that invalidates it, and only
-	// the namespace that was written needs to pay for it. Reads already in
-	// flight are detached for the same reason: one of them started before this
-	// write and cannot reflect it.
-	defer w.cache.invalidate(obj.GetNamespace())
-	defer w.flights.detach(obj.GetNamespace())
-
 	namespace := obj.GetNamespace()
 	name := obj.GetName()
 
@@ -2455,9 +2449,32 @@ func (w *WritableREST) write(ctx context.Context, query *compiledQuery, obj *uns
 	if err != nil {
 		return nil, 0, err
 	}
-	defer release()
+
+	// The slot and the invalidation both belong to the statement, not to the
+	// request. A cached read must never outlive the write that invalidates it,
+	// and only the namespace that was written needs to pay for it; reads
+	// already in flight are detached for the same reason, since one of them
+	// started before this write and cannot reflect it.
+	//
+	// All three end here rather than when write returns, because the read back
+	// below is an ordinary read: it must not wait for a slot this request is
+	// holding — at maxConcurrentQueries: 1 it would wait out the whole acquire
+	// timeout and be shed, reporting 429 for a write that committed — and it
+	// must not be answered from a cache this write has not dropped yet.
+	var once sync.Once
+	finish := func() {
+		once.Do(func() {
+			release()
+			w.flights.detach(namespace)
+			w.cache.invalidate(namespace)
+		})
+	}
+	// Deferred as well, so the error paths that return before the read back
+	// still drop what the statement invalidated.
+	defer finish()
 
 	rows, affected, err := w.run(ctx, query, args, w.session(ctx, namespace, name))
+	finish()
 
 	// What the statement touched: the rows it returned, or the count it
 	// reported. A driver that cannot report one gives -1, which is not a row

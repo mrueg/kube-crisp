@@ -1,0 +1,187 @@
+# Reading things that are not tables: a partitioned table, and a view.
+---
+# payment is partitioned by month in Pagila. Nothing here has to know that —
+# the projection selects from the parent and PostgreSQL decides which
+# partitions to touch. What does need saying is the paging: this is the only
+# collection here big enough to need it, and keyset paging is the kind that
+# stays correct while rows are being inserted underneath it.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-payments
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: Payment
+    plural: payments
+    singular: payment
+    categories: [pagila]
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            customer: {type: string}
+            staff: {type: string}
+            rental: {type: string}
+            amount: {type: string}
+            paidAt: {type: string}
+    additionalPrinterColumns:
+      - {name: Customer, type: string, jsonPath: .spec.customer}
+      - {name: Amount, type: string, jsonPath: .spec.amount}
+      - {name: Paid, type: string, jsonPath: .spec.paidAt}
+  queries:
+    list:
+      sql: |
+        SELECT 'payment-' || p.payment_id     AS name,
+               'store-' || i.store_id         AS store_ns,
+               p.payment_id,
+               c.first_name || ' ' || c.last_name AS customer,
+               s.username                     AS staff,
+               'rental-' || p.rental_id       AS rental,
+               p.amount::text                 AS amount,
+               p.payment_date::text           AS paid_at,
+               p.payment_date                 AS created_at,
+               p.payment_id::text             AS version
+        FROM payment p
+        -- Through the rental to the copy that was rented, not through the
+        -- staff member who took the money. Pagila's own sales_by_store view
+        -- joins it this way, and half of all payments were taken by staff at
+        -- the other store — so attributing them to the staff member's store
+        -- made this projection disagree with the StoreSales one below, and
+        -- left every second payment's spec.rental naming a Rental in a
+        -- namespace the payment is not in.
+        JOIN rental r    ON r.rental_id    = p.rental_id
+        JOIN inventory i ON i.inventory_id = r.inventory_id
+        JOIN staff s     ON s.staff_id     = p.staff_id
+        JOIN customer c  ON c.customer_id  = p.customer_id
+        WHERE (:namespace::text IS NULL OR 'store-' || i.store_id = :namespace)
+          -- Keyset paging: the next page starts after the last row read, so a
+          -- payment inserted while a client is paging cannot shift a row onto a
+          -- page it has already seen.
+          --
+          -- Both casts are ::int, and they have to agree. PostgreSQL takes a
+          -- parameter's type from its first use, so writing ":after::text IS
+          -- NULL" here left the driver trying to send payment_id 667 as text —
+          -- which works on the first page, where :after is NULL, and fails on
+          -- every page after it.
+          AND (:after::int IS NULL OR p.payment_id > :after::int)
+        ORDER BY p.payment_id
+        LIMIT COALESCE(:limit, 500)
+      maxRows: 50000
+      maxBytes: 8Mi
+      timeout: 15s
+      # The column :after carries between pages. It has to be the column the
+      # query orders by, or the pages silently skip and repeat rows.
+      keysetColumn: payment_id
+    count:
+      sql: |
+        SELECT count(*) AS total
+        FROM payment p
+        JOIN rental r    ON r.rental_id    = p.rental_id
+        JOIN inventory i ON i.inventory_id = r.inventory_id
+        WHERE (:namespace::text IS NULL OR 'store-' || i.store_id = :namespace)
+    get:
+      sql: |
+        SELECT 'payment-' || p.payment_id     AS name,
+               'store-' || i.store_id         AS store_ns,
+               p.payment_id,
+               c.first_name || ' ' || c.last_name AS customer,
+               s.username                     AS staff,
+               'rental-' || p.rental_id       AS rental,
+               p.amount::text                 AS amount,
+               p.payment_date::text           AS paid_at,
+               p.payment_date                 AS created_at,
+               p.payment_id::text             AS version
+        FROM payment p
+        -- Through the rental to the copy that was rented, not through the
+        -- staff member who took the money. Pagila's own sales_by_store view
+        -- joins it this way, and half of all payments were taken by staff at
+        -- the other store — so attributing them to the staff member's store
+        -- made this projection disagree with the StoreSales one below, and
+        -- left every second payment's spec.rental naming a Rental in a
+        -- namespace the payment is not in.
+        JOIN rental r    ON r.rental_id    = p.rental_id
+        JOIN inventory i ON i.inventory_id = r.inventory_id
+        JOIN staff s     ON s.staff_id     = p.staff_id
+        JOIN customer c  ON c.customer_id  = p.customer_id
+        WHERE 'store-' || i.store_id = :namespace AND 'payment-' || p.payment_id = :name
+  watch:
+    disabled: true
+  mapping:
+    name: name
+    namespace: store_ns
+    uid: payment_id
+    resourceVersion: version
+    creationTimestamp: created_at
+    fields:
+      - {column: customer, path: spec.customer}
+      - {column: staff,    path: spec.staff}
+      - {column: rental,   path: spec.rental}
+      - {column: amount,   path: spec.amount}
+      - {column: paid_at,  path: spec.paidAt}
+---
+# A projection over a view. Pagila's sales_by_store already answers "what did
+# each store take", and a projection does not care whether the relation it
+# selects from is a table.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-store-sales
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: StoreSales
+    plural: storesales
+    singular: storesales
+    categories: [pagila]
+    scope: Cluster
+    schema:
+      type: object
+      properties:
+        status:
+          type: object
+          properties:
+            store: {type: string}
+            manager: {type: string}
+            totalSales: {type: string}
+    additionalPrinterColumns:
+      - {name: Store, type: string, jsonPath: .status.store}
+      - {name: Manager, type: string, jsonPath: .status.manager}
+      - {name: Sales, type: string, jsonPath: .status.totalSales}
+  queries:
+    list:
+      sql: |
+        SELECT lower(regexp_replace(v.store, '[^a-zA-Z0-9]+', '-', 'g')) AS name,
+               v.store, v.manager, v.total_sales::text AS total_sales,
+               (extract(epoch FROM clock_timestamp()) * 1000000)::bigint::text AS version
+        FROM sales_by_store v
+        ORDER BY v.store
+    get:
+      sql: |
+        SELECT lower(regexp_replace(v.store, '[^a-zA-Z0-9]+', '-', 'g')) AS name,
+               v.store, v.manager, v.total_sales::text AS total_sales,
+               (extract(epoch FROM clock_timestamp()) * 1000000)::bigint::text AS version
+        FROM sales_by_store v
+        WHERE lower(regexp_replace(v.store, '[^a-zA-Z0-9]+', '-', 'g')) = :name
+  # A view recomputed on every read has no version that means anything, and a
+  # watch on it would report every row as changed on every poll.
+  watch:
+    disabled: true
+  mapping:
+    name: name
+    resourceVersion: version
+    fields:
+      - {column: store,       path: status.store}
+      - {column: manager,     path: status.manager}
+      - {column: total_sales, path: status.totalSales}

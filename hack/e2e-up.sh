@@ -342,6 +342,42 @@ CREATE TABLE replicated_orders (
 INSERT INTO replicated_orders VALUES ('split-1', 'acme', 'from-the-replica', '1');
 "
 
+# Pagila, for the whole-schema tutorial. Loaded from the vendored files rather
+# than written out here: the point of that tutorial is a schema nobody designed
+# for this, and one retyped into a shell script would not be one.
+echo "==> seeding pagila"
+# Dropped and recreated rather than loaded over: every other seed here is
+# written to survive a second run, and a dump full of CREATE is not. FORCE
+# closes the pools kube-crisp already has open to it, which it reopens.
+kubectl -n kube-crisp exec deploy/postgres -- \
+  psql -U crisp -d postgres -c "DROP DATABASE IF EXISTS pagila WITH (FORCE)" >/dev/null
+kubectl -n kube-crisp exec deploy/postgres -- \
+  psql -U crisp -d postgres -c "CREATE DATABASE pagila" >/dev/null
+
+# Upstream's schema ends every object with "ALTER ... OWNER TO postgres", which
+# is what pg_dump writes on a default install. This server's superuser is
+# crisp, so the role has to exist for the dump to load at all — 65 statements
+# reference it. Created rather than edited out of the vendored file, because a
+# schema somebody else wrote is the whole point of this fixture.
+kubectl -n kube-crisp exec deploy/postgres -- \
+  psql -U crisp -d pagila -c "CREATE ROLE postgres SUPERUSER LOGIN" >/dev/null 2>&1 || true
+
+kubectl -n kube-crisp exec -i deploy/postgres -- \
+  psql -U crisp -d pagila -q -v ON_ERROR_STOP=1 < third_party/pagila/pagila-schema.sql >/dev/null
+kubectl -n kube-crisp exec -i deploy/postgres -- \
+  psql -U crisp -d pagila -q -v ON_ERROR_STOP=1 < third_party/pagila/pagila-data.sql >/dev/null
+
+# Neither index ships with Pagila, and the tutorial says to add them: the watch
+# on rentals filters and orders by last_update on every poll, and Stock counts
+# inventory per (store, film).
+kubectl -n kube-crisp exec deploy/postgres -- psql -U crisp -d pagila -v ON_ERROR_STOP=1 -c "
+CREATE INDEX IF NOT EXISTS rental_last_update_idx   ON rental (last_update);
+CREATE INDEX IF NOT EXISTS inventory_store_film_idx ON inventory (store_id, film_id);
+" >/dev/null
+
+kubectl create namespace store-1 --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace store-2 --dry-run=client -o yaml | kubectl apply -f -
+
 echo "==> waiting for mysql"
 kubectl -n kube-crisp rollout status deployment/mysql --timeout=300s
 
@@ -399,6 +435,13 @@ kubectl apply -f test/e2e/manifests/mysql-projection.yaml
 kubectl apply -f test/e2e/manifests/sqlite-projection.yaml
 kubectl apply -f test/e2e/manifests/extra-projections.yaml
 kubectl apply -f test/e2e/manifests/admission-policy.yaml
+# The tutorial's own projections, applied from examples/ rather than copied into
+# the test fixtures: a tutorial nobody runs is a tutorial that rots.
+kubectl apply -f examples/pagila/10-catalogue.yaml
+kubectl apply -f examples/pagila/20-operations.yaml
+kubectl apply -f examples/pagila/30-rental.yaml
+kubectl apply -f examples/pagila/40-stock.yaml
+kubectl apply -f examples/pagila/50-reporting.yaml
 
 # No APIService is applied here on purpose: the server registers the groups it
 # serves, so waiting for one to appear also tests that it does.

@@ -40,6 +40,20 @@ type: Opaque
 stringData:
   dsn: postgres://crisp:crisp@postgres.kube-crisp.svc:5432/storereplica?sslmode=disable
 ---
+# The Pagila database the whole-schema tutorial projects. A second database on
+# the same server, because it is a different schema rather than a different
+# server, and a tutorial should not need one of its own.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pagila-db
+  namespace: kube-crisp
+  labels:
+    crisp.kubecrisp.io/allow-projection: "true"
+type: Opaque
+stringData:
+  dsn: postgres://crisp:crisp@postgres.kube-crisp.svc:5432/pagila?sslmode=disable
+---
 # A real volume rather than an emptyDir: the outage test scales this deployment
 # to zero and back, and a database that came back empty would be testing the
 # wrong thing.
@@ -75,7 +89,9 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:17-alpine
+          # 18, not 17: the vendored Pagila schema uses a virtual generated
+          # column, which arrived in PostgreSQL 18 and fails to parse on 17.
+          image: postgres:18-alpine
           env:
             - name: POSTGRES_USER
               value: crisp

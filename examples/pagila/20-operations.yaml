@@ -1,0 +1,194 @@
+# What a store does, rather than what the chain rents. Everything here is
+# namespaced by store, so `kubectl get customers -n store-1` is the manager's
+# view and ordinary namespace RBAC decides who gets it.
+---
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-customers
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: Customer
+    plural: customers
+    singular: customer
+    categories: [pagila]
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            firstName: {type: string}
+            lastName: {type: string}
+            fullName: {type: string}
+            email: {type: string}
+            city: {type: string}
+            country: {type: string}
+        status:
+          type: object
+          properties:
+            active: {type: boolean}
+            openRentals: {type: integer}
+    additionalPrinterColumns:
+      - {name: Full name, type: string, jsonPath: .spec.fullName}
+      - {name: City, type: string, jsonPath: .spec.city}
+      - {name: Active, type: boolean, jsonPath: .status.active}
+      - {name: Out, type: integer, jsonPath: .status.openRentals}
+      - {name: Since, type: date, jsonPath: .metadata.creationTimestamp}
+  queries:
+    list:
+      sql: |
+        SELECT lower(regexp_replace(c.first_name || '-' || c.last_name, '[^a-zA-Z0-9]+', '-', 'g'))
+                 || '-' || c.customer_id           AS name,
+               'store-' || c.store_id              AS store_ns,
+               c.customer_id, c.first_name, c.last_name,
+               c.first_name || ' ' || c.last_name  AS full_name,
+               c.email, c.activebool AS active,
+               ci.city, co.country,
+               c.create_date::timestamp            AS created_at,
+               (SELECT count(*) FROM rental r
+                 WHERE r.customer_id = c.customer_id AND upper_inf(r.rental_period)) AS open_rentals,
+               -- customer.last_update is nullable in Pagila, and a row with no
+               -- version cannot be compared against the next one. Falling back
+               -- to the creation date gives every row one.
+               (extract(epoch FROM coalesce(c.last_update, c.create_date::timestamp)) * 1000000)::bigint::text AS version
+        FROM customer c
+        JOIN address a  ON a.address_id  = c.address_id
+        JOIN city ci    ON ci.city_id    = a.city_id
+        JOIN country co ON co.country_id = ci.country_id
+        WHERE (:namespace::text IS NULL OR 'store-' || c.store_id = :namespace)
+        ORDER BY c.customer_id
+        LIMIT COALESCE(:limit, 1000) OFFSET COALESCE(:offset, 0)
+      maxRows: 5000
+      timeout: 10s
+    get:
+      sql: |
+        SELECT lower(regexp_replace(c.first_name || '-' || c.last_name, '[^a-zA-Z0-9]+', '-', 'g'))
+                 || '-' || c.customer_id           AS name,
+               'store-' || c.store_id              AS store_ns,
+               c.customer_id, c.first_name, c.last_name,
+               c.first_name || ' ' || c.last_name  AS full_name,
+               c.email, c.activebool AS active,
+               ci.city, co.country,
+               c.create_date::timestamp            AS created_at,
+               (SELECT count(*) FROM rental r
+                 WHERE r.customer_id = c.customer_id AND upper_inf(r.rental_period)) AS open_rentals,
+               (extract(epoch FROM coalesce(c.last_update, c.create_date::timestamp)) * 1000000)::bigint::text AS version
+        FROM customer c
+        JOIN address a  ON a.address_id  = c.address_id
+        JOIN city ci    ON ci.city_id    = a.city_id
+        JOIN country co ON co.country_id = ci.country_id
+        WHERE 'store-' || c.store_id = :namespace
+          AND lower(regexp_replace(c.first_name || '-' || c.last_name, '[^a-zA-Z0-9]+', '-', 'g'))
+                || '-' || c.customer_id = :name
+  watch:
+    disabled: true
+  mapping:
+    name: name
+    namespace: store_ns
+    uid: customer_id
+    resourceVersion: version
+    creationTimestamp: created_at
+    fields:
+      - {column: first_name,   path: spec.firstName}
+      - {column: last_name,    path: spec.lastName}
+      - {column: full_name,    path: spec.fullName}
+      - {column: email,        path: spec.email}
+      - {column: city,         path: spec.city}
+      - {column: country,      path: spec.country}
+      - {column: active,       path: status.active, type: boolean}
+      - {column: open_rentals, path: status.openRentals, type: integer}
+---
+# Staff is the whole security argument in one projection.
+#
+# The table has a password column and a bytea picture. Neither appears in the
+# SELECT list, so neither can be served — there is no field selector, no label
+# selector and no clever request that reaches a column the query never asked
+# for. The projection's statement is the allow-list.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-staff
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: StaffMember
+    plural: staffmembers
+    singular: staffmember
+    categories: [pagila]
+    scope: Namespaced
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            firstName: {type: string}
+            lastName: {type: string}
+            fullName: {type: string}
+            username: {type: string}
+            email: {type: string}
+        status:
+          type: object
+          properties:
+            active: {type: boolean}
+            managesStore: {type: boolean}
+    additionalPrinterColumns:
+      - {name: Full name, type: string, jsonPath: .spec.fullName}
+      - {name: Username, type: string, jsonPath: .spec.username}
+      - {name: Manager, type: boolean, jsonPath: .status.managesStore}
+  queries:
+    list:
+      sql: |
+        -- Lowercased: Pagila's usernames are "Mike" and "Jon", and an object
+        -- name has to be an RFC 1123 subdomain. Without this both rows are
+        -- skipped as unmappable and the collection is silently empty.
+        SELECT lower(s.username)              AS name,
+               'store-' || s.store_id         AS store_ns,
+               s.staff_id, s.first_name, s.last_name,
+               s.first_name || ' ' || s.last_name AS full_name,
+               s.username, s.email, s.active,
+               EXISTS (SELECT 1 FROM store st WHERE st.manager_staff_id = s.staff_id) AS manages_store,
+               (extract(epoch FROM s.last_update) * 1000000)::bigint::text AS version
+        FROM staff s
+        WHERE (:namespace::text IS NULL OR 'store-' || s.store_id = :namespace)
+        ORDER BY s.staff_id
+    get:
+      sql: |
+        -- Lowercased: Pagila's usernames are "Mike" and "Jon", and an object
+        -- name has to be an RFC 1123 subdomain. Without this both rows are
+        -- skipped as unmappable and the collection is silently empty.
+        SELECT lower(s.username)              AS name,
+               'store-' || s.store_id         AS store_ns,
+               s.staff_id, s.first_name, s.last_name,
+               s.first_name || ' ' || s.last_name AS full_name,
+               s.username, s.email, s.active,
+               EXISTS (SELECT 1 FROM store st WHERE st.manager_staff_id = s.staff_id) AS manages_store,
+               (extract(epoch FROM s.last_update) * 1000000)::bigint::text AS version
+        FROM staff s
+        WHERE 'store-' || s.store_id = :namespace AND lower(s.username) = :name
+  watch:
+    disabled: true
+  mapping:
+    name: name
+    namespace: store_ns
+    uid: staff_id
+    resourceVersion: version
+    fields:
+      - {column: first_name,    path: spec.firstName}
+      - {column: last_name,     path: spec.lastName}
+      - {column: full_name,     path: spec.fullName}
+      - {column: username,      path: spec.username}
+      - {column: email,         path: spec.email}
+      - {column: active,        path: status.active, type: boolean}
+      - {column: manages_store, path: status.managesStore, type: boolean}

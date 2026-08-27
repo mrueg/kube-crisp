@@ -26,6 +26,12 @@ FIELD: customer <string>
 
 Those objects are rows in a PostgreSQL table.
 
+![Listing a thousand films out of PostgreSQL and reading one of them with kubectl](docs/demo/pagila.gif)
+
+So are these. A thousand films out of [Pagila](docs/tutorial-pagila.md) — the DVD-rental sample
+database, projected whole — listed, sliced by label, and read in full. No CRD, no controller, and
+nothing copied into etcd.
+
 ## Why not a controller that syncs rows into CRs?
 
 A sync controller has to own a copy of your data, reconcile it, and answer awkward questions about
@@ -80,6 +86,12 @@ A complete walk-through per driver, each ending in a working `kubectl get`:
   not accept.
 - [SQLite](docs/tutorial-sqlite.md) — a file on a volume, no server, and what that costs.
 
+And one that is not about a driver at all:
+
+- [Pagila](docs/tutorial-pagila.md) — a whole schema somebody else designed, modelled as ten kinds.
+  Which tables become resources and which become fields, names that have to survive real data,
+  and a `kubectl scale` over a table that does not exist.
+
 ## Example
 
 ```yaml
@@ -126,7 +138,7 @@ pagination, and watch — is in **[docs/reference.md](docs/reference.md)**.
 
 | | |
 |---|---|
-| [Tutorials](docs/tutorial-postgresql.md) | A worked walk-through per driver, each ending in a working `kubectl get` |
+| [Tutorials](docs/tutorial-postgresql.md) | A worked walk-through per driver, each ending in a working `kubectl get`, and [one whole schema](docs/tutorial-pagila.md) |
 | [Reference](docs/reference.md) | Every field a projection can carry, and why you would use it |
 | [Operating](docs/operating.md) | Admission, leader election, fair queueing, outages, health, metrics, tracing, and the security model |
 | [Performance](docs/performance.md) | What `make bench` measures, and what it found |
@@ -277,6 +289,7 @@ attaches build provenance.
 | `manifests/` | CRD, RBAC, Deployment, Service — everything `kubectl apply -f manifests/` should install |
 | `manifests/optional/` | Monitoring, network policy, and the RBAC for features that are off by default: each needs a decision or a cluster's own details |
 | `examples/orders/` | The projection the README walks through: its table, its Secret, and the projection itself |
+| `examples/pagila/` | The ten projections of the [Pagila tutorial](docs/tutorial-pagila.md), over a schema nobody designed for this |
 | `examples/apiservice.yaml` | A hand-written `APIService`, for the rare case of registering groups yourself |
 | `test/e2e` | Cluster suite: three drivers, watch, admission, a database outage, and the benchmarks |
 | `docs/` | Tutorials per driver, plus the reference, operating and performance documents |

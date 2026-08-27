@@ -1,0 +1,194 @@
+# Stock is how many copies of a film a store holds, and it is the projection
+# where this stops being a read-only novelty:
+#
+#   kubectl scale stock/academy-dinosaur --replicas=8 -n store-1
+#
+# There is no `stock` table. A Stock is one row per (film, store) assembled from
+# a count over inventory, and scaling it inserts or deletes inventory rows.
+apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: pagila-stock
+spec:
+  dataSource:
+    driver: postgres
+    secretRef: {name: pagila-db, namespace: kube-crisp}
+  resource:
+    group: pagila.example.com
+    version: v1alpha1
+    kind: Stock
+    plural: stock
+    singular: stock
+    categories: [pagila]
+    scope: Namespaced
+    subresources:
+      status: {}
+      # What makes kubectl scale work. Both paths have to exist in the schema,
+      # and specReplicasPath has to come from a column, because scaling writes
+      # to it.
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            film: {type: string}
+            title: {type: string}
+            replicas: {type: integer}
+        status:
+          type: object
+          properties:
+            replicas: {type: integer}
+            onLoan: {type: integer}
+            available: {type: integer}
+    additionalPrinterColumns:
+      - {name: Title, type: string, jsonPath: .spec.title}
+      - {name: Desired, type: integer, jsonPath: .spec.replicas}
+      - {name: Copies, type: integer, jsonPath: .status.replicas}
+      - {name: On-loan, type: integer, jsonPath: .status.onLoan}
+      - {name: Available, type: integer, jsonPath: .status.available}
+  queries:
+    list:
+      sql: |
+        SELECT lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS name,
+               'store-' || i.store_id AS store_ns,
+               f.film_id, f.title,
+               count(*)::int AS replicas,
+               count(*)::int AS observed_replicas,
+               count(*) FILTER (WHERE EXISTS (
+                   SELECT 1 FROM rental r
+                    WHERE r.inventory_id = i.inventory_id AND upper_inf(r.rental_period)))::int AS on_loan,
+               count(*) FILTER (WHERE NOT EXISTS (
+                   SELECT 1 FROM rental r
+                    WHERE r.inventory_id = i.inventory_id AND upper_inf(r.rental_period)))::int AS available,
+               (extract(epoch FROM max(i.last_update)) * 1000000)::bigint::text AS version
+        FROM inventory i
+        JOIN film f ON f.film_id = i.film_id
+        WHERE (:namespace::text IS NULL OR 'store-' || i.store_id = :namespace)
+        GROUP BY f.film_id, f.title, i.store_id
+        ORDER BY f.film_id
+        LIMIT COALESCE(:limit, 1000) OFFSET COALESCE(:offset, 0)
+      maxRows: 5000
+      timeout: 10s
+    get:
+      sql: |
+        SELECT lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS name,
+               'store-' || i.store_id AS store_ns,
+               f.film_id, f.title,
+               count(*)::int AS replicas,
+               count(*)::int AS observed_replicas,
+               count(*) FILTER (WHERE EXISTS (
+                   SELECT 1 FROM rental r
+                    WHERE r.inventory_id = i.inventory_id AND upper_inf(r.rental_period)))::int AS on_loan,
+               count(*) FILTER (WHERE NOT EXISTS (
+                   SELECT 1 FROM rental r
+                    WHERE r.inventory_id = i.inventory_id AND upper_inf(r.rental_period)))::int AS available,
+               (extract(epoch FROM max(i.last_update)) * 1000000)::bigint::text AS version
+        FROM inventory i
+        JOIN film f ON f.film_id = i.film_id
+        WHERE 'store-' || i.store_id = :namespace
+          AND lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) = :name
+        GROUP BY f.film_id, f.title, i.store_id
+    # Scaling. One statement, because the count the client is answered with has
+    # to be the count after both halves ran — a separate read could be taken
+    # between them and report a number that was never true.
+    #
+    # A copy that has ever been rented is not deleted: the rental rows reference
+    # it, and losing a store's history to a scale-down would be a strange thing
+    # for `kubectl scale` to do. So scaling down removes what it can, and the
+    # status reports what actually happened rather than what was asked for.
+    update:
+      sql: |
+        WITH target AS (
+            SELECT f.film_id,
+                   (SELECT store_id FROM store WHERE 'store-' || store_id = :namespace) AS store_id
+            FROM film f
+            WHERE lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) = :name
+        ),
+        held AS (
+            SELECT i.inventory_id
+            FROM inventory i JOIN target t ON t.film_id = i.film_id AND t.store_id = i.store_id
+            WHERE NOT EXISTS (SELECT 1 FROM rental r WHERE r.inventory_id = i.inventory_id)
+            ORDER BY i.inventory_id DESC
+        ),
+        total AS (
+            SELECT count(*)::int AS copies
+            FROM inventory i JOIN target t ON t.film_id = i.film_id AND t.store_id = i.store_id
+        ),
+        removed AS (
+            DELETE FROM inventory
+            WHERE inventory_id IN (
+                SELECT inventory_id FROM held
+                LIMIT GREATEST((SELECT copies FROM total) - :replicas::int, 0))
+            RETURNING inventory_id
+        ),
+        added AS (
+            INSERT INTO inventory (film_id, store_id)
+            SELECT t.film_id, t.store_id FROM target t,
+                 generate_series(1, GREATEST(:replicas::int - (SELECT copies FROM total), 0))
+            RETURNING inventory_id, last_update
+        )
+        SELECT :name::text AS name, :namespace::text AS store_ns,
+               (SELECT film_id FROM target) AS film_id,
+               (SELECT title FROM film WHERE film_id = (SELECT film_id FROM target)) AS title,
+               settled.copies AS replicas,
+               settled.copies AS observed_replicas,
+               -- On-loan is safe to count off the table as it was: this
+               -- statement only ever adds copies nobody has rented and only
+               -- ever removes copies nobody has rented, so neither half can
+               -- change how many are out.
+               settled.on_loan,
+               -- Available is not safe to count that way, for the same reason
+               -- the version below is not — the inserted rows are invisible to
+               -- this SELECT, so counting them here answered "7 copies, 4
+               -- available" and left the client's own write looking wrong until
+               -- something re-read it. Derived from the settled count instead,
+               -- which is exact because on-loan cannot have moved.
+               (settled.copies - settled.on_loan)::int AS available,
+               -- The version a later read will compute, which takes some
+               -- care: a data-modifying CTE's effects are not visible to the
+               -- rest of the same statement, so "max(last_update) FROM
+               -- inventory" here sees the table as it was before the insert.
+               -- Reporting that makes the next update conflict against a
+               -- version the write itself invented.
+               --
+               -- Newly inserted rows carry now(), so they are the maximum
+               -- whenever there are any; otherwise it is the newest row that
+               -- survived the delete.
+               (extract(epoch FROM COALESCE(
+                    (SELECT max(last_update) FROM added),
+                    (SELECT max(i.last_update) FROM inventory i
+                       JOIN target t ON t.film_id = i.film_id AND t.store_id = i.store_id
+                      WHERE NOT EXISTS (SELECT 1 FROM removed rm
+                                         WHERE rm.inventory_id = i.inventory_id))))
+                * 1000000)::bigint::text AS version
+        FROM (SELECT ((SELECT copies FROM total) + (SELECT count(*) FROM added)
+                                                 - (SELECT count(*) FROM removed))::int AS copies,
+                     (SELECT count(*)::int FROM inventory i
+                        JOIN target t ON t.film_id = i.film_id AND t.store_id = i.store_id
+                       WHERE EXISTS (SELECT 1 FROM rental r
+                                      WHERE r.inventory_id = i.inventory_id
+                                        AND upper_inf(r.rental_period))) AS on_loan) settled
+      timeout: 10s
+  watch:
+    disabled: true
+  mapping:
+    name: name
+    namespace: store_ns
+    uid: film_id
+    resourceVersion: version
+    fields:
+      - {column: title,     path: spec.title}
+      - {column: name,      path: spec.film}
+      # The same count under two names rather than one column on two paths:
+      # a column mapped twice can only be written from one of them, and the
+      # server would warn that the other is read-only. A shelf has no desired
+      # count stored anywhere — what the store holds is both the wish and the
+      # fact — so the query says so twice and nothing is ambiguous.
+      - {column: replicas,          path: spec.replicas, type: integer}
+      - {column: observed_replicas, path: status.replicas, type: integer}
+      - {column: on_loan,   path: status.onLoan, type: integer}
+      - {column: available, path: status.available, type: integer}

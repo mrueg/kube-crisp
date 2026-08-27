@@ -304,6 +304,32 @@ func sqliteBusyTimeout(dsn string) string {
 	return dsn + separator + "_pragma=busy_timeout(" + sqliteDefaultBusyTimeout + ")"
 }
 
+// mysqlFoundRows makes MySQL count the rows a statement matched rather than the
+// rows it changed, unless the connection string already says otherwise.
+//
+// Everything above this layer reads an affected count of zero as "nothing
+// matched" — it is what turns a write into a 404 or a 409. PostgreSQL and
+// SQLite report matched rows and mean exactly that. MySQL reports changed rows
+// by default, so an update that sets a row to the values it already holds is
+// reported as having matched nothing, and a client is told its write hit a row
+// that is not there.
+//
+// The parameter is the driver's, not the server's: it asks for the protocol's
+// CLIENT_FOUND_ROWS flag, which is how every other driver behaves already.
+func mysqlFoundRows(dsn string) string {
+	if strings.Contains(dsn, "clientFoundRows") {
+		return dsn
+	}
+
+	// Parameters follow the last slash, which is what separates them from the
+	// database name — a password may contain anything, question marks included.
+	separator := "?"
+	if slash := strings.LastIndex(dsn, "/"); slash >= 0 && strings.Contains(dsn[slash:], "?") {
+		separator = "&"
+	}
+	return dsn + separator + "clientFoundRows=true"
+}
+
 // keepWarm pings the pool periodically so that idle connections are not the
 // first thing a request has to pay for.
 func (p *Pool) keepWarm() {

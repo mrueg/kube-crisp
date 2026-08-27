@@ -11,26 +11,27 @@ background: reads are answered from the data source at request time, and writes 
 to it.
 
 ```console
-$ kubectl get orders -n acme
-NAME         CUSTOMER   PHASE     TOTAL   AGE
-order-1001   ada        shipped   4999    3d
-order-1002   grace      pending   1250    2d
+$ kubectl get films
+NAME               TITLE              RATING   RATE   MINUTES   BREAK-EVEN
+academy-dinosaur   ACADEMY DINOSAUR   PG       0.99   86        22
+ace-goldfinger     ACE GOLDFINGER     G        4.99   48        3
+adaptation-holes   ADAPTATION HOLES   NC-17    2.99   50        7
 
-$ kubectl explain orders.spec.customer
-GROUP:      store.example.com
-KIND:       Order
+$ kubectl explain films.spec.title
+GROUP:      pagila.example.com
+KIND:       Film
 VERSION:    v1alpha1
 
-FIELD: customer <string>
+FIELD: title <string>
 ```
 
 Those objects are rows in a PostgreSQL table.
 
 ![Listing a thousand films out of PostgreSQL and reading one of them with kubectl](docs/demo/pagila.gif)
 
-So are these. A thousand films out of [Pagila](docs/tutorial-pagila.md) — the DVD-rental sample
-database, projected whole — listed, sliced by label, and read in full. No CRD, no controller, and
-nothing copied into etcd.
+A thousand of them, out of [Pagila](docs/tutorial-pagila.md) — the DVD-rental sample database,
+projected whole — listed, sliced by label, and read in full. No CRD, no controller, and nothing
+copied into etcd.
 
 ## Why not a controller that syncs rows into CRs?
 

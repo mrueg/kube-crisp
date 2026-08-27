@@ -230,10 +230,11 @@ type NotifySpec struct {
 // DataSource describes how to reach the backing database. The DSN itself is
 // always read from a Secret so that credentials never appear in this object.
 //
-// +kubebuilder:validation:XValidation:rule="!has(self.statementTimeout) || !self.statementTimeout || self.driver == 'postgres'",message="statementTimeout is supported on the postgres driver only: MySQL bounds read-only SELECTs rather than every statement, and SQLite has no equivalent"
+// +kubebuilder:validation:XValidation:rule="!has(self.statementTimeout) || !self.statementTimeout || self.driver == 'postgres' || self.driver == 'cockroach'",message="statementTimeout is supported on the postgres and cockroach drivers only: MySQL bounds read-only SELECTs rather than every statement, and SQLite has no equivalent"
 type DataSource struct {
-	// Driver selects the database/sql driver. One of: postgres, mysql, sqlite.
-	// +kubebuilder:validation:Enum=postgres;mysql;sqlite
+	// Driver selects the database/sql driver. One of: postgres, cockroach,
+	// mysql, sqlite.
+	// +kubebuilder:validation:Enum=postgres;cockroach;mysql;sqlite
 	Driver string `json:"driver"`
 
 	// SecretRef points at a Secret holding the connection string.

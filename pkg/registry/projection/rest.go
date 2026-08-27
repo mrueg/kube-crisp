@@ -1805,6 +1805,22 @@ func (w *WritableREST) applyUpdate(
 		return nil, false, errors.NewConflict(w.groupResource(), name, fmt.Errorf("%s", registry.OptimisticLockErrorMsg))
 	}
 
+	// metadata.uid is immutable here as it is on any other object.
+	// ownerReferences and the garbage collector resolve against it, so a row
+	// whose uid can be rewritten by whoever updates it takes its children with
+	// it — and mapping.uid is recommended precisely so that clients can detect
+	// identity changing, which this would let them fake.
+	//
+	// A client that sends none is asserting nothing and gets the uid that is
+	// already there. Most patches send none.
+	if uid := incoming.GetUID(); uid == "" {
+		incoming.SetUID(current.GetUID())
+	} else if uid != current.GetUID() {
+		return nil, false, errors.NewInvalid(w.gvk.GroupKind(), name, field.ErrorList{
+			field.Invalid(field.NewPath("metadata", "uid"), uid, "field is immutable"),
+		})
+	}
+
 	if merge != nil {
 		merge(incoming, current)
 		incoming.SetResourceVersion(requested)

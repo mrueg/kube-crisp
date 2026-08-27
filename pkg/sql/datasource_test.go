@@ -166,15 +166,19 @@ func TestSQLiteGetsABusyTimeout(t *testing.T) {
 		t.Errorf("sqliteBusyTimeout() = %q, want both settings", got)
 	}
 
-	// It reaches a pool only through the driver that declares it, so no other
-	// connection string is ever rewritten.
+	// It reaches a pool only through the driver that declares it. Another
+	// driver may adapt its own connection strings — MySQL asks for matched
+	// rows — but never with this.
 	for _, driver := range []string{"postgres", "mysql"} {
 		d, ok := Lookup(driver)
 		if !ok {
 			t.Fatalf("the %s driver is not registered", driver)
 		}
-		if d.PrepareDSN != nil {
-			t.Errorf("the %s driver rewrites connection strings", driver)
+		if d.PrepareDSN == nil {
+			continue
+		}
+		if got := d.PrepareDSN(path); strings.Contains(got, "busy_timeout") {
+			t.Errorf("the %s driver rewrote a connection string with SQLite's pragma: %q", driver, got)
 		}
 	}
 }

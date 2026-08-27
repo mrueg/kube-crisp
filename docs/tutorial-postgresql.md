@@ -285,8 +285,10 @@ CREATE POLICY orders_tenant ON orders
 
 kube-crisp sets `app.tenant` on the connection from the request before every
 query, inside the transaction the query runs in, so it cannot be left behind on
-a pooled connection. Watch has to be off: a poll runs on a timer with no request
-behind it, so there is no tenant to set and the policy would show it nothing.
+a pooled connection. Watch has to be off, and the projection is refused if it is
+not: a watch is served from a cache filled by one poll and shared by every
+watcher, and there is no request behind a poll. There is no tenant to set, and
+the policy would show it nothing.
 
 ## Scoping rows to the caller
 
@@ -313,7 +315,11 @@ CREATE POLICY orders_team ON orders
 ```
 
 The same values are available to any query as `:user`, `:userUID`,
-`:userGroups` and `:userExtra`, without row-level security in the picture.
+`:userGroups` and `:userExtra`, without row-level security in the picture — and
+with the same restriction. A query bound to the caller cannot be watched either,
+because one poll would have to stand in for every watcher; without the rule the
+second watcher is served the first one's rows, which is worse than being shown
+nothing. Set `watch.disabled: true` alongside it.
 
 ## Labels that vary per row
 

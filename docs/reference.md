@@ -28,6 +28,13 @@ group, so a projection that wants its rows scoped the way RBAC scopes its verbs 
 WHERE owner_group IN (SELECT value FROM json_each(:userGroups))
 ```
 
+A projection whose `list`, `watch.query` or `watch.deletedQuery` binds any of them cannot be
+watched, and is refused at load time unless it sets `watch.disabled: true`. A watch is served from a
+cache filled by one poll and shared by every watcher, and there is no request behind a poll: the
+query would run with whatever context the first watcher brought, and every watcher after that would
+be handed that caller's rows for as long as the stream stayed open. `dataSource.sessionVariables`
+that depend on the request are refused alongside watch for the same reason.
+
 ## Schema and printing
 
 `spec.resource.schema` is not decoration. It is compiled into a validator that rejects writes which

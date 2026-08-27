@@ -459,6 +459,15 @@ func New(
 	// Watch is served by polling the list query, so it costs nothing until a
 	// client actually watches. Projections can opt out when that query is too
 	// expensive to run on a timer.
+	//
+	// A projection that scopes rows to the caller cannot be watched at all, for
+	// the same reason session variables that depend on the request cannot: see
+	// callerScopedQueries.
+	if scoped := r.callerScopedQueries(); watchEnabled(spec) && len(scoped) > 0 {
+		return nil, fmt.Errorf(
+			"queries that scope rows to the caller cannot be combined with watch (%s); set watch.disabled: true",
+			strings.Join(scoped, "; "))
+	}
 	if spec.Watch == nil || !spec.Watch.Disabled {
 		interval := DefaultPollInterval
 		if spec.Watch != nil && spec.Watch.PollInterval != nil {
@@ -1352,6 +1361,47 @@ func (r *REST) callerKey(ctx context.Context, query *compiledQuery) string {
 		writeBound(&b, caller[binding.source])
 	}
 	return b.String()
+}
+
+// callerScopedQueries names the reads whose rows depend on who is asking.
+//
+// The cache behind a watch is filled by a single query and shared by every
+// watcher. There is no request behind a poll, so the query runs with whatever
+// context the first watcher brought — and every watcher after that is served
+// the rows it returned. For a projection scoping rows to the caller that is a
+// cross-tenant leak, and a lasting one: the stream keeps delivering another
+// caller's rows for as long as it is open. The read cache keys on the caller
+// bindings to prevent exactly this; a watch has nothing to key, because there
+// is only one poller.
+//
+// Session variables that depend on the request are already refused alongside
+// watch a few lines above, and this is the same rule for the other way of
+// scoping rows. Refused rather than served wrong, and refused at load time
+// rather than per request, so it is the projection that fails and not a client.
+func (r *REST) callerScopedQueries() []string {
+	var reasons []string
+
+	for _, feeding := range []struct {
+		name  string
+		query *compiledQuery
+	}{
+		{"list", r.list},
+		{"watch.query", r.watchQuery},
+		{"watch.deletedQuery", r.deletedQuery},
+	} {
+		bindings := feeding.query.callerBindings()
+		if len(bindings) == 0 {
+			continue
+		}
+		bound := make([]string, 0, len(bindings))
+		for _, binding := range bindings {
+			bound = append(bound, ":"+binding.name)
+		}
+		sort.Strings(bound)
+		reasons = append(reasons, fmt.Sprintf("the %s query binds %s", feeding.name, strings.Join(bound, ", ")))
+	}
+
+	return reasons
 }
 
 // callerBinding is one caller-derived value a query binds: the name it is bound

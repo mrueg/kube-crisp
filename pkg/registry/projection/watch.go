@@ -565,10 +565,11 @@ func (c *watchCache) poll(ctx context.Context) error {
 	}
 
 	// A forward-reading poll cannot see a row that is gone, so the deletions
-	// are asked for separately. A full read already knows what is missing and
-	// does not need to ask.
+	// are asked for separately. A full read already knows which rows are
+	// missing — but a lightweight cache cannot say what any of them were, since
+	// the entry it kept is trimmed, so it asks too and describes what it can.
 	var removed []cacheIdentity
-	if !full && c.deleted != nil {
+	if c.deleted != nil && (!full || c.lightweight) {
 		if removed, err = c.deleted(queryCtx, since); err != nil {
 			return err
 		}
@@ -616,9 +617,16 @@ func (c *watchCache) applyLocked(
 
 	if full {
 		next = make(map[string]*unstructured.Unstructured, len(items))
+		// What the cache keeps and what a watcher is told are not the same
+		// object: a lightweight cache keeps a trimmed entry, while the event
+		// has to carry the row that was read. An informer stores what the event
+		// carries, and a trimmed one has no spec and no status.
+		read := make(map[string]*unstructured.Unstructured, len(items))
 		for i := range items {
 			item := items[i]
-			next[cacheKey(&item)] = c.retain(&item)
+			key := cacheKey(&item)
+			read[key] = &item
+			next[key] = c.retain(&item)
 		}
 
 		// A resync that finds a change at or below the incremental high-water
@@ -629,9 +637,9 @@ func (c *watchCache) applyLocked(
 			previous, existed := c.items[key]
 			switch {
 			case !existed:
-				events = append(events, watch.Event{Type: watch.Added, Object: item})
+				events = append(events, watch.Event{Type: watch.Added, Object: read[key]})
 			case changed(previous, item):
-				events = append(events, watch.Event{Type: watch.Modified, Object: item})
+				events = append(events, watch.Event{Type: watch.Modified, Object: read[key]})
 			default:
 				continue
 			}
@@ -645,8 +653,24 @@ func (c *watchCache) applyLocked(
 				"the mapped resourceVersion column is not moving forward on every write",
 				"resource", c.resource, "changes", missed)
 		}
+		// Tombstones for the rows this resync lost. A trimmed entry names a
+		// row and describes nothing, which a watcher filtering deletions on a
+		// mapped field cannot match; the tombstone is a whole object and can.
+		//
+		// Not every loss has one. A row that stopped matching the projection's
+		// query was never deleted and leaves no tombstone behind, and for those
+		// the trimmed entry is all this server has.
+		described := make(map[string]*unstructured.Unstructured, len(removed))
+		for _, identity := range removed {
+			if identity.object != nil {
+				described[identity.key()] = identity.object
+			}
+		}
 		for key, item := range c.items {
 			if _, still := next[key]; !still {
+				if row, ok := described[key]; ok {
+					item = row
+				}
 				events = append(events, watch.Event{Type: watch.Deleted, Object: item})
 			}
 		}

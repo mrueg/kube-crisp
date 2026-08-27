@@ -278,7 +278,13 @@ func TestTransactIsAllOrNothing(t *testing.T) {
 }
 
 // TestTransactReturnsTheLastStatement: only the last result can be the object a
-// client is answered with, and the affected counts of the rest are summed in.
+// client is answered with, and only its row count says whether the write
+// matched.
+//
+// The counts used to be summed. A write decides "matched nothing" from this
+// number, so a bookkeeping statement that always touches a row stood in for an
+// update that matched none, and a guarded update that changed nothing was
+// answered 200. The rest of the transaction is still visible, on its own spans.
 func TestTransactReturnsTheLastStatement(t *testing.T) {
 	pool := newTestPool(t, true)
 	ctx := context.Background()
@@ -301,8 +307,8 @@ func TestTransactReturnsTheLastStatement(t *testing.T) {
 	if len(rows) != 1 || rows[0]["id"] != "two" {
 		t.Errorf("TransactWith() returned %v, want the last statement's row", rows)
 	}
-	if affected != 2 {
-		t.Errorf("affected = %d, want 2 (one per statement)", affected)
+	if affected != 1 {
+		t.Errorf("affected = %d, want 1 (the last statement's row, not the transaction's total)", affected)
 	}
 }
 

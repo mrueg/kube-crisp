@@ -74,6 +74,22 @@ func TestCacheNilReceiverIsInert(t *testing.T) {
 	}
 }
 
+// cachedFor counts the entries the cache holds for one namespace. The total is
+// not a proxy for that: a write's own read back caches the object it answers
+// with, in the namespace it has just invalidated.
+func cachedFor(c *readCache, namespace string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entries := 0
+	for _, entry := range c.entries {
+		if entry.namespace == namespace {
+			entries++
+		}
+	}
+	return entries
+}
+
 // TestCachedReadsSurviveAWriteElsewhere is the point of scoping: a write in one
 // namespace must not make every other namespace pay for a fresh query.
 func TestCachedReadsSurviveAWriteElsewhere(t *testing.T) {
@@ -91,7 +107,7 @@ func TestCachedReadsSurviveAWriteElsewhere(t *testing.T) {
 	if _, err := store.Get(globex, "order-1003", &metav1.GetOptions{}); err != nil {
 		t.Fatalf("Get() in globex returned error: %v", err)
 	}
-	cached := store.cache.Len()
+	cached := cachedFor(store.cache, "globex")
 	if cached == 0 {
 		t.Fatal("reads in globex cached nothing")
 	}
@@ -100,20 +116,20 @@ func TestCachedReadsSurviveAWriteElsewhere(t *testing.T) {
 		t.Fatalf("Create() in acme returned error: %v", err)
 	}
 
-	if got := store.cache.Len(); got != cached {
-		t.Errorf("cache holds %d entries after a write to another namespace, want the %d cached before", got, cached)
+	if got := cachedFor(store.cache, "globex"); got != cached {
+		t.Errorf("cache holds %d entries for globex after a write to acme, want the %d cached before", got, cached)
 	}
 
 	// The namespace that was written to does lose its entries.
 	if _, err := store.List(acme, nil); err != nil {
 		t.Fatalf("List() in acme returned error: %v", err)
 	}
-	before := store.cache.Len()
+	before := cachedFor(store.cache, "acme")
 	if _, err := store.Create(acme, newOrder("order-2101", "ada", 10), nil, &metav1.CreateOptions{}); err != nil {
 		t.Fatalf("second Create() in acme returned error: %v", err)
 	}
-	if got := store.cache.Len(); got >= before {
-		t.Errorf("cache holds %d entries after a write to acme, want fewer than %d", got, before)
+	if got := cachedFor(store.cache, "acme"); got >= before {
+		t.Errorf("cache holds %d entries for acme after a write to acme, want fewer than %d", got, before)
 	}
 }
 

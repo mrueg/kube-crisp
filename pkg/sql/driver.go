@@ -182,6 +182,7 @@ func init() {
 			Placeholders:     PlaceholderQuestion,
 			SessionVariables: true,
 			Encrypted:        mysqlEncrypted,
+			PrepareDSN:       mysqlFoundRows,
 		},
 		{
 			Name:         "sqlite",

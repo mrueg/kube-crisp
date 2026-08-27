@@ -19,7 +19,9 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 	"k8s.io/component-base/logs"
+	"k8s.io/klog/v2"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
 	"github.com/mrueg/kube-crisp/pkg/apiserver"
@@ -321,6 +323,54 @@ func (o *CrispServerOptions) Config() (*apiserver.Config, error) {
 		o.RecommendedOptions.Admission = nil
 	}
 
+	// Serving with no cluster behind it is a supported way to run — a
+	// --projection-dir and --local-dsn-from-env need no Kubernetes at all,
+	// which is what makes trying a projection against a laptop database one
+	// command. The recommended options do not allow for it on their own:
+	// CoreAPIOptions.ApplyTo builds its client from --kubeconfig or, failing
+	// that, from the in-cluster environment, and returns that error rather than
+	// leaving the client unset. So every start outside a cluster stopped at
+	// "unable to load in-cluster configuration" before any of the checks in
+	// this file could say something more useful.
+	//
+	// Dropping the options when there is nothing for them to reach leaves
+	// serverConfig.ClientConfig nil, which is the state dynamicClient,
+	// metadataClient and dsnResolver already expect and already explain. An
+	// explicit --kubeconfig is left alone: that is the operator asserting a
+	// cluster, and failing to reach it should be loud.
+	if o.standalone() {
+		// The features that need a cluster say so here rather than failing
+		// several layers down in a message about a nil shared informer.
+		if o.EnableAdmission {
+			return nil, fmt.Errorf("--enable-admission requires a kubeconfig: the plugins watch " +
+				"webhook configurations, admission policies and namespaces, and there is no cluster here to watch")
+		}
+		if o.RecommendedOptions.Features.EnablePriorityAndFairness {
+			return nil, fmt.Errorf("--enable-priority-and-fairness requires a kubeconfig: fair queueing " +
+				"is driven by FlowSchemas and PriorityLevelConfigurations, and there is no cluster here to read them from")
+		}
+
+		o.RecommendedOptions.CoreAPI = nil
+
+		// And with no cluster there is nothing to ask about a request either.
+		// Delegated authorization answers a SubjectAccessReview; without a
+		// client it holds no opinion on any resource request, and the fallback
+		// is deny — so the server came up and refused every read, which is a
+		// worse failure than not coming up at all because it looks like a
+		// permissions problem the operator can fix. Nor can
+		// --authorization-always-allow-paths cover it: the path authorizer
+		// declines to decide resource requests by design.
+		//
+		// Nil means always allow. That is the honest description of a server
+		// with no authority to consult, and it is why this is reached only when
+		// there is no kubeconfig and no service account — never in a cluster,
+		// and never when --kubeconfig was given.
+		o.RecommendedOptions.Authorization = nil
+		klog.Warning("no kubeconfig and no service account: serving without authentication or authorization, " +
+			"because there is no cluster to delegate either to. Every request is allowed. " +
+			"This is for running against a local database; do not expose the port.")
+	}
+
 	serverConfig := genericapiserver.NewRecommendedConfig(apiserver.Codecs)
 
 	// Serving limits, request timeouts, and the graceful shutdown delay.
@@ -432,6 +482,24 @@ func (o *CrispServerOptions) Config() (*apiserver.Config, error) {
 			ProjectionWebhook:         projectionWebhook,
 		},
 	}, nil
+}
+
+// standalone reports whether this process has no Kubernetes to talk to: no
+// --kubeconfig, and no service account mounted by a cluster.
+//
+// Only the absence of both counts. A kubeconfig that names an unreachable
+// cluster is not standalone — it is a broken deployment, and the error belongs
+// where it happens rather than silently downgraded to a server that serves
+// files and cannot read a Secret.
+func (o *CrispServerOptions) standalone() bool {
+	if o.RecommendedOptions.CoreAPI == nil {
+		return true
+	}
+	if o.RecommendedOptions.CoreAPI.CoreAPIKubeconfigPath != "" {
+		return false
+	}
+	_, err := rest.InClusterConfig()
+	return err != nil
 }
 
 // dynamicClient builds the client used to watch projections and report their

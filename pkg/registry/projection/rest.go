@@ -1003,6 +1003,19 @@ func (r *REST) getObject(ctx context.Context, name string, mode readMode) (runti
 	if err != nil {
 		return nil, len(rows), errors.NewInternalError(fmt.Errorf("mapping row: %w", err))
 	}
+
+	// The row the query found, from another namespace. Not found is what a
+	// namespaced read is entitled to hear about it: see listWith, where the
+	// same thing is done to a collection.
+	if namespace != "" && obj.GetNamespace() != namespace {
+		crispmetrics.RowsOutOfNamespace.WithLabelValues(r.projection, r.label).Inc()
+		klog.InfoS("refused a row the query returned from another namespace; the get query does not "+
+			"filter on the column mapped to metadata.namespace",
+			"resource", r.label, "namespace", namespace, "found", obj.GetNamespace(),
+			"fix", "add the namespace to the query's WHERE clause, as \"tenant = :namespace\" or the equivalent")
+		return nil, len(rows), errors.NewNotFound(r.groupResource(), name)
+	}
+
 	if mode == shared {
 		r.cache.putObject(key, namespace, obj)
 	}
@@ -1206,6 +1219,15 @@ func (r *REST) listWith(
 		firstSkip error
 	)
 
+	// Rows the query returned from somewhere else. A namespaced read must only
+	// ever answer with rows in that namespace: it is what makes ordinary
+	// namespace RBAC apply to database rows, which is the reason
+	// mapping.namespace exists at all. The filter belongs in the query, but a
+	// query that forgets it — a rename, a refactor, a clause copied from a
+	// cluster-wide read — would otherwise hand every caller the whole table
+	// with nothing anywhere saying so.
+	var foreign int
+
 	for i, row := range rows {
 		obj, mapErr := r.mapper.Row(row)
 
@@ -1242,7 +1264,23 @@ func (r *REST) listWith(
 		if options != nil && !r.matchesFields(obj, options.FieldSelector) {
 			continue
 		}
+		if namespace != "" && obj.GetNamespace() != namespace {
+			foreign++
+			continue
+		}
 		list.Items = append(list.Items, *obj)
+	}
+
+	if foreign > 0 {
+		crispmetrics.RowsOutOfNamespace.WithLabelValues(r.projection, r.label).Add(float64(foreign))
+		klog.InfoS("dropped rows the query returned from another namespace; the list query does not "+
+			"filter on the column mapped to metadata.namespace",
+			"resource", r.label, "namespace", namespace, "rows", foreign,
+			"fix", "add the namespace to the query's WHERE clause, as \"tenant = :namespace\" or the equivalent")
+		warning.AddWarning(ctx, "", fmt.Sprintf(
+			"%d row(s) the query returned were outside namespace %q and were not served; "+
+				"the list query does not filter on the column mapped to metadata.namespace",
+			foreign, namespace))
 	}
 
 	if skipped > 0 {

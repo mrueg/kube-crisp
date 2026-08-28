@@ -48,7 +48,7 @@ The e2e suite is split so it does not have to be run whole:
 
 ```console
 $ make e2e-up                       # kind, PostgreSQL, MySQL, SQLite
-$ make e2e-correctness              # 62 tests, a few minutes
+$ make e2e-correctness              # 89 tests, a few minutes
 $ make e2e-bench SHARD=reads        # one benchmark shard
 $ make e2e-down
 ```

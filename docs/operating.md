@@ -433,7 +433,11 @@ $ kubectl get apiservices -l app.kubernetes.io/managed-by=kube-crisp
   statement are deliberately excluded: they are the caller's data, and the statement text is what
   identifies the operation. The same line is available at `-v=4` without auditing configured.
 - Authentication and authorization are delegated to the kube-apiserver, so existing RBAC governs
-  who can read or write a projected resource.
+  who can read or write a projected resource — unless there is no cluster to delegate to. With no
+  `--kubeconfig` and no service account the server allows every request and warns that it is doing
+  so, because delegated authorization without a client can only deny every one of them. That is for
+  running against a local database; the port must not be exposed. See
+  [SECURITY.md](../SECURITY.md).
 - Admission and API priority-and-fairness are off by default: both watch cluster-wide
   configuration, which is a grant worth making deliberately. Each has its own manifest, and
   enabling one without applying it leaves the server unable to start its informers.

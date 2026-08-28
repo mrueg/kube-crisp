@@ -50,6 +50,23 @@ is outside what this guarantees.
 tokens and permissions, so existing RBAC governs who may read or write a
 projected resource. kube-crisp adds no authorization of its own.
 
+**Except when there is no cluster to delegate to.** Started with no
+`--kubeconfig` and no mounted service account — the shape of a local run against
+your own database — there is nothing to review a token or answer a
+`SubjectAccessReview`, and delegated authorization can only deny every request.
+The server allows them instead and says so at startup:
+
+```
+no kubeconfig and no service account: serving without authentication or
+authorization, because there is no cluster to delegate either to. Every request
+is allowed.
+```
+
+That is a development mode: the port must not be exposed. It cannot be reached
+by accident from a cluster, where the service account makes it a normal
+delegated server, nor when `--kubeconfig` is given — an unreachable cluster
+named explicitly is an error rather than a downgrade.
+
 **Tenancy is only as strong as where it is enforced.** Mapping a column to
 `metadata.namespace` puts namespace RBAC in front of it, and that is usually
 enough. When the boundary has to survive a mistake in a projection's `WHERE`

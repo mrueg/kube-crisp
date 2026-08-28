@@ -354,6 +354,10 @@ attaches build provenance.
   exists is the garbage collector's question rather than this server's.
 - **Server-side apply tracks ownership only when asked to.** Without `mapping.managedFields` there
   is nowhere to keep it, so applies merge but never conflict.
+- **`--projection-dir` reads one directory, not a tree.** Subdirectories are skipped, so a
+  directory holding only folders loads nothing and says nothing — which is exactly what happened to
+  this repository's own `examples/` when it grew subfolders. Point the flag at the directory holding
+  the manifests.
 - **`--projection-dir` is re-read while running.** A file changing is picked up the way a projection
   changing in the cluster is: the directory is watched and re-read on every sync. A file that does
   not parse keeps the last good set rather than taking every file-backed projection out of service.
@@ -380,7 +384,7 @@ attaches build provenance.
 ## Status
 
 Early, and interfaces will change. Reads, writes, watch, dynamic registration, admission, tracing,
-and the mapping layer are implemented and covered by 538 unit tests plus a 101-test e2e suite that
+and the mapping layer are implemented and covered by 542 unit tests plus a 101-test e2e suite that
 runs against PostgreSQL, MySQL and SQLite in a kind cluster — including a database outage, row-level
 security, finalizer flows, server-side apply conflicts, a dropped `LISTEN`/`NOTIFY` subscription, and
 a run against a server built with the race detector. The correctness half of that suite takes a few

@@ -12,3 +12,7 @@ core.*
 apiserver.local.config/
 .alerts-check.yaml
 .alerts-rendered.yaml
+
+# The Pagila sample database, fetched by hack/fetch-pagila.sh rather than
+# vendored: it is somebody else's data, and upstream keeps the copy of record.
+third_party/pagila/*.sql

@@ -346,6 +346,8 @@ INSERT INTO replicated_orders VALUES ('split-1', 'acme', 'from-the-replica', '1'
 # than written out here: the point of that tutorial is a schema nobody designed
 # for this, and one retyped into a shell script would not be one.
 echo "==> seeding pagila"
+# Not in the repository: fetched, checksummed, and left alone on later runs.
+./hack/fetch-pagila.sh
 # Dropped and recreated rather than loaded over: every other seed here is
 # written to survive a second run, and a dump full of CREATE is not. FORCE
 # closes the pools kube-crisp already has open to it, which it reopens.

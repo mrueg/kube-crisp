@@ -8,8 +8,8 @@ deciding what is a resource, and what is merely a column somewhere, is most of
 the work.
 
 Everything here assumes kube-crisp is installed from `manifests/`. The
-projections are in [`examples/pagila/`](../examples/pagila) and the database is
-vendored in [`third_party/pagila/`](../third_party/pagila).
+projections are in [`examples/pagila/`](../examples/pagila); the database is
+somebody else's, so it is fetched rather than kept here.
 
 ![Listing Pagila's films and reading one of them with kubectl](demo/pagila.gif)
 
@@ -65,6 +65,16 @@ Ten kinds, from fifteen tables and a view:
 Pagila needs **PostgreSQL 18**: version 18.a added a virtual generated column to
 `film`, and virtual generated columns arrived in 18. On 17 the schema fails to
 load.
+
+The dump is not in this repository — it is upstream's data, and upstream keeps
+the copy of record. Fetch it, at a pinned commit and checked against recorded
+SHA-256 sums:
+
+```sh
+./hack/fetch-pagila.sh
+```
+
+Then load it:
 
 ```sh
 kubectl -n kube-crisp exec deploy/postgres -- psql -U crisp -d postgres -c "CREATE DATABASE pagila"

@@ -1,3 +1,0 @@
-# The vendored Pagila dump is somebody else's SQL, not this project's. Marking
-# it keeps it out of GitHub's language stats and collapsed in diffs.
-third_party/** linguist-vendored

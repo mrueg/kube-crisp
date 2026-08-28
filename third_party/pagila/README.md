@@ -13,19 +13,29 @@ views.
 | Version | 18.a |
 | License | The PostgreSQL License. Portions © 2006–2026 Robert Treat, portions © 2006 MySQL AB. |
 
-## What is here
+## Nothing is here
 
-Both files are upstream's, byte for byte — 1000 films, 4581 copies on the
-shelves, 16044 rentals and as many payments. Nothing is trimmed: the tutorial
-quotes real numbers out of the real database, and a reader who loads it gets the
-same ones.
-
-To refresh after an upstream bump:
+`pagila-schema.sql` and `pagila-data.sql` are **not** in this repository. They
+are somebody else's data, 2.9 MB of it, and upstream keeps the copy of record.
+Fetch them:
 
 ```sh
-curl -O https://raw.githubusercontent.com/xzilla/pagila/master/pagila-schema.sql
-curl -O https://raw.githubusercontent.com/xzilla/pagila/master/pagila-data.sql
+./hack/fetch-pagila.sh
 ```
+
+Which downloads both files at the commit pinned above and checks them against
+recorded SHA-256 sums, so the contents cannot change under this repository
+without the pin being changed first. Already-correct files are left alone, so
+`hack/e2e-up.sh` calls it on every run and pays for it once.
+
+A mismatch is an error rather than a warning, and the partial download is
+removed rather than left where something might load it. If upstream has moved
+on deliberately, update `COMMIT` and the two sums in the script together.
+
+What arrives is upstream's, byte for byte — 1000 films, 4581 copies on the
+shelves, 16044 rentals and as many payments. Nothing is trimmed: the tutorial
+quotes real numbers out of the real database, and a reader who fetches it gets
+the same ones.
 
 ## PostgreSQL 18
 

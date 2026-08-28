@@ -159,9 +159,10 @@ pagination, and watch — is in **[docs/reference.md](docs/reference.md)**.
 
 ## Quick start
 
-These project the sample database vendored in [`third_party/pagila/`](third_party/pagila) — load it
-into a PostgreSQL 18 server first, or point the DSN at a database of your own and apply
-[`examples/orders/`](examples/orders) instead, which needs one `CREATE TABLE`.
+These project a sample database this repository does not carry — run
+[`./hack/fetch-pagila.sh`](third_party/pagila) and load it into a PostgreSQL 18 server first, or
+point the DSN at a database of your own and apply [`examples/orders/`](examples/orders) instead,
+which needs one `CREATE TABLE`.
 
 Local, against a database you can already reach:
 

@@ -35,15 +35,16 @@ const (
 	// many projections make it up.
 	DefaultNamePrefix = "kube-crisp"
 
-	// groupLabel records which projected API group a role was generated for,
-	// so the roles belonging to a group can be found again when it is removed.
+	// GroupLabel records which projected API group a role was generated for, so
+	// the roles belonging to a group can be found again when it is removed.
+	// `kubectl crisp prune` selects on it.
 	//
 	// Deliberately not app.kubernetes.io/managed-by, which this project uses
 	// for the APIServices and the webhook configuration the server itself
 	// creates, updates and prunes. Nothing manages these: they are printed for
-	// somebody to read, edit and apply, and a label claiming otherwise would
-	// invite pruning them from a controller that does not own them.
-	groupLabel = "crisp.kubecrisp.io/projected-group"
+	// somebody to read, edit and apply, and a controller that pruned them
+	// without being asked would be deleting objects a person had edited.
+	GroupLabel = "crisp.kubecrisp.io/projected-group"
 
 	aggregateToView = "rbac.authorization.k8s.io/aggregate-to-view"
 	aggregateToEdit = "rbac.authorization.k8s.io/aggregate-to-edit"
@@ -191,7 +192,7 @@ func rulesFor(group string, resources map[string]sets.Set[string], want sets.Set
 
 // role assembles one ClusterRole.
 func role(prefix, group, tier, aggregateLabel string, aggregate bool, rules []rbacv1.PolicyRule) rbacv1.ClusterRole {
-	labels := map[string]string{groupLabel: group}
+	labels := map[string]string{GroupLabel: group}
 	if aggregate {
 		labels[aggregateLabel] = "true"
 	}

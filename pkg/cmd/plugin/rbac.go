@@ -18,12 +18,9 @@ import (
 	"github.com/spf13/cobra"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
-	crispclient "github.com/mrueg/kube-crisp/pkg/generated/clientset/versioned"
-	"github.com/mrueg/kube-crisp/pkg/projection"
 	"github.com/mrueg/kube-crisp/pkg/rbac"
 )
 
@@ -33,8 +30,7 @@ type rbacOptions struct {
 	output     string
 	namePrefix string
 
-	kubeconfig  string
-	kubecontext string
+	client clientFlags
 }
 
 // NewCommandRBAC builds the `rbac` subcommand.
@@ -75,8 +71,7 @@ func NewCommandRBAC(out, errOut io.Writer) *cobra.Command {
 	f.StringVarP(&o.output, "output", "o", "yaml", "Output format: yaml or json.")
 	f.StringVar(&o.namePrefix, "name-prefix", rbac.DefaultNamePrefix,
 		"Prefix for the generated role names.")
-	f.StringVar(&o.kubeconfig, "kubeconfig", "", "Path to the kubeconfig file to use.")
-	f.StringVar(&o.kubecontext, "context", "", "Name of the kubeconfig context to use.")
+	o.client.bind(cmd)
 
 	return cmd
 }
@@ -96,9 +91,9 @@ func (o *rbacOptions) run(ctx context.Context, names []string, out, errOut io.Wr
 		err         error
 	)
 	if len(o.filenames) > 0 {
-		projections, err = o.fromFiles()
+		projections, err = loadFiles(o.filenames)
 	} else {
-		projections, err = o.fromCluster(ctx, names)
+		projections, err = projectionsFromCluster(ctx, &o.client, names)
 	}
 	if err != nil {
 		return err
@@ -122,65 +117,6 @@ func (o *rbacOptions) run(ctx context.Context, names []string, out, errOut io.Wr
 	}
 
 	return write(out, roles, o.output)
-}
-
-func (o *rbacOptions) fromFiles() ([]crispv1alpha1.CustomResourceProjection, error) {
-	var out []crispv1alpha1.CustomResourceProjection
-	for _, path := range o.filenames {
-		loaded, err := projection.LoadPath(path)
-		if err != nil {
-			return nil, err
-		}
-		if len(loaded) == 0 {
-			return nil, fmt.Errorf("%s: no CustomResourceProjection manifests found", path)
-		}
-		out = append(out, loaded...)
-	}
-	return out, nil
-}
-
-func (o *rbacOptions) fromCluster(ctx context.Context, names []string) ([]crispv1alpha1.CustomResourceProjection, error) {
-	client, err := o.client()
-	if err != nil {
-		return nil, err
-	}
-
-	if len(names) == 0 {
-		list, err := client.CrispV1alpha1().CustomResourceProjections().List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("listing projections: %w", err)
-		}
-		return list.Items, nil
-	}
-
-	out := make([]crispv1alpha1.CustomResourceProjection, 0, len(names))
-	for _, name := range names {
-		p, err := client.CrispV1alpha1().CustomResourceProjections().Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("getting projection %s: %w", name, err)
-		}
-		out = append(out, *p)
-	}
-	return out, nil
-}
-
-// client builds a clientset from the usual kubeconfig resolution: --kubeconfig,
-// then $KUBECONFIG, then the default path, and in-cluster if there is none.
-func (o *rbacOptions) client() (crispclient.Interface, error) {
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if o.kubeconfig != "" {
-		rules.ExplicitPath = o.kubeconfig
-	}
-	overrides := &clientcmd.ConfigOverrides{}
-	if o.kubecontext != "" {
-		overrides.CurrentContext = o.kubecontext
-	}
-
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
-	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
-	}
-	return crispclient.NewForConfig(config)
 }
 
 // write emits the roles as one YAML stream or one JSON list.

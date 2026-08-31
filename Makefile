@@ -15,9 +15,14 @@ build: build-plugin
 
 # The kubectl plugin. Named kubectl-crisp because that is how kubectl finds it:
 # put $(BIN_DIR) on PATH and `kubectl crisp` works.
+#
+# The link is the second name kubectl looks for, the one it completes a plugin
+# through. It is the same binary, which answers to either name, so `kubectl
+# crisp <TAB>` works out of a checkout as well.
 .PHONY: build-plugin
 build-plugin:
 	go build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/kubectl-crisp ./cmd/kubectl-crisp
+	ln -sf kubectl-crisp $(BIN_DIR)/kubectl_complete-crisp
 
 .PHONY: test
 test:

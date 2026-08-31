@@ -42,5 +42,9 @@ func main() {
 	root.AddCommand(plugin.NewCommandSchema(os.Stdout, os.Stderr))
 
 	root.SetContext(ctx)
+	// Not os.Args[1:]: run under the name kubectl completes plugins through,
+	// the same binary answers the completion request instead. See
+	// plugin.CompletionName.
+	root.SetArgs(plugin.CompletionArgs(os.Args))
 	os.Exit(cli.Run(root))
 }

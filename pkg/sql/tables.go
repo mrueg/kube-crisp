@@ -24,6 +24,10 @@ import (
 //     direction; failing to name one that is would not be.
 //   - A table named only inside dynamic SQL, or reached through a view, is not
 //     reported, because nothing in the statement text says so.
+//   - What a call like extract(epoch FROM ts) reads is not reported, because
+//     the scan steps over such calls whole. Their FROM is part of the
+//     function's syntax rather than a clause, and reading it as one named a
+//     column where a table belonged.
 //
 // Both are why the result is described as what the projection names rather than
 // as a complete schema.
@@ -63,6 +67,23 @@ func Tables(stmt, driver string) []string {
 			j++
 		}
 		keyword := stmt[i:j]
+
+		// A handful of SQL functions spell an argument separator FROM, so the
+		// FROM inside extract(epoch FROM f.last_update) introduces nothing.
+		// Read as a clause it reported "f.last_update" as a table, which is a
+		// column, in every projection deriving a resourceVersion from a
+		// timestamp — the idiom the PostgreSQL tutorial recommends.
+		//
+		// The whole call is stepped over rather than the FROM alone. What these
+		// take is an expression, so a table inside one would have to come from
+		// a subquery nobody writes there, and skipping is the conservative
+		// direction: a name missed is a name not invented.
+		if fromTakingCall[strings.ToLower(keyword)] {
+			if end, ok := skipCall(stmt, j, style); ok {
+				i = end
+				continue
+			}
+		}
 
 		// INTO always introduces a table; FROM and JOIN may introduce a
 		// subquery or a set-returning function instead.
@@ -155,4 +176,51 @@ func skipSpace(stmt string, i int) int {
 		}
 	}
 	return i
+}
+
+// fromTakingCall names the functions whose argument list contains a FROM that
+// is part of their syntax rather than a clause: extract(field FROM source),
+// substring(string FROM pattern), trim(side chars FROM string), and
+// overlay(string placing string FROM int).
+var fromTakingCall = map[string]bool{
+	"extract":   true,
+	"substring": true,
+	"trim":      true,
+	"overlay":   true,
+}
+
+// skipCall steps over a parenthesised argument list starting at or after i,
+// reporting where it ended.
+//
+// Reports false when what follows is not a call at all, so a column named
+// "extract" is still read as a name rather than swallowing the rest of the
+// statement. Nesting is counted, and skipNonCode keeps a parenthesis inside a
+// string or a comment from closing it.
+func skipCall(stmt string, i int, style PlaceholderStyle) (int, bool) {
+	i = skipSpace(stmt, i)
+	if i >= len(stmt) || stmt[i] != '(' {
+		return i, false
+	}
+
+	depth := 0
+	for i < len(stmt) {
+		if end, ok := skipNonCode(stmt, i, style); ok {
+			i = end
+			continue
+		}
+		switch stmt[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i + 1, true
+			}
+		}
+		i++
+	}
+
+	// Unbalanced: the database will reject this statement anyway, and consuming
+	// the rest of it would hide every table after the open parenthesis.
+	return i, false
 }

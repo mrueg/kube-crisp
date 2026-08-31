@@ -13,6 +13,46 @@ func TestTables(t *testing.T) {
 		want   []string
 	}{
 		{
+			// The bug this set exists for: EXTRACT spells an argument
+			// separator FROM, and reading it as a clause reported a column as
+			// a table. Every projection deriving a resourceVersion from a
+			// timestamp does this, the PostgreSQL tutorial recommends it, and
+			// every Pagila projection in examples/ was affected.
+			name: "extract does not name a table",
+			sql:  "SELECT id, (extract(epoch FROM f.last_update) * 1000000)::bigint AS version FROM film f",
+			want: []string{"film"},
+		},
+		{
+			name: "substring, trim and overlay do not either",
+			sql: "SELECT substring(title FROM 1 FOR 3), trim(BOTH ' ' FROM title), " +
+				"overlay(title placing 'x' FROM 2) FROM film",
+			want: []string{"film"},
+		},
+		{
+			name: "a call is stepped over whole, so a later table is still found",
+			sql:  "SELECT extract(epoch FROM a.ts) FROM actor a JOIN film_actor fa ON fa.actor_id = a.actor_id",
+			want: []string{"actor", "film_actor"},
+		},
+		{
+			name: "nested parentheses inside the call do not end it early",
+			sql:  "SELECT extract(epoch FROM (a.ts + interval '1 day')) FROM actor a",
+			want: []string{"actor"},
+		},
+		{
+			// The keyword only matters when a call follows it. A column that
+			// happens to be named extract is read as a name.
+			name: "a column named extract is not a call",
+			sql:  "SELECT extract, id FROM orders",
+			want: []string{"orders"},
+		},
+		{
+			// Unbalanced parentheses are the database's to reject. Consuming
+			// the rest of the statement would hide every table after them.
+			name: "an unclosed call does not swallow the statement",
+			sql:  "SELECT extract(epoch FROM ts FROM orders",
+			want: []string{"orders", "ts"},
+		},
+		{
 			name: "a plain select",
 			sql:  "SELECT id, tenant FROM orders WHERE tenant = :namespace",
 			want: []string{"orders"},

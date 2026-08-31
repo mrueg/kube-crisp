@@ -214,9 +214,9 @@ install granted them — while the documentation described each as a grant to ma
 
 ### Installing the kubectl plugin
 
-`kubectl crisp` writes the RBAC a projected group needs to be reachable, shows who may reach it, and
-finds the roles a deleted projection left behind. kubectl finds it by name: any executable called
-`kubectl-crisp` on `PATH` becomes `kubectl crisp`.
+`kubectl crisp` writes the RBAC a projected group needs to be reachable, shows who may reach it,
+finds the roles a deleted projection left behind, and says what a projection needs from its database.
+kubectl finds it by name: any executable called `kubectl-crisp` on `PATH` becomes `kubectl crisp`.
 
 Releases carry one archive per platform holding the plugin alone, for Linux, macOS and Windows — it
 links no database driver, so unlike the server there is no reason to build your own:
@@ -226,8 +226,18 @@ $ VERSION=0.2.0; OS=linux; ARCH=amd64
 $ curl -sSLO "https://github.com/mrueg/kube-crisp/releases/download/v$VERSION/kubectl-crisp_${VERSION}_${OS}_${ARCH}.tar.gz"
 $ tar xzf "kubectl-crisp_${VERSION}_${OS}_${ARCH}.tar.gz" kubectl-crisp
 $ sudo install kubectl-crisp /usr/local/bin/
+$ sudo ln -s kubectl-crisp /usr/local/bin/kubectl_complete-crisp   # optional; see below
 $ kubectl crisp --help
 ```
+
+The link is what makes `kubectl crisp <TAB>` complete. kubectl asks a plugin for completions by
+looking up an executable named `kubectl_complete-<plugin>` on `PATH` and offers nothing without one,
+however much the plugin itself knows — so the plugin answers to that name as well, and the link is
+the whole of it. There is no second program to install or to keep in step. Skipping it costs the
+completion and nothing else.
+
+On Windows the lookup goes through `PATHEXT`, so the copy has to be named `kubectl_complete-crisp.exe`
+to be found.
 
 Each release also carries a `checksums.txt`, signed with cosign keylessly, which is what to check the
 download against.
@@ -236,9 +246,10 @@ Or with Go, which reports its version as `dev` — the real one is stamped at re
 
 ```console
 $ go install github.com/mrueg/kube-crisp/cmd/kubectl-crisp@latest
+$ ln -s kubectl-crisp "$(go env GOPATH)/bin/kubectl_complete-crisp"   # completion, as above
 ```
 
-From a checkout, `make build` puts it in `bin/` beside the server.
+From a checkout, `make build` puts it in `bin/` beside the server, with the completion link made.
 
 It is not on [krew](https://krew.sigs.k8s.io) yet.
 

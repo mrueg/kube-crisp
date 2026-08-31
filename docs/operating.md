@@ -49,6 +49,59 @@ them, and no binding is needed at all. It is off by default on purpose: the rows
 are a production database's, and aggregating grants every existing holder of `view`, in every
 namespace, the moment the role is applied. That is a decision, not a default.
 
+### Checking who can reach what
+
+```console
+$ kubectl crisp can-i --as alice
+
+RESOURCE        GET  LIST  WATCH  CREATE  UPDATE  PATCH  DELETE  DELETECOLLECTION
+films           yes  yes   yes    yes!    -       -      -       -
+rentals         yes  yes   no     no      -       -      no      no
+rentals/status  yes  -     -      -       no      no     -       -
+```
+
+`kubectl auth can-i get films` already answers one cell of that. What it cannot answer is the
+column marked `yes!`, because RBAC and the projection are two independent gates and nothing
+compares them. A caller granted `create` on a projection with no create query is *authorized* and
+still gets `405 Method Not Allowed`: the grant says yes, the server says no, and neither side
+reports the disagreement. It comes from a hand-written role, or from one left over from a projection
+that used to have the query.
+
+`-` is the other half of that: the projection has no query for the verb, so no grant can make it
+work. A `no` is the ordinary 403, and the notes under the table name the role that would grant each
+one.
+
+The table goes to stdout and the legend to stderr, so piping it somewhere does not carry the prose
+along. `-o json` gives the same data per resource and verb, for asserting on it in CI. Subresources
+are asked about separately because RBAC treats `films/status` as its own resource — a role granting
+`films` says nothing about it. A namespaced kind is asked about `--namespace`; a cluster-scoped one
+is asked without one, since a review carrying a namespace would be answered against Roles in it,
+which cannot grant a cluster-scoped resource at all.
+
+Without `--as` it checks the current user with a `SelfSubjectAccessReview`, which needs no
+permission. `--as` and `--as-group` make it a `SubjectAccessReview`, which is a privileged question
+and answered as one.
+
+### Roles left behind
+
+Deleting a projection takes its API group away. It does not take away the ClusterRole that granted
+it, and an orphaned role is quiet rather than broken — it grants verbs on a group nothing serves,
+until somebody projects that group name again and the old grant lands on the new rows.
+
+```console
+$ kubectl crisp prune
+kube-crisp:gone.example.com:view    (gone.example.com: no projection serves this group)
+kube-crisp:gone.example.com:edit    (gone.example.com: no projection serves this group)
+
+2 orphaned role(s). Pass --delete to remove them.
+```
+
+It selects on the `crisp.kubecrisp.io/projected-group` label the roles were generated with, so a
+role written by hand is never a candidate however exactly it matches, and one generated under
+`--name-prefix` is found anyway. If the projections cannot be listed it reports nothing rather than
+everything: an error there would leave every group looking unserved and every generated role looking
+orphaned.
+
 The plugin is a separate binary from the server, `kubectl-crisp`, published with each release. Put
 it on `PATH` and kubectl finds it as `kubectl crisp`. It reads projections and nothing else — no
 database, no driver — which is why it is not a subcommand of the server the way `validate` is:

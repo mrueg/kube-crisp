@@ -34,11 +34,39 @@ import (
 )
 
 // CustomResourceProjectionInformer provides access to a shared informer and lister for
-// CustomResourceProjections.
+// CustomResourceProjections. Prefer using the type-safe variant (see [TypedCustomResourceProjectionInformer]).
 type CustomResourceProjectionInformer interface {
 	Informer() cache.SharedIndexInformer
 	Lister() crispv1alpha1.CustomResourceProjectionLister
 }
+
+// TypedCustomResourceProjectionInformer provides access to a shared informer and lister for
+// CustomResourceProjections, including the type-safe TypedInformer variant.
+// It is a superset of CustomResourceProjectionInformer.
+type TypedCustomResourceProjectionInformer interface {
+	Informer() cache.SharedIndexInformer
+	TypedInformer() CustomResourceProjectionIndexInformer
+	Lister() crispv1alpha1.CustomResourceProjectionLister
+}
+
+// CustomResourceProjectionIndexInformer is a wrapper around the underlying [cache.SharedIndexInformer]
+// with type-safe variants of several methods.
+type CustomResourceProjectionIndexInformer cache.TypedSharedIndexInformer[*apiscrispv1alpha1.CustomResourceProjection]
+
+// CustomResourceProjectionHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerFuncs] for CustomResourceProjection.
+type CustomResourceProjectionHandlerFuncs = cache.TypedResourceEventHandlerFuncs[*apiscrispv1alpha1.CustomResourceProjection]
+
+// CustomResourceProjectionDetailedHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerDetailedFuncs] for CustomResourceProjection.
+type CustomResourceProjectionDetailedHandlerFuncs = cache.TypedResourceEventHandlerDetailedFuncs[*apiscrispv1alpha1.CustomResourceProjection]
+
+// CustomResourceProjectionFilteringHandler is a specialization of [cache.TypedFilteringResourceEventHandler] for CustomResourceProjection.
+type CustomResourceProjectionFilteringHandler = cache.TypedFilteringResourceEventHandler[*apiscrispv1alpha1.CustomResourceProjection]
+
+// CustomResourceProjectionIndexers is a specialization of [cache.TypedIndexers] for CustomResourceProjection.
+type CustomResourceProjectionIndexers = cache.TypedIndexers[*apiscrispv1alpha1.CustomResourceProjection]
+
+// DeletedCustomResourceProjection is a specialization of [cache.DeletedObject] for CustomResourceProjection.
+type DeletedCustomResourceProjection = cache.DeletedObject[*apiscrispv1alpha1.CustomResourceProjection]
 
 type customResourceProjectionInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
@@ -48,25 +76,49 @@ type customResourceProjectionInformer struct {
 // NewCustomResourceProjectionInformer constructs a new informer for CustomResourceProjection type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedCustomResourceProjectionInformer]).
 func NewCustomResourceProjectionInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
 	return NewCustomResourceProjectionInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers})
+}
+
+// NewTypedCustomResourceProjectionInformer constructs a new informer for CustomResourceProjection type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedCustomResourceProjectionInformer(client versioned.Interface, resyncPeriod time.Duration, indexers CustomResourceProjectionIndexers) CustomResourceProjectionIndexInformer {
+	return NewTypedCustomResourceProjectionInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers)})
 }
 
 // NewFilteredCustomResourceProjectionInformer constructs a new informer for CustomResourceProjection type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedFilteredCustomResourceProjectionInformer]).
 func NewFilteredCustomResourceProjectionInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
-	return NewCustomResourceProjectionInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+	return NewTypedCustomResourceProjectionInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+}
+
+// NewTypedFilteredCustomResourceProjectionInformer constructs a new informer for CustomResourceProjection type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedFilteredCustomResourceProjectionInformer(client versioned.Interface, resyncPeriod time.Duration, indexers CustomResourceProjectionIndexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) CustomResourceProjectionIndexInformer {
+	return NewTypedCustomResourceProjectionInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers), TweakListOptions: tweakListOptions})
 }
 
 // NewCustomResourceProjectionInformerWithOptions constructs a new informer for CustomResourceProjection type with additional options.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedCustomResourceProjectionInformerWithOptions]).
 func NewCustomResourceProjectionInformerWithOptions(client versioned.Interface, options internalinterfaces.InformerOptions) cache.SharedIndexInformer {
+	return NewTypedCustomResourceProjectionInformerWithOptions(client, options)
+}
+
+// NewTypedCustomResourceProjectionInformerWithOptions constructs a new informer for CustomResourceProjection type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedCustomResourceProjectionInformerWithOptions(client versioned.Interface, options internalinterfaces.InformerOptions) CustomResourceProjectionIndexInformer {
 	gvr := schema.GroupVersionResource{Group: "crisp.kubecrisp.io", Version: "v1alpha1", Resource: "customresourceprojections"}
 	identifier := options.InformerName.WithResource(gvr)
 	tweakListOptions := options.TweakListOptions
-	return cache.NewSharedIndexInformerWithOptions(
+	return cache.NewTypedSharedIndexInformer[*apiscrispv1alpha1.CustomResourceProjection](cache.NewSharedIndexInformerWithOptions(
 		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
@@ -99,17 +151,57 @@ func NewCustomResourceProjectionInformerWithOptions(client versioned.Interface, 
 			Indexers:     options.Indexers,
 			Identifier:   identifier,
 		},
-	)
+	))
 }
 
 func (f *customResourceProjectionInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewCustomResourceProjectionInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
+	return NewTypedCustomResourceProjectionInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
 }
 
 func (f *customResourceProjectionInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&apiscrispv1alpha1.CustomResourceProjection{}, f.defaultInformer)
+	return f.TypedInformer()
+}
+
+func (f *customResourceProjectionInformer) TypedInformer() CustomResourceProjectionIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*apiscrispv1alpha1.CustomResourceProjection](f.factory.InformerFor(&apiscrispv1alpha1.CustomResourceProjection{}, f.defaultInformer))
 }
 
 func (f *customResourceProjectionInformer) Lister() crispv1alpha1.CustomResourceProjectionLister {
 	return crispv1alpha1.NewCustomResourceProjectionLister(f.Informer().GetIndexer())
+}
+
+// ToTypedCustomResourceProjectionInformer converts an untyped informer into a TypedCustomResourceProjectionInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *CustomResourceProjection. If that is not the case, calling type-safe methods of the returned
+// TypedCustomResourceProjectionInformer leads to runtime panics. A safer alternative is to pass
+// around a TypedCustomResourceProjectionInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToTypedCustomResourceProjectionInformer(informer CustomResourceProjectionInformer) TypedCustomResourceProjectionInformer {
+	if informer, ok := informer.(TypedCustomResourceProjectionInformer); ok {
+		return informer
+	}
+	return &customResourceProjectionTypedInformerAdapter{informer}
+}
+
+type customResourceProjectionTypedInformerAdapter struct {
+	CustomResourceProjectionInformer
+}
+
+func (a *customResourceProjectionTypedInformerAdapter) TypedInformer() CustomResourceProjectionIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*apiscrispv1alpha1.CustomResourceProjection](a.Informer())
+}
+
+// ToCustomResourceProjectionIndexInformer converts an untyped informer into a CustomResourceProjectionIndexInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *CustomResourceProjection. If that is not the case, calling type-safe methods of the returned
+// CustomResourceProjectionIndexInformer leads to runtime panics. A safer alternative is to pass
+// around a CustomResourceProjectionIndexInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToCustomResourceProjectionIndexInformer(informer cache.SharedIndexInformer) CustomResourceProjectionIndexInformer {
+	if informer, ok := informer.(CustomResourceProjectionIndexInformer); ok {
+		return informer
+	}
+	return cache.NewTypedSharedIndexInformer[*apiscrispv1alpha1.CustomResourceProjection](informer)
 }

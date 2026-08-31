@@ -153,7 +153,14 @@ type Options struct {
 	// own, published with the handler that uses it.
 	NewScheme func() (*runtime.Scheme, serializer.CodecFactory)
 
-	Authorizer                 authorizer.Authorizer
+	// Authorizer is the narrower of the two interfaces upstream offers, because
+	// it is the narrower one this needs: the router hands it straight to
+	// APIGroupVersion, whose own field is an UnconditionalAuthorizer. Nothing
+	// here evaluates conditional decisions, so asking for an Authorizer would
+	// be asking callers for methods that are never called — and since
+	// GenericAPIServer.Authorizer is itself an UnconditionalAuthorizer, asking
+	// for the wider one is not something a caller can satisfy anyway.
+	Authorizer                 authorizer.UnconditionalAuthorizer
 	Admit                      admission.Interface
 	EquivalentResourceRegistry runtime.EquivalentResourceRegistry
 	MinRequestTimeout          time.Duration

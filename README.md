@@ -277,7 +277,8 @@ projection with no `create` query refuses `create` whatever a role says. `kubect
 no arguments reads the projections in the cluster instead. `kubectl crisp can-i` then shows who may
 do what, including the case neither gate can see alone: a verb RBAC grants and the projection cannot
 serve, which is authorized and returns 405. `kubectl crisp prune` finds the roles a deleted
-projection left behind. It is a separate binary because it needs
+projection left behind, and `kubectl crisp schema` says what a projection needs from its database,
+for handing to whatever manages the tables. It is a separate binary because it needs
 neither a database nor a driver, unlike `validate`, whose answer depends on which drivers the build
 linked in.
 

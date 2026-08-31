@@ -472,6 +472,79 @@ func TestPluginPruneRemovesOnlyOrphans(t *testing.T) {
 	}
 }
 
+// TestPluginSchemaReadsTheProjectionInTheCluster.
+//
+// The command derives what a projection needs rather than reading
+// status.requiredSchema, so the check worth running against a cluster is that
+// the two agree: what it prints for a projection the server is serving must be
+// what the server put in that projection's status.
+func TestPluginSchemaReadsTheProjectionInTheCluster(t *testing.T) {
+	ctx := context.Background()
+
+	stdout, _ := runPlugin(t, "schema", "orders", "-o", "json")
+
+	var got []struct {
+		Projection string   `json:"projection"`
+		Tables     []string `json:"tables"`
+		Columns    []struct {
+			Name    string `json:"name"`
+			Type    string `json:"type"`
+			UsedFor string `json:"usedFor"`
+		} `json:"columns"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("parsing schema output: %v\n%s", err, stdout)
+	}
+	if len(got) != 1 || got[0].Projection != "orders" {
+		t.Fatalf("expected one row for the orders projection, got %+v", got)
+	}
+
+	if strings.Join(got[0].Tables, ",") != "orders" {
+		t.Fatalf("tables = %v, want just the orders table — a column reported as one is the bug "+
+			"this command found", got[0].Tables)
+	}
+
+	// The server's own answer, from the status it wrote.
+	projection, err := dynamicClient.Resource(crpGVR).Get(ctx, "orders", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the projection: %v", err)
+	}
+	stored, found, err := unstructured.NestedMap(projection.Object, "status", "requiredSchema")
+	if err != nil || !found {
+		t.Fatalf("the projection has no status.requiredSchema to compare against (found=%v): %v", found, err)
+	}
+
+	storedTables, _, err := unstructured.NestedStringSlice(stored, "tables")
+	if err != nil {
+		t.Fatalf("reading status.requiredSchema.tables: %v", err)
+	}
+	if strings.Join(storedTables, ",") != strings.Join(got[0].Tables, ",") {
+		t.Fatalf("the command says %v and the server stored %v", got[0].Tables, storedTables)
+	}
+
+	storedColumns, _, err := unstructured.NestedSlice(stored, "columns")
+	if err != nil {
+		t.Fatalf("reading status.requiredSchema.columns: %v", err)
+	}
+	if len(storedColumns) != len(got[0].Columns) {
+		t.Fatalf("the command lists %d column(s) and the server stored %d",
+			len(got[0].Columns), len(storedColumns))
+	}
+	for i, raw := range storedColumns {
+		column, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("column %d is not an object: %T", i, raw)
+		}
+		if name, _ := column["name"].(string); name != got[0].Columns[i].Name {
+			t.Errorf("column %d is %q here and %q in the status", i, got[0].Columns[i].Name, name)
+		}
+		if usedFor, _ := column["usedFor"].(string); usedFor != got[0].Columns[i].UsedFor {
+			t.Errorf("column %d usedFor is %q here and %q in the status",
+				i, got[0].Columns[i].UsedFor, usedFor)
+		}
+	}
+}
+
 func newPluginOrder(name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "store.example.com/v1alpha1",

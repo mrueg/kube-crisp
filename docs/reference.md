@@ -1073,6 +1073,25 @@ $ kubectl get crp orders -o jsonpath='{.status.requiredSchema}' | jq
 `usedFor` separates the columns a row cannot become an object without — `identity` — from the ones
 that fill in metadata, labels, or fields.
 
+`kubectl crisp schema` reads it back as a checklist, over every projection at once, and over
+manifests that have never reached a cluster:
+
+```console
+$ kubectl crisp schema -f examples/orders/
+orders  orders.store.example.com/v1alpha1
+  tables: orders
+  COLUMN       TYPE     READ FOR
+  created_at   string   metadata
+  currency     string   field
+  customer     string   field
+  id           string   identity
+  ...
+```
+
+It derives the same answer rather than reading the field, by calling the function the controller
+fills the field with — so a projection still in a file, or one whose status has not been written
+because it cannot compile, reports what it would need. `-o json` gives the same data per projection.
+
 Two things it deliberately is not:
 
 - **A schema.** These are *result* columns. A list query that computes one, `SELECT total_cents AS

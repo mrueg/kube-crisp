@@ -7,15 +7,6 @@ import (
 	crispsql "github.com/mrueg/kube-crisp/pkg/sql"
 )
 
-// What a column provides, reported alongside it so a reader can tell a column
-// the projection cannot work without from one that fills in a field.
-const (
-	usedForIdentity = "identity"
-	usedForMetadata = "metadata"
-	usedForLabel    = "label"
-	usedForField    = "field"
-)
-
 // RequiredSchema gathers what a projection reads from its database: the tables
 // its statements name, and the columns its mapping takes out of their results.
 //
@@ -83,58 +74,27 @@ func requiredTables(spec crispv1alpha1.CustomResourceProjectionSpec) []string {
 }
 
 // requiredColumns lists the result columns the mapping reads.
+//
+// The walk itself is MappingColumns, shared with the round-trip check that
+// compares one version's mapping against another's. What is left here is how
+// this caller wants the answer: deduplicated, described, and sorted.
 func requiredColumns(mapping crispv1alpha1.Mapping) []crispv1alpha1.RequiredColumn {
-	columns := map[string]crispv1alpha1.RequiredColumn{}
-	add := func(name, usedFor string, fieldType crispv1alpha1.FieldType) {
-		if name == "" {
-			return
+	seen := map[string]bool{}
+	var out []crispv1alpha1.RequiredColumn
+
+	for _, column := range MappingColumns(&mapping) {
+		// A column read twice keeps the first description of it. MappingColumns
+		// reports identity first, so a column that is both the name and a field
+		// is reported as identity — the half that cannot be dropped.
+		if seen[column.Column] {
+			continue
 		}
-		// A column read twice keeps the first description of it. Identity comes
-		// first below, so a column that is both the name and a field is
-		// reported as identity — which is the half that cannot be dropped.
-		if _, taken := columns[name]; taken {
-			return
-		}
-		columns[name] = crispv1alpha1.RequiredColumn{
-			Name: name, Type: fieldType, UsedFor: usedFor,
-		}
+		seen[column.Column] = true
+		out = append(out, crispv1alpha1.RequiredColumn{
+			Name: column.Column, Type: column.Type, UsedFor: column.UsedFor,
+		})
 	}
 
-	// Identity first: without these a row cannot become an object at all.
-	add(mapping.Name, usedForIdentity, crispv1alpha1.FieldTypeString)
-	for _, column := range mapping.NameColumns {
-		add(column, usedForIdentity, crispv1alpha1.FieldTypeString)
-	}
-	add(mapping.Namespace, usedForIdentity, crispv1alpha1.FieldTypeString)
-	add(mapping.UID, usedForIdentity, crispv1alpha1.FieldTypeString)
-
-	for _, meta := range []string{
-		mapping.ResourceVersion, mapping.CreationTimestamp, mapping.DeletionTimestamp,
-		mapping.Generation, mapping.Finalizers, mapping.OwnerReferences,
-		mapping.ManagedFields, mapping.LabelsFrom, mapping.AnnotationsFrom,
-	} {
-		add(meta, usedForMetadata, crispv1alpha1.FieldTypeString)
-	}
-
-	for _, column := range mapping.Labels {
-		add(column, usedForLabel, crispv1alpha1.FieldTypeString)
-	}
-	for _, column := range mapping.Annotations {
-		add(column, usedForLabel, crispv1alpha1.FieldTypeString)
-	}
-
-	for _, field := range mapping.Fields {
-		fieldType := field.Type
-		if fieldType == "" {
-			fieldType = crispv1alpha1.FieldTypeString
-		}
-		add(field.Column, usedForField, fieldType)
-	}
-
-	out := make([]crispv1alpha1.RequiredColumn, 0, len(columns))
-	for _, column := range columns {
-		out = append(out, column)
-	}
 	// By name, because a map has no order and a status that reshuffles on every
 	// write is a status that never compares equal to itself.
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

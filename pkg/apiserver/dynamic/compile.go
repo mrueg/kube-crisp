@@ -486,31 +486,18 @@ func checkRoundTrip(res crispv1alpha1.ProjectedResource, base crispv1alpha1.Mapp
 }
 
 // mappedColumns is every column a version reads or writes through its mapping.
+//
+// The walk is projection.MappingColumns, which pkg/projection also uses to say
+// what a projection needs from its database. It used to be spelled out here as
+// well, and two lists of the same struct's fields agreeing only by memory is a
+// bad way to hold up a check that fails open: a column left out of this one is
+// a column the comparison below stops making, so two versions pass as covering
+// the same columns while one of them does not, and a write through it drops a
+// value the other displays.
 func mappedColumns(mapping *crispv1alpha1.Mapping) sets.Set[string] {
 	columns := sets.New[string]()
-	if mapping == nil {
-		return columns
-	}
-
-	for _, column := range []string{
-		mapping.Name, mapping.Namespace, mapping.UID, mapping.ResourceVersion,
-		mapping.CreationTimestamp, mapping.DeletionTimestamp, mapping.Generation,
-		mapping.Finalizers, mapping.OwnerReferences, mapping.ManagedFields,
-		mapping.LabelsFrom, mapping.AnnotationsFrom,
-	} {
-		if column != "" {
-			columns.Insert(column)
-		}
-	}
-	columns.Insert(mapping.NameColumns...)
-	for _, column := range mapping.Labels {
-		columns.Insert(column)
-	}
-	for _, column := range mapping.Annotations {
-		columns.Insert(column)
-	}
-	for _, field := range mapping.Fields {
-		columns.Insert(field.Column)
+	for name := range projection.MappingColumnNames(mapping) {
+		columns.Insert(name)
 	}
 	return columns
 }

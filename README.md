@@ -212,6 +212,36 @@ directory is not recursive. Everything in it is a decision rather than a default
 The last three used to sit in the main directory as `60-`, `70-` and `80-`, which meant the base
 install granted them — while the documentation described each as a grant to make deliberately.
 
+### Installing the kubectl plugin
+
+`kubectl crisp` writes the RBAC a projected group needs to be reachable, shows who may reach it, and
+finds the roles a deleted projection left behind. kubectl finds it by name: any executable called
+`kubectl-crisp` on `PATH` becomes `kubectl crisp`.
+
+Releases carry one archive per platform holding the plugin alone, for Linux, macOS and Windows — it
+links no database driver, so unlike the server there is no reason to build your own:
+
+```console
+$ VERSION=0.2.0; OS=linux; ARCH=amd64
+$ curl -sSLO "https://github.com/mrueg/kube-crisp/releases/download/v$VERSION/kubectl-crisp_${VERSION}_${OS}_${ARCH}.tar.gz"
+$ tar xzf "kubectl-crisp_${VERSION}_${OS}_${ARCH}.tar.gz" kubectl-crisp
+$ sudo install kubectl-crisp /usr/local/bin/
+$ kubectl crisp --help
+```
+
+Each release also carries a `checksums.txt`, signed with cosign keylessly, which is what to check the
+download against.
+
+Or with Go, which reports its version as `dev` — the real one is stamped at release time:
+
+```console
+$ go install github.com/mrueg/kube-crisp/cmd/kubectl-crisp@latest
+```
+
+From a checkout, `make build` puts it in `bin/` beside the server.
+
+It is not on [krew](https://krew.sigs.k8s.io) yet.
+
 ### Adding a driver
 
 `spec.dataSource.driver` names a registered driver, and the registry is open:

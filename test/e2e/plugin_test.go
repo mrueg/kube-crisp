@@ -62,7 +62,7 @@ func plugin(t *testing.T) string {
 
 		build := exec.Command("go", "build", "-o", pluginPath, "../../cmd/kubectl-crisp")
 		if out, err := build.CombinedOutput(); err != nil {
-			pluginErr = fmt.Errorf("building kubectl-crisp: %v\n%s", err, out)
+			pluginErr = fmt.Errorf("building kubectl-crisp: %w\n%s", err, out)
 		}
 	})
 

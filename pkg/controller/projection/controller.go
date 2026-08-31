@@ -133,6 +133,10 @@ type Controller struct {
 	hasPeers          bool
 	warnedUnversioned map[string]bool
 
+	// warnedCacheUnshared keeps the cacheTTL warning to once per projection,
+	// for the same reason.
+	warnedCacheUnshared map[string]bool
+
 	// reportedStates names the projections that currently have a
 	// projection_state series, so the ones that go away take their series with
 	// them. Only ever touched from sync.
@@ -244,21 +248,22 @@ func New(opts Options) *Controller {
 		apiServiceInformer: opts.APIServiceInformer,
 		crds:               opts.CRDInformer,
 
-		client:            opts.Client,
-		dynamicClient:     opts.DynamicClient,
-		pools:             opts.Pools,
-		informer:          informer.Informer(),
-		lister:            informer.Lister(),
-		compiler:          opts.Compiler,
-		router:            opts.Router,
-		apiServices:       newAPIServiceManager(opts.DynamicClient, opts.APIServices, apiServiceIndexer(opts.APIServiceInformer)),
-		static:            opts.Static,
-		staticDir:         opts.StaticDir,
-		secrets:           opts.SecretInformers,
-		compiled:          map[string]compilation{},
-		lastStatus:        map[string]crispv1alpha1.CustomResourceProjectionStatus{},
-		hasPeers:          opts.HasPeers,
-		warnedUnversioned: map[string]bool{},
+		client:              opts.Client,
+		dynamicClient:       opts.DynamicClient,
+		pools:               opts.Pools,
+		informer:            informer.Informer(),
+		lister:              informer.Lister(),
+		compiler:            opts.Compiler,
+		router:              opts.Router,
+		apiServices:         newAPIServiceManager(opts.DynamicClient, opts.APIServices, apiServiceIndexer(opts.APIServiceInformer)),
+		static:              opts.Static,
+		staticDir:           opts.StaticDir,
+		secrets:             opts.SecretInformers,
+		compiled:            map[string]compilation{},
+		lastStatus:          map[string]crispv1alpha1.CustomResourceProjectionStatus{},
+		hasPeers:            opts.HasPeers,
+		warnedUnversioned:   map[string]bool{},
+		warnedCacheUnshared: map[string]bool{},
 		queue: workqueue.NewTypedRateLimitingQueue[string](
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 		),
@@ -663,6 +668,15 @@ func (c *Controller) sync(ctx context.Context) error {
 		}
 	}
 
+	// And for the cacheTTL warning.
+	for name := range c.warnedCacheUnshared {
+		if _, still := live[name]; !still {
+			delete(c.warnedCacheUnshared, name)
+			crispmetrics.ProjectionsCacheUnshared.DeletePartialMatch(
+				prometheus.Labels{"projection": name})
+		}
+	}
+
 	// After the rebuild, so a request in flight against the old surface is
 	// never handed storage that has just been torn down.
 	apidynamic.DestroyAll(retired)
@@ -738,6 +752,7 @@ func (c *Controller) sync(ctx context.Context) error {
 
 	for _, cand := range candidates {
 		c.warnIfUnversioned(cand.projection)
+		c.warnIfCacheUnshared(cand.projection)
 	}
 
 	klog.InfoS("projections installed",
@@ -1233,6 +1248,57 @@ func statusUnchanged(old, new crispv1alpha1.CustomResourceProjectionStatus) bool
 	// fixed order, so equality here is a comparison of content rather than of
 	// whichever order a map happened to produce.
 	return apiequality.Semantic.DeepEqual(old.RequiredSchema, new.RequiredSchema)
+}
+
+// warnIfCacheUnshared reports projections whose read cache cannot be
+// invalidated across replicas.
+//
+// A write drops the entries it could have invalidated in the replica that
+// served it. The cache is in process, nothing connects the replicas, and a
+// client cannot tell which one it reached — so a read after a write can be
+// answered by a replica that never saw the write, from an entry older than it,
+// for as long as the TTL. Nothing about the response says so: it is not
+// malformed, it is old, which looks exactly like not having written yet.
+//
+// Writes are not exposed to this. The row a write is based on is always read
+// from the database rather than from the cache, so a client acting on a stale
+// read sends the older resourceVersion and is refused with a conflict.
+//
+// A warning rather than a refusal, and gated the same way as the unversioned
+// one: caching on a single replica is exactly correct, and this server cannot
+// count its peers — leader election being on is the operator saying there are
+// some. Making it an error would break a valid deployment; making it silent is
+// what it has been.
+func (c *Controller) warnIfCacheUnshared(p *crispv1alpha1.CustomResourceProjection) {
+	if !c.hasPeers || p == nil {
+		return
+	}
+
+	// Cleared when the cache is turned off, so an alert stops firing when the
+	// projection is changed rather than when the process restarts.
+	if p.Spec.CacheTTL == nil || p.Spec.CacheTTL.Duration <= 0 {
+		if c.warnedCacheUnshared[p.Name] {
+			delete(c.warnedCacheUnshared, p.Name)
+			crispmetrics.ProjectionsCacheUnshared.DeleteLabelValues(
+				p.Name, p.Spec.Resource.Plural+"."+p.Spec.Resource.Group)
+		}
+		return
+	}
+
+	resource := p.Spec.Resource.Plural + "." + p.Spec.Resource.Group
+	crispmetrics.ProjectionsCacheUnshared.WithLabelValues(p.Name, resource).Set(1)
+
+	if c.warnedCacheUnshared[p.Name] {
+		return
+	}
+	c.warnedCacheUnshared[p.Name] = true
+
+	klog.InfoS("projection caches reads and this server has peers; a write is only "+
+		"invalidated in the replica that served it, so a read routed to another can be "+
+		"answered from an entry older than that write",
+		"projection", p.Name, "resource", resource,
+		"cacheTTL", p.Spec.CacheTTL.Duration.String(),
+		"fix", "remove spec.cacheTTL, or run a single replica, where the invalidation is complete")
 }
 
 // warnAboutUnversionedProjections reports projections that cannot safely be

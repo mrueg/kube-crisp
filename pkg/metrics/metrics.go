@@ -435,6 +435,30 @@ var (
 		[]string{"projection", "resource"},
 	)
 
+	// ProjectionsCacheUnshared marks projections that cache reads while this
+	// server has peers.
+	//
+	// spec.cacheTTL invalidates the entries a write could have changed, in the
+	// replica that served the write. The cache is in process and nothing
+	// connects the replicas, so a read routed elsewhere can be answered from an
+	// entry that predates the write for as long as the TTL. The client cannot
+	// tell which replica it reached, and the read is not wrong in any way it
+	// could detect — it is old, which looks exactly like not having written yet.
+	//
+	// The same shape as ProjectionsUnversioned and reported the same way: a
+	// hazard that only exists with peers, silent when it bites, and a decision
+	// rather than a fault, since a single replica has none of this.
+	ProjectionsCacheUnshared = metrics.NewGaugeVec(
+		&metrics.GaugeOpts{
+			Namespace:      "kube_crisp",
+			Subsystem:      "projections",
+			Name:           "cache_unshared",
+			Help:           "1 for a projection caching reads on a server running with peers.",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"projection", "resource"},
+	)
+
 	// WatchDatabaseReplays counts watchers answered from the database rather
 	// than from the in-memory history ring.
 	//
@@ -663,6 +687,7 @@ func init() {
 		WatchNotifications,
 		ProjectionsUnguardedUpdate,
 		ProjectionsUnversioned,
+		ProjectionsCacheUnshared,
 		WatchDatabaseReplays,
 		WatchListenerConnected,
 		WatchListenerReconnects,

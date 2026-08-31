@@ -359,6 +359,7 @@ Published on the apiserver's own `/metrics`, alongside the standard apiserver re
 | `kube_crisp_watch_listener_reconnects_total` | Subscriptions re-established after dropping; one is a database restart, a climbing number is a subscription that cannot stay up |
 | `kube_crisp_watch_polls_total` | Polls by mode, so you can see whether incremental polling is in effect |
 | `kube_crisp_projections_unversioned` | Projections that map no resourceVersion while this server has peers — the version two replicas then disagree about |
+| `kube_crisp_projections_cache_unshared` | Projections caching reads while this server has peers — a write invalidates only the replica that served it |
 | `kube_crisp_watch_database_replays_total` | Watchers resumed from the database rather than being asked to relist — what a rolling restart no longer costs |
 | `kube_crisp_watch_missed_events_total` | Changes only a full resync found — a resourceVersion that is not monotonic |
 | `kube_crisp_watch_poll_errors_total` | Polls that failed or were shed — a watch that has quietly stopped advancing |

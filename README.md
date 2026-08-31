@@ -69,6 +69,7 @@ group while the server runs, and deleting it takes the group away again. No rest
 | **Versions** | several versions of a kind, each with its own schema and mapping, checked to map the same columns so a write through one does not lose what another shows |
 | **Admission** | opt-in: `ValidatingAdmissionPolicy`, admission webhooks, and namespace lifecycle apply to projected writes; and a webhook of its own that checks a projection's SQL against the database, so a broken one is refused at `kubectl apply` rather than reported afterwards |
 | **Registration** | the APIService for each projected group is created, corrected, and removed automatically |
+| **Access** | authorization is the cluster's: `kubectl crisp rbac` writes the ClusterRoles a projected group needs, granting each kind exactly the verbs its projection can serve |
 | **Lifecycle** | map columns onto `metadata.generation`, `deletionTimestamp`, `finalizers`, and `ownerReferences`, so soft deletes, `observedGeneration`, finalizer flows, and garbage collection work as clients expect |
 | **Multi-tenancy** | map a tenant column to `metadata.namespace` and ordinary namespace RBAC applies, or set session variables and let row-level security enforce it in the database; the caller's name, UID, groups and extra are all bindable |
 | **Scale-out** | reads can go to a read replica while writes stay on the primary, and leader election leaves one replica polling at full rate |
@@ -182,6 +183,9 @@ $ kubectl apply -f examples/pagila/10-catalogue.yaml
 $ kubectl get films                                   # the APIService registers itself
 ```
 
+That last command works as cluster-admin. Authorization is the cluster's, so everyone else needs a
+ClusterRole naming the group first — `kubectl crisp rbac | kubectl apply -f -` writes it.
+
 `helm show values ./charts/kube-crisp` lists what can be turned on: admission,
 fair queueing, a `ServiceMonitor`, an egress `NetworkPolicy`, a real CA bundle.
 
@@ -262,6 +266,18 @@ rejected, and reports every projection rather than stopping at the first — so 
 gate. What it cannot check is whether the database can run the statements; that needs the database,
 and the server checks it when the projection is compiled.
 
+The other half of getting a projection in front of somebody is RBAC, which is the kubectl plugin's:
+
+```console
+$ kubectl crisp rbac -f examples/pagila/ | kubectl apply -f -
+```
+
+Ten kinds become two ClusterRoles, each granting exactly the verbs its projection can serve — a
+projection with no `create` query refuses `create` whatever a role says. `kubectl crisp rbac` with
+no arguments reads the projections in the cluster instead. It is a separate binary because it needs
+neither a database nor a driver, unlike `validate`, whose answer depends on which drivers the build
+linked in.
+
 The correctness half is the part that says whether the code works, and it answers in a minute; the
 rest is benchmarks, which take twenty. CI runs the five shards as parallel jobs with `BENCH_RUNS=1`,
 since there it matters that the benchmarks run rather than that their numbers are quotable.
@@ -302,6 +318,7 @@ attaches build provenance.
 | `pkg/sql` | Pooling, prepared statements, `:named` parameter binding, JSON aggregation |
 | `pkg/generated` | Typed clientset, listers, and informers, produced by `hack/update-codegen.sh` |
 | `pkg/webhook` | Admission endpoint that checks a projection against its database before the cluster accepts it |
+| `cmd/kubectl-crisp` | The kubectl plugin: generates the RBAC a projected group needs to be reachable |
 | `pkg/metrics` | Prometheus metrics |
 | `pkg/controller/projection` | Also owns APIService registration for served groups |
 | `charts/kube-crisp/` | Helm chart, with the optional pieces behind values |

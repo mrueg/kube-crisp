@@ -66,6 +66,48 @@ func LoadDir(dir string) ([]crispv1alpha1.CustomResourceProjection, error) {
 	return out, nil
 }
 
+// LoadPath reads a file, or every .yaml and .yml file in a directory, as
+// CustomResourceProjections.
+//
+// Parsing only, unlike LoadDir: it is for the commands that reason about a
+// projection they are not going to serve — checking one, or generating the RBAC
+// that makes it reachable — where stopping at the first projection that would
+// not compile means running the command again to find the second.
+//
+// Subdirectories are skipped, matching --projection-dir.
+func LoadPath(path string) ([]crispv1alpha1.CustomResourceProjection, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return LoadFile(path)
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []crispv1alpha1.CustomResourceProjection
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(e.Name()))
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+
+		loaded, err := LoadFile(filepath.Join(path, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, loaded...)
+	}
+	return out, nil
+}
+
 // LoadFile reads every CustomResourceProjection in one YAML file.
 //
 // Parsing only: what comes back is what the file says, not what has been

@@ -29,6 +29,29 @@ builds:
       - amd64
       - arm64
 
+  # The kubectl plugin. A second binary rather than more subcommands on the
+  # server, because whoever needs it has kubectl and does not have the server
+  # -- which this project tells people to build themselves, a database/sql
+  # driver having to be linked in. Nothing in the plugin links one, so it also
+  # builds for windows, which the server does not.
+  - id: kubectl-crisp
+    main: ./cmd/kubectl-crisp
+    binary: kubectl-crisp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/mrueg/kube-crisp/pkg/version.Version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
 # ko builds the image straight from the Go binary, so there is no Dockerfile
 # and no build context to keep in sync.
 kos:
@@ -64,6 +87,15 @@ archives:
     ids:
       - kube-crisp-apiserver
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  # Archived apart from the server, and named for the plugin rather than the
+  # project: krew fetches one archive per platform and expects the binary it
+  # names to be in it. Bundling both would make every plugin install carry an
+  # API server.
+  - id: kubectl-crisp
+    ids:
+      - kubectl-crisp
+    name_template: "kubectl-crisp_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: checksums.txt

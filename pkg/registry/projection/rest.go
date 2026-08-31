@@ -469,7 +469,7 @@ func New(
 			"queries that scope rows to the caller cannot be combined with watch (%s); set watch.disabled: true",
 			strings.Join(scoped, "; "))
 	}
-	if spec.Watch == nil || !spec.Watch.Disabled {
+	if watchEnabled(spec) {
 		interval := DefaultPollInterval
 		if spec.Watch != nil && spec.Watch.PollInterval != nil {
 			interval = spec.Watch.PollInterval.Duration
@@ -1311,8 +1311,11 @@ func (r *REST) listWith(
 }
 
 // watchEnabled reports whether the projection serves watch.
+//
+// Shared with anything generating RBAC for a projection, which has to grant
+// exactly the verbs discovery advertises and so has to agree with this.
 func watchEnabled(spec crispv1alpha1.CustomResourceProjectionSpec) bool {
-	return spec.Watch == nil || !spec.Watch.Disabled
+	return projection.WatchEnabled(spec)
 }
 
 // onlyConstantSessions reports whether every session variable has a value that

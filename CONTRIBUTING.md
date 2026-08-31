@@ -67,6 +67,11 @@ files:
 $ go run ./cmd/kubectl-crisp rbac -f test/e2e/manifests/
 ```
 
+Its three commands are covered end to end in `test/e2e/plugin_test.go`, which
+applies what `rbac` generates and then makes the requests it is about — a
+generated role is only worth generating if the kube-apiserver, handed it, admits
+exactly what it claims.
+
 That one is the kubectl plugin, built by `make build` alongside the server. It
 is a second binary because it needs no database and no driver, where `validate`
 consults the driver registry and so has to ship with the build whose registry it

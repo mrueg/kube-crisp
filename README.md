@@ -244,7 +244,7 @@ The e2e suite is split so it does not have to be run whole. `make e2e-up` provis
 the three databases; after that:
 
 ```console
-$ make e2e-correctness              # 89 tests, a few minutes
+$ make e2e-correctness              # 92 tests, a few minutes
 $ make e2e-bench SHARD=reads        # one benchmark shard
 $ make bench                        # every benchmark
 $ make e2e                          # all of it
@@ -404,10 +404,11 @@ attaches build provenance.
 ## Status
 
 Early, and interfaces will change. Reads, writes, watch, dynamic registration, admission, tracing,
-and the mapping layer are implemented and covered by 542 unit tests plus a 101-test e2e suite that
+and the mapping layer are implemented and covered by 570 unit tests plus a 104-test e2e suite that
 runs against PostgreSQL, MySQL and SQLite in a kind cluster — including a database outage, row-level
-security, finalizer flows, server-side apply conflicts, a dropped `LISTEN`/`NOTIFY` subscription, and
-a run against a server built with the race detector. The correctness half of that suite takes a few
+security, finalizer flows, server-side apply conflicts, a dropped `LISTEN`/`NOTIFY` subscription,
+generated RBAC that is applied and then used to make the requests it authorizes, and a run against a
+server built with the race detector. The correctness half of that suite takes a few
 minutes; the rest is benchmarks.
 
 Built against Kubernetes libraries v0.36.4 and Go 1.26.

@@ -362,6 +362,13 @@ attaches build provenance.
   one, each replica falls back to its own counter and must run alone. With leader election on — the
   operator saying there are peers — such a projection is reported in the log and by
   `kube_crisp_projections_unversioned`, rather than failing silently and looking like a client bug.
+- **`cacheTTL` is invalidated per replica.** A write drops the entries it could have invalidated in
+  the replica that served it and in no other, the cache being in process. With more than one replica
+  — the chart deploys two — a read can be answered from an entry older than a write the same client
+  just made, for up to the TTL. Writes are unaffected, since the row a write is based on is always
+  read from the database, so a client acting on a stale read is refused with a conflict rather than
+  overwriting. A projection whose clients read back what they wrote wants one replica, or no
+  `cacheTTL`.
 - **Every replica polls, though not at the same rate.** `--enable-leader-election` gives the lease
   holder the configured interval and leaves the others at `watch.followerPollInterval` (1m by
   default). Followers slow down rather than stop: a watcher is served from the cache of whichever

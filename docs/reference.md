@@ -520,10 +520,26 @@ version: the versions are different views of the same rows, so their watch
 caches are driven from one timer and their queries are shared.
 
 `spec.cacheTTL` caches reads for a bounded time. A write drops what it could have changed — the
-object, that namespace's lists, and any cluster-wide list — so a client never reads back something
-older than the change it just made, while other namespaces keep their entries. A write with no
-namespace, meaning a cluster-scoped kind or a collection delete across all namespaces, drops
-everything.
+object, that namespace's lists, and any cluster-wide list — while other namespaces keep their
+entries. A write with no namespace, meaning a cluster-scoped kind or a collection delete across all
+namespaces, drops everything.
+
+That invalidation reaches one replica: the one that served the write. The cache lives in the
+process and there is nothing between replicas, so with more than one — the chart deploys two — a
+read routed elsewhere can be answered from an entry written before the change, for up to the TTL.
+Read-after-write holds for a replica, not for a set of them, and a client cannot tell which one it
+reached: it talks to the kube-apiserver, which proxies to a Service that spreads requests across
+them.
+
+Writes are not exposed to this, only reads. The row a write is based on is always read from the
+database rather than from the cache, so a client that read a stale copy and then writes it back
+sends the older `resourceVersion` and is refused with a conflict rather than overwriting the newer
+row. What a stale read costs is a client seeing an old value, and being told to retry if it acts on
+one.
+
+So a projection whose clients read back what they have just written wants either one replica or no
+`cacheTTL`. Making the invalidation cluster-wide would need the replicas to tell each other, which
+is a channel this does not have.
 
 Caching is off unless asked for: it trades freshness for load, and
 `kube_crisp_cache_reads_total` is how you judge whether the trade paid off — and

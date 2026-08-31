@@ -90,11 +90,27 @@ until somebody projects that group name again and the old grant lands on the new
 
 ```console
 $ kubectl crisp prune
-kube-crisp:gone.example.com:view    (gone.example.com: no projection serves this group)
-kube-crisp:gone.example.com:edit    (gone.example.com: no projection serves this group)
+kube-crisp:gone.example.com:view                      (gone.example.com: no projection serves this group)
+  clusterrolebinding.rbac.authorization.k8s.io/pagila-view          (bound to it)
+  rolebinding.rbac.authorization.k8s.io/pagila-view -n store-1      (bound to it)
+kube-crisp:gone.example.com:edit                      (gone.example.com: no projection serves this group)
 
-2 orphaned role(s). Pass --delete to remove them.
+2 orphaned role(s) and 2 binding(s). Pass --delete to remove them.
 ```
+
+The bindings go with the role. Both kinds, because both are how a projected group is granted: a
+`ClusterRoleBinding` for a cluster-scoped kind, and a `RoleBinding` in each tenant's namespace
+referencing the same ClusterRole for a namespaced one. Leaving them would leave a `roleRef` naming a
+ClusterRole that no longer exists — which grants nothing, and is litter that this command created.
+
+A binding is a candidate because it points at a role that is going away, and for nothing else: not
+its name, not a label. The bindings are written by whoever decided who may read the projection, so
+there is nothing of this command's on them to match.
+
+With `--delete` the bindings go first. Either order leaves something behind if the second half
+fails, and this is the half worth keeping: a role with no binding grants nothing and a re-run
+removes it, where a binding whose `roleRef` has gone is the dangling reference this exists to clean
+up.
 
 It selects on the `crisp.kubecrisp.io/projected-group` label the roles were generated with, so a
 role written by hand is never a candidate however exactly it matches, and one generated under

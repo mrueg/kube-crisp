@@ -152,6 +152,20 @@ kubectl get film academy-dinosaur -o jsonpath='{.spec.actors}'
 `spec.specialFeatures` is different again: `film.special_features` is a
 PostgreSQL `text[]`, which becomes a JSON array with `to_jsonb(...)`.
 
+Every `kubectl get` in this section ran as cluster-admin. For anyone else they are
+`Forbidden` until a ClusterRole names the group: authorization is delegated to the
+kube-apiserver, and nothing has told it about `films.pagila.example.com` yet.
+
+```sh
+kubectl crisp rbac -f examples/pagila/ | kubectl apply -f -
+kubectl create clusterrolebinding pagila-view \
+  --clusterrole=kube-crisp:pagila.example.com:view --user=alice
+```
+
+Two roles for all ten kinds, granting each of them exactly the verbs its projection can serve —
+which here is not the same answer twice, and is the subject of
+[the operating guide](operating.md#granting-access-to-a-projected-group).
+
 ## 4. Names have to identify one row
 
 `Actor` is where the slug stops being enough:

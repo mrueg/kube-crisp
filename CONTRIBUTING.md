@@ -60,6 +60,18 @@ cluster and no database, and exits non-zero if anything is rejected:
 $ go run ./cmd/kube-crisp-apiserver validate test/e2e/manifests/
 ```
 
+The RBAC a projection needs is generated rather than written, and from the same
+files:
+
+```console
+$ go run ./cmd/kubectl-crisp rbac -f test/e2e/manifests/
+```
+
+That one is the kubectl plugin, built by `make build` alongside the server. It
+is a second binary because it needs no database and no driver, where `validate`
+consults the driver registry and so has to ship with the build whose registry it
+is reading.
+
 The correctness half is what says whether the code works. The benchmarks take
 twenty minutes and are what says whether it is worth using.
 

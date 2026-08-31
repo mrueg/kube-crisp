@@ -54,7 +54,9 @@ func runValidate(paths []string, out, errOut io.Writer) error {
 
 	for _, candidate := range expand(paths, errOut, &unreadable) {
 		path := candidate.path
-		projections, err := loadProjections(path)
+		// LoadPath parses without validating, so a projection that will not
+		// serve is still reported rather than ending the run.
+		projections, err := projection.LoadPath(path)
 		if err != nil {
 			// A path that will not parse is counted apart from a projection
 			// that will not validate. They are different failures, and a
@@ -161,47 +163,6 @@ func expand(paths []string, errOut io.Writer, unreadable *int) []candidatePath {
 type candidatePath struct {
 	path     string
 	explicit bool
-}
-
-// loadProjections parses a file, or every projection file in a directory.
-//
-// Parsing only, and per file rather than through LoadDir, which validates as it
-// goes and stops at the first projection it will not serve. That is right for
-// the server — a set it cannot serve is one it must refuse — and wrong here: a
-// checker that names the first of three problems means three runs to find them
-// all.
-func loadProjections(path string) ([]crispv1alpha1.CustomResourceProjection, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() {
-		return projection.LoadFile(path)
-	}
-
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var out []crispv1alpha1.CustomResourceProjection
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		switch strings.ToLower(filepath.Ext(e.Name())) {
-		case ".yaml", ".yml":
-		default:
-			continue
-		}
-
-		loaded, err := projection.LoadFile(filepath.Join(path, e.Name()))
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, loaded...)
-	}
-	return out, nil
 }
 
 // resourceDescription names what a projection would serve, so the output says

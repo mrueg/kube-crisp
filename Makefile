@@ -10,8 +10,14 @@ LDFLAGS := -X github.com/mrueg/kube-crisp/pkg/version.Version=$(VERSION)
 all: verify build
 
 .PHONY: build
-build:
+build: build-plugin
 	go build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(BINARY) ./cmd/kube-crisp-apiserver
+
+# The kubectl plugin. Named kubectl-crisp because that is how kubectl finds it:
+# put $(BIN_DIR) on PATH and `kubectl crisp` works.
+.PHONY: build-plugin
+build-plugin:
+	go build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/kubectl-crisp ./cmd/kubectl-crisp
 
 .PHONY: test
 test:

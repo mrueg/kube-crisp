@@ -3,6 +3,58 @@
 Running kube-crisp in a cluster: what it watches, what it needs permission for,
 what it does when a database goes away, and what it reports while doing it.
 
+## Granting access to a projected group
+
+A projection that is compiled, registered and serving is still `Forbidden` to everyone but
+cluster-admin. Authorization is delegated to the kube-apiserver, and the kube-apiserver has never
+heard of `films.pagila.example.com` until a ClusterRole names it. Nothing in a projection performs
+this step: the server registers the group, it does not decide who may read it.
+
+`kubectl crisp rbac` writes the roles:
+
+```console
+$ kubectl crisp rbac                                  # every projection in the cluster
+$ kubectl crisp rbac pagila-films                     # one of them, by name
+$ kubectl crisp rbac -f examples/pagila/              # from manifests, no cluster needed
+```
+
+One pair of roles per projected group — `kube-crisp:<group>:view` and `kube-crisp:<group>:edit` —
+however many projections make the group up. The ten Pagila kinds are two roles, not twenty.
+
+What it grants is what the projection can serve, which is the reason not to write these by hand.
+A projection with no `create` query refuses `create` whatever a role says, and one that sets
+`watch.disabled` refuses `watch` — so an informer holding a role that grants it lists, watches, is
+refused, and never syncs. The generated role grants neither, because it is derived from the same
+predicate discovery is (`pkg/projection.ServedVerbs`, held to that by a test). In this repository's
+own Pagila example that comes out asymmetric: `rentals` can be created and deleted but not updated,
+`stock` can be updated but neither created nor deleted, and only `rentals` and `stores` can be
+watched.
+
+Then bind them, which the command deliberately does not do for you:
+
+```console
+$ kubectl crisp rbac -f examples/pagila/ | kubectl apply -f -
+$ kubectl create clusterrolebinding pagila-view \
+    --clusterrole=kube-crisp:pagila.example.com:view --user=alice
+```
+
+A **cluster-scoped** projected kind can only be granted cluster-wide. A **namespaced** one — a
+projection mapping a tenant column onto `metadata.namespace` — is granted per tenant with a
+`RoleBinding` in that namespace, and that is what makes ordinary namespace RBAC scope rows to a
+tenant. Alice bound to `kube-crisp:pagila.example.com:view` in namespace `store-1` sees store 1's
+rows and no others, without the projection knowing anything about her.
+
+`--aggregate` labels the roles so the cluster's built-in `view`, `edit` and `admin` roles absorb
+them, and no binding is needed at all. It is off by default on purpose: the rows behind a projection
+are a production database's, and aggregating grants every existing holder of `view`, in every
+namespace, the moment the role is applied. That is a decision, not a default.
+
+The plugin is a separate binary from the server, `kubectl-crisp`, published with each release. Put
+it on `PATH` and kubectl finds it as `kubectl crisp`. It reads projections and nothing else — no
+database, no driver — which is why it is not a subcommand of the server the way `validate` is:
+`kube-crisp-apiserver validate` consults the driver registry, so its answer depends on which drivers
+that build linked in.
+
 ## Admission
 
 Cluster policy does not reach a projection unless you let it in. `--enable-admission` runs the

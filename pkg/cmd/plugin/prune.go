@@ -36,6 +36,10 @@ func NewCommandPrune(out, errOut io.Writer) *cobra.Command {
 			"it needs a command to find it. It grants verbs on a group nothing serves, until\n" +
 			"the day somebody projects that group name again and the old grant applies to the\n" +
 			"new rows.\n\n" +
+			"The bindings that reference an orphaned role go with it. A ClusterRoleBinding, and\n" +
+			"also a RoleBinding in any namespace, since that is how a namespaced projected kind\n" +
+			"is granted per tenant — leaving those behind would leave a reference to a role that\n" +
+			"no longer exists.\n\n" +
 			"Prints what it would remove. Pass --delete to remove it.",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
@@ -60,7 +64,18 @@ func (o *pruneOptions) run(ctx context.Context, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
+	return o.prune(ctx, crisp, kube, out, errOut)
+}
 
+// prune takes its clients rather than building them, so that what it does with
+// them is testable without a cluster — which for a command whose --delete
+// removes objects is the half worth testing.
+func (o *pruneOptions) prune(
+	ctx context.Context,
+	crisp crispclient.Interface,
+	kube kubernetes.Interface,
+	out, errOut io.Writer,
+) error {
 	orphans, err := orphanedRoles(ctx, crisp, kube)
 	if err != nil {
 		return err
@@ -70,15 +85,44 @@ func (o *pruneOptions) run(ctx context.Context, out, errOut io.Writer) error {
 		return nil
 	}
 
+	names := sets.New[string]()
+	for i := range orphans {
+		names.Insert(orphans[i].Name)
+	}
+	bindings, err := bindingsTo(ctx, kube, names)
+	if err != nil {
+		return err
+	}
+
+	if !o.delete {
+		for i := range orphans {
+			role := &orphans[i]
+			_, _ = fmt.Fprintf(out, "%s\t(%s: no projection serves this group)\n",
+				role.Name, role.Labels[rbac.GroupLabel])
+			for _, binding := range bindings {
+				if binding.role == role.Name {
+					_, _ = fmt.Fprintf(out, "  %s\t(bound to it)\n", binding)
+				}
+			}
+		}
+		_, _ = fmt.Fprintf(errOut, "\n%d orphaned role(s) and %d binding(s). Pass --delete to remove them.\n",
+			len(orphans), len(bindings))
+		return nil
+	}
+
+	// Bindings first. Either order leaves something behind if the second half
+	// fails, and this is the half worth keeping: a role with no binding grants
+	// nothing and a re-run removes it, where a binding whose roleRef has gone
+	// is the dangling reference this exists to clean up.
+	for _, binding := range bindings {
+		if err := binding.delete(ctx, kube); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(out, "%s deleted\n", binding)
+	}
+
 	for i := range orphans {
 		role := &orphans[i]
-		group := role.Labels[rbac.GroupLabel]
-
-		if !o.delete {
-			_, _ = fmt.Fprintf(out, "%s\t(%s: no projection serves this group)\n", role.Name, group)
-			continue
-		}
-
 		err := kube.RbacV1().ClusterRoles().Delete(ctx, role.Name, metav1.DeleteOptions{})
 		switch {
 		case apierrors.IsNotFound(err):
@@ -90,11 +134,91 @@ func (o *pruneOptions) run(ctx context.Context, out, errOut io.Writer) error {
 			_, _ = fmt.Fprintf(out, "clusterrole.rbac.authorization.k8s.io/%s deleted\n", role.Name)
 		}
 	}
+	return nil
+}
 
-	if !o.delete {
-		_, _ = fmt.Fprintf(errOut, "\n%d orphaned role(s). Pass --delete to remove them.\n", len(orphans))
+// boundReference is one binding that names an orphaned role. A RoleBinding
+// carries the namespace it lives in; a ClusterRoleBinding leaves it empty.
+type boundReference struct {
+	name      string
+	namespace string
+	role      string
+}
+
+func (b boundReference) String() string {
+	if b.namespace == "" {
+		return "clusterrolebinding.rbac.authorization.k8s.io/" + b.name
+	}
+	return fmt.Sprintf("rolebinding.rbac.authorization.k8s.io/%s -n %s", b.name, b.namespace)
+}
+
+func (b boundReference) delete(ctx context.Context, kube kubernetes.Interface) error {
+	var err error
+	if b.namespace == "" {
+		err = kube.RbacV1().ClusterRoleBindings().Delete(ctx, b.name, metav1.DeleteOptions{})
+	} else {
+		err = kube.RbacV1().RoleBindings(b.namespace).Delete(ctx, b.name, metav1.DeleteOptions{})
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting %s: %w", b, err)
 	}
 	return nil
+}
+
+// bindingsTo finds every binding whose roleRef names one of the given roles.
+//
+// Both kinds, because both are how a projected group is granted: a
+// ClusterRoleBinding for a cluster-scoped kind, and a RoleBinding referencing
+// the same ClusterRole for a namespaced one, which is what scopes a
+// tenant-column projection to one tenant.
+//
+// Matched on the roleRef alone. These bindings carry no label of this
+// command's — they are written by whoever decided who may read the projection —
+// so what makes one a candidate is that it points at a role that is going away,
+// and nothing else.
+func bindingsTo(ctx context.Context, kube kubernetes.Interface, roles sets.Set[string]) ([]boundReference, error) {
+	refersToOrphan := func(ref rbacv1.RoleRef) bool {
+		return ref.Kind == "ClusterRole" && ref.APIGroup == rbacv1.GroupName && roles.Has(ref.Name)
+	}
+
+	var out []boundReference
+
+	clusterBindings, err := kube.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing cluster role bindings: %w", err)
+	}
+	for i := range clusterBindings.Items {
+		binding := &clusterBindings.Items[i]
+		if refersToOrphan(binding.RoleRef) {
+			out = append(out, boundReference{name: binding.Name, role: binding.RoleRef.Name})
+		}
+	}
+
+	// Every namespace: a projection mapping a tenant column onto
+	// metadata.namespace is granted a namespace at a time, so the bindings are
+	// spread across as many namespaces as there are tenants.
+	roleBindings, err := kube.RbacV1().RoleBindings(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing role bindings: %w", err)
+	}
+	for i := range roleBindings.Items {
+		binding := &roleBindings.Items[i]
+		if refersToOrphan(binding.RoleRef) {
+			out = append(out, boundReference{
+				name:      binding.Name,
+				namespace: binding.Namespace,
+				role:      binding.RoleRef.Name,
+			})
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].namespace != out[j].namespace {
+			return out[i].namespace < out[j].namespace
+		}
+		return out[i].name < out[j].name
+	})
+	return out, nil
 }
 
 // orphanedRoles returns the generated roles whose group no longer has a

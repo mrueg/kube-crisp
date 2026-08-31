@@ -376,6 +376,19 @@ func TestPluginPruneRemovesOnlyOrphans(t *testing.T) {
 	)
 	const groupLabel = "crisp.kubecrisp.io/projected-group"
 
+	// A binding on the orphaned role, and one on the role that must survive.
+	// The first is litter once its role is gone; the second must not be touched.
+	bindings := []*rbacv1.ClusterRoleBinding{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "crisp-plugin-orphan-binding"},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: orphan},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "crisp-plugin-live-binding"},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: live},
+		},
+	}
+
 	roles := []*rbacv1.ClusterRole{
 		{ObjectMeta: metav1.ObjectMeta{
 			Name:   orphan,
@@ -402,9 +415,26 @@ func TestPluginPruneRemovesOnlyOrphans(t *testing.T) {
 		}
 	}
 
+	for _, binding := range bindings {
+		t.Cleanup(func() {
+			_ = cluster.RbacV1().ClusterRoleBindings().Delete(
+				context.Background(), binding.Name, metav1.DeleteOptions{})
+		})
+		if _, err := cluster.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{}); err != nil &&
+			!apierrors.IsAlreadyExists(err) {
+			t.Fatalf("creating %s: %v", binding.Name, err)
+		}
+	}
+
 	listed, _ := runPlugin(t, "prune")
 	if !strings.Contains(listed, orphan) {
 		t.Fatalf("prune did not report the orphaned role:\n%s", listed)
+	}
+	if !strings.Contains(listed, "crisp-plugin-orphan-binding") {
+		t.Fatalf("prune did not report the binding on the orphaned role:\n%s", listed)
+	}
+	if strings.Contains(listed, "crisp-plugin-live-binding") {
+		t.Fatalf("prune reported a binding on a role it must leave alone:\n%s", listed)
 	}
 	for _, kept := range []string{live, unlabeled} {
 		if strings.Contains(listed, kept) {
@@ -428,6 +458,17 @@ func TestPluginPruneRemovesOnlyOrphans(t *testing.T) {
 		if _, err := cluster.RbacV1().ClusterRoles().Get(ctx, kept, metav1.GetOptions{}); err != nil {
 			t.Fatalf("prune --delete removed %s: %v", kept, err)
 		}
+	}
+
+	// The binding on the orphaned role goes with it. Leaving it would leave a
+	// roleRef naming a ClusterRole that no longer exists.
+	_, err = cluster.RbacV1().ClusterRoleBindings().Get(ctx, "crisp-plugin-orphan-binding", metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("prune --delete left a binding pointing at the role it removed: %v", err)
+	}
+	if _, err := cluster.RbacV1().ClusterRoleBindings().Get(ctx,
+		"crisp-plugin-live-binding", metav1.GetOptions{}); err != nil {
+		t.Fatalf("prune --delete removed a binding on a live role: %v", err)
 	}
 }
 

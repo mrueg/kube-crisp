@@ -4,9 +4,12 @@ description: Serve any SQL database as Kubernetes custom resources
 type: application
 
 # The chart tracks the application: there is one thing to release, and a second
-# number to reason about would only be a second thing to get wrong.
-version: 0.1.0
-appVersion: "0.1.0"
+# number to reason about would only be a second thing to get wrong. Both numbers
+# are the released version, so `helm install` with no values deploys the image
+# of the same name -- which is what left this at 0.1.0 while 0.2.0 was the
+# release, and every default install a version behind.
+version: 0.2.0
+appVersion: "0.2.0"
 
 kubeVersion: ">=1.29.0-0"
 home: https://github.com/mrueg/kube-crisp

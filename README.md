@@ -174,10 +174,10 @@ $ go run ./cmd/kube-crisp-apiserver \
     --watch-projections=false --secure-port=8443 --authentication-skip-lookup
 ```
 
-In a cluster, with Helm:
+In a cluster, with Helm — one chart per release, published beside the image:
 
 ```console
-$ helm install kube-crisp ./charts/kube-crisp --namespace kube-crisp --create-namespace
+$ helm install kube-crisp oci://ghcr.io/mrueg/charts/kube-crisp --namespace kube-crisp --create-namespace
 $ kubectl apply -f examples/pagila/00-secret.yaml     # edit the DSN first
 $ kubectl apply -f examples/pagila/10-catalogue.yaml
 $ kubectl get films                                   # the APIService registers itself
@@ -186,7 +186,12 @@ $ kubectl get films                                   # the APIService registers
 That last command works as cluster-admin. Authorization is the cluster's, so everyone else needs a
 ClusterRole naming the group first — `kubectl crisp rbac | kubectl apply -f -` writes it.
 
-`helm show values ./charts/kube-crisp` lists what can be turned on: admission,
+`--version` pins a release; without it Helm takes the newest published. The chart is signed with
+cosign keylessly, the same as the image, and its `appVersion` is stamped at release time — so the
+image a default install deploys is always the one that release built. From a checkout,
+`./charts/kube-crisp` works the same and is what to use for a change that is not released yet.
+
+`helm show values oci://ghcr.io/mrueg/charts/kube-crisp` lists what can be turned on: admission,
 fair queueing, a `ServiceMonitor`, an egress `NetworkPolicy`, a real CA bundle.
 
 Or with plain manifests:

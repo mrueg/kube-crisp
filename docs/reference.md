@@ -541,6 +541,12 @@ So a projection whose clients read back what they have just written wants either
 `cacheTTL`. Making the invalidation cluster-wide would need the replicas to tell each other, which
 is a channel this does not have.
 
+Running with `--enable-leader-election` — which is the operator saying there are peers — such a
+projection is named in the log and counted by `kube_crisp_projections_cache_unshared`, the same
+treatment `kube_crisp_projections_unversioned` gives the other hazard that only exists with more
+than one replica. The gauge clears when the `cacheTTL` is removed, so an alert on it stops firing
+when the projection is fixed rather than when the process restarts.
+
 Caching is off unless asked for: it trades freshness for load, and
 `kube_crisp_cache_reads_total` is how you judge whether the trade paid off — and
 `kube_crisp_cache_evictions_total` says why when it did not: entries expiring is the cache working

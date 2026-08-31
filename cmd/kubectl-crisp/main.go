@@ -39,6 +39,7 @@ func main() {
 	root.AddCommand(plugin.NewCommandRBAC(os.Stdout, os.Stderr))
 	root.AddCommand(plugin.NewCommandCanI(os.Stdout, os.Stderr))
 	root.AddCommand(plugin.NewCommandPrune(os.Stdout, os.Stderr))
+	root.AddCommand(plugin.NewCommandSchema(os.Stdout, os.Stderr))
 
 	root.SetContext(ctx)
 	os.Exit(cli.Run(root))

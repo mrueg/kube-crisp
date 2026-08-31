@@ -115,6 +115,23 @@ spec:
               on every write. Watchers are relying on the resync to notice
               changes, so they lag by fullResyncInterval rather than pollInterval.
 
+        - alert: KubeCrispProjectionUnversioned
+          # A configuration hazard rather than a fault, so it is reported per
+          # replica and only where it can bite: a server told it has peers.
+          expr: max by (projection, resource) (kube_crisp_projections_unversioned) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Projection {{ $labels.projection }} maps no resourceVersion and this server has peers.
+            description: >-
+              Each replica falls back to a counter of its own, so two of them
+              hand the same client versions that mean different things. A watch
+              resumed against the other replica either replays what the client
+              already has or skips what it does not, and it looks like a client
+              bug from every angle except this one. Map a resourceVersion
+              column, or run the projection on one replica.
+
         - alert: KubeCrispNoPollingLeader
           expr: max by (lease) (kube_crisp_poll_leader) == 0
           for: 5m
@@ -274,6 +291,24 @@ spec:
               larger than the cache. A client paging through a large collection is
               the usual cause, since every continue token is a key of its own —
               in which case the cache is adding staleness without saving reads.
+
+        - alert: KubeCrispProjectionCacheUnshared
+          # The write side is safe -- the row a write is based on is always read
+          # from the database -- so this is about reads being old, not wrong.
+          expr: max by (projection, resource) (kube_crisp_projections_cache_unshared) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Projection {{ $labels.projection }} caches reads and this server has peers.
+            description: >-
+              A write invalidates the cache of the replica that served it and of
+              no other, so a read routed elsewhere can be answered from an entry
+              that predates the write for as long as cacheTTL. The client cannot
+              tell which replica it reached, and the answer is old rather than
+              wrong, which looks exactly like not having written yet. A
+              projection whose clients read back what they wrote wants one
+              replica, or no cacheTTL.
 
     - name: kube-crisp.latency
       rules:

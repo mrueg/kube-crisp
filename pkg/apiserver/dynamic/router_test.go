@@ -81,8 +81,12 @@ func testResource() Resource {
 	}
 }
 
-// newTestRouter returns a router wrapped in the request-info filter the
-// generic apiserver would normally supply.
+// newTestRouter returns a router wrapped in the filters the generic apiserver
+// would normally supply: the request-info resolver every endpoint reads, and
+// the audit initialiser. The audit filter is not optional decoration — the
+// patch endpoint calls audit.LogRequestPatch unconditionally, and without an
+// audit context on the request it dereferences nil and panics, so a handler
+// missing it cannot serve a PATCH at all.
 func newTestRouter(t *testing.T) (*Router, http.Handler) {
 	t.Helper()
 
@@ -102,7 +106,7 @@ func newTestRouter(t *testing.T) (*Router, http.Handler) {
 		APIPrefixes:          sets.NewString("apis"),
 		GrouplessAPIPrefixes: sets.NewString(),
 	}
-	return router, genericapifilters.WithRequestInfo(router, resolver)
+	return router, genericapifilters.WithRequestInfo(genericapifilters.WithAuditInit(router), resolver)
 }
 
 func TestRouterInstallsAndRemovesGroups(t *testing.T) {

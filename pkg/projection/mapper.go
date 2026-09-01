@@ -719,6 +719,11 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 			return int64(v), nil
 		case uint32:
 			return int64(v), nil
+		case uint:
+			// A uint is never wider than a uint64, so the case above already
+			// says everything true about it — including the range check, which
+			// is worth having in exactly one place.
+			return coerce(uint64(v), t)
 		case string:
 			return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 		case []byte:
@@ -1034,6 +1039,27 @@ func decodeManagedFields(row crispsql.Row, col string) ([]metav1.ManagedFieldsEn
 	return managed, nil
 }
 
+// toString renders a driver value as text.
+//
+// This is the busiest conversion in the mapper and not only the one behind
+// type: string. mapping.name, namespace, uid and resourceVersion all reach it
+// through requiredString, labels and annotations through the map decoders, and
+// the JSON branch of coerce reads its column through it too. A width it does
+// not know is therefore not a missing corner of one field type — it is every
+// row of the projection failing to map, and under the default
+// onUnmappableRow: Skip the collection reads empty with a warning.
+//
+// Which width a driver picks is not something a projection can see or say
+// anything about. go-sql-driver's text protocol — what a list query with no
+// bind parameters gets — returns uint64 for an unsigned BIGINT of any
+// magnitude, and float32 for a FLOAT column, while its binary protocol returns
+// int64 for the same column until the value passes MaxInt64. So a MySQL table
+// keyed by `id BIGINT UNSIGNED`, which is the idiomatic MySQL primary key, has
+// to work, and has to keep working when preparedStatements is turned on.
+//
+// It is also what makes the remedy the integer branch names above — "map this
+// column as type: string" — true. A string is the one JSON type that holds the
+// whole unsigned 64-bit range exactly, so the advice has to lead somewhere.
 func toString(raw any) (string, error) {
 	switch v := raw.(type) {
 	case string:
@@ -1046,8 +1072,25 @@ func toString(raw any) (string, error) {
 		return string(v), nil
 	case int64:
 		return strconv.FormatInt(v, 10), nil
+	case int32:
+		return strconv.FormatInt(int64(v), 10), nil
+	case int:
+		return strconv.FormatInt(int64(v), 10), nil
+	case uint64:
+		// FormatUint rather than a detour through int64: the values that make
+		// this branch necessary are exactly the ones an int64 cannot hold.
+		return strconv.FormatUint(v, 10), nil
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10), nil
+	case uint:
+		return strconv.FormatUint(uint64(v), 10), nil
 	case float64:
 		return strconv.FormatFloat(v, 'f', -1, 64), nil
+	case float32:
+		// Formatted at the precision the value actually has. Widening a float32
+		// to a float64 first and printing that prints the rounding error along
+		// with it: 0.1 read from a MySQL FLOAT would render as 0.10000000149.
+		return strconv.FormatFloat(float64(v), 'f', -1, 32), nil
 	case bool:
 		return strconv.FormatBool(v), nil
 	case time.Time:

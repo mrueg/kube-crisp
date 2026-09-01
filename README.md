@@ -539,11 +539,11 @@ attaches build provenance.
 ## Status
 
 Early, and interfaces will change. Reads, writes, watch, dynamic registration, admission, tracing,
-and the mapping layer are implemented and covered by 594 unit tests plus a 105-test e2e suite that
-runs against PostgreSQL, MySQL and SQLite in a kind cluster — including a database outage, row-level
-security, finalizer flows, server-side apply conflicts, a dropped `LISTEN`/`NOTIFY` subscription,
-generated RBAC that is applied and then used to make the requests it authorizes, and a run against a
-server built with the race detector. The correctness half of that suite takes a few
-minutes; the rest is benchmarks.
+and the mapping layer are implemented, with unit tests and an e2e suite that runs against
+PostgreSQL, MySQL and SQLite in a kind cluster — covering a database outage, row-level security,
+finalizer flows, server-side apply conflicts, a dropped `LISTEN`/`NOTIFY` subscription, generated
+RBAC that is applied and then used to make the requests it authorizes, and a run against a server
+built with the race detector. The correctness half of that suite takes a few minutes; the rest is
+benchmarks.
 
 Built against Kubernetes libraries v0.37.0 and Go 1.26.

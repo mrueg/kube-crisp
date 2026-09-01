@@ -57,10 +57,11 @@ jobs:
       # reason cosign is pinned above: the chart this publishes is an artifact
       # people install, so the tool that builds it is not a moving part.
       #
-      # The publish step below reads the digest out of `helm push`'s output, so
-      # this pin and that parse are one decision -- check the parse against the
-      # version before bumping it, the way the cosign flags are checked against
-      # cosign's.
+      # The publish step below reads the digest out of `helm push`'s output.
+      # That output moved between majors -- 3.x writes it to stderr and 4.x to
+      # stdout -- so the parse now reads both streams rather than depending on
+      # this pin. Check it against the version anyway before bumping, the way
+      # the cosign flags are checked against cosign's.
       - uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.4
@@ -117,10 +118,18 @@ jobs:
           helm package charts/kube-crisp \
             --version "$version" --app-version "$version" --destination chart-dist
 
-          # helm prints "Digest: sha256:..." on stdout; signing the digest
-          # rather than the tag is what makes the signature name one artifact.
-          digest="$(helm push "chart-dist/kube-crisp-${version}.tgz" oci://ghcr.io/mrueg/charts \
-            | awk '/^Digest:/ { print $2 }')"
+          # helm prints "Digest: sha256:...", and which stream it prints it on
+          # depends on the version: 3.x writes it to stderr, 4.x to stdout.
+          # That difference silently broke the v0.3.0 release -- the chart was
+          # pushed, the parse came back empty, and the step failed after the
+          # push without signing anything. Both streams are read, so the parse
+          # does not care, and tee keeps them in the log so a genuine push
+          # failure is still readable rather than eaten by the pipe.
+          #
+          # Signing the digest rather than the tag is what makes the signature
+          # name one artifact.
+          digest="$(helm push "chart-dist/kube-crisp-${version}.tgz" oci://ghcr.io/mrueg/charts 2>&1 \
+            | tee /dev/stderr | awk '/^Digest:/ { print $2 }')"
           test -n "$digest"
 
           cosign sign --yes "ghcr.io/mrueg/charts/kube-crisp@${digest}"

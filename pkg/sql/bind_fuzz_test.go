@@ -26,6 +26,12 @@ func FuzzRewrite(f *testing.F) {
 		"SELECT `weird:column` FROM t",
 		`SELECT "weird:column" FROM t`,
 		"INSERT INTO t VALUES (:a, :b, :c) RETURNING *",
+		// A backslash is an escape on MySQL and data on the other two, so the
+		// same bytes end the literal in different places per driver.
+		`SELECT 'C:\' AS prefix, :name AS n`,
+		`SELECT id FROM t WHERE name LIKE '%\_%' ESCAPE '\' AND tenant = :namespace`,
+		"SELECT 1--:x\n, :name AS n",
+		"SELECT id FROM t # :name",
 		"UPDATE t SET a = :a WHERE v = :resourceVersion",
 		":",
 		"::",

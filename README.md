@@ -390,12 +390,17 @@ attaches build provenance.
   driver and the registry is open, which covers a database whose differences are the ones the
   `Driver` struct already states — which of session variables, statement timeouts and notifications
   it claims, and what its connection string needs before it is opened. CockroachDB ships as its own
-  driver for exactly that reason, being PostgreSQL without `LISTEN`/`NOTIFY`. Four things are more
+  driver for exactly that reason, being PostgreSQL without `LISTEN`/`NOTIFY`. Five things are more
   than a registration, and each of them is quiet in its own way. Placeholders are a choice of two,
   `$N` and `?`, and the rewriter emits nothing else, so SQL Server's `@pN` is a third style to add
   rather than a field to set. Detecting whether a statement answers with the rows it wrote looks for
   the word `RETURNING`, so SQL Server's `OUTPUT` is read as a write with nothing to return, and the
-  client is told its object was not found for a write that in fact landed. Session variables are set
+  client is told its object was not found for a write that in fact landed. How the text of a
+  statement is read — what closes a string literal, what opens a comment — is likewise keyed on the
+  driver's name and not on `Placeholders`, since MySQL and SQLite share `?` and agree on almost none
+  of it; a driver that is not in that set is read with every dialect's rule at once, which never
+  reads a `RETURNING` out of a comment but can miss one a literal it does not recognise ran past, so
+  a write that does answer with its row is run for its effect instead. Session variables are set
   by a statement picked from a closed set keyed on the driver's name, so a driver registered with
   `SessionVariables: true` that is not in that set loads cleanly and then fails on the first request
   that binds one. And the CRD pins driver names in more than the enum: CEL rules allow `watch.notify`

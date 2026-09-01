@@ -2,6 +2,7 @@ package v1alpha1_test
 
 import (
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -20,15 +21,7 @@ const crdPath = "../../../../manifests/10-crd-customresourceprojection.yaml"
 // out of it is rejected by the API server before it reaches any of the code
 // that supports it — which is how the cockroach driver shipped unusable.
 func TestTheDriverEnumListsEveryRegisteredDriver(t *testing.T) {
-	raw, err := os.ReadFile(crdPath)
-	if err != nil {
-		t.Fatalf("reading the CRD: %v", err)
-	}
-
-	var crd map[string]any
-	if err := yaml.Unmarshal(raw, &crd); err != nil {
-		t.Fatalf("parsing the CRD: %v", err)
-	}
+	crd := readCRD(t)
 
 	enum := driverEnum(t, crd)
 	sort.Strings(enum)
@@ -39,6 +32,135 @@ func TestTheDriverEnumListsEveryRegisteredDriver(t *testing.T) {
 	if strings.Join(enum, ",") != strings.Join(registered, ",") {
 		t.Errorf("the CRD accepts %v; pkg/sql registers %v", enum, registered)
 	}
+}
+
+// The enum is not the only place the CRD writes a driver name down. Two CEL
+// rules name them as well — one allowing watch.notify, one allowing
+// dataSource.statementTimeout — and they are the same trap as the enum, only
+// quieter, because a rule sits at the top of the schema rather than next to the
+// field it constrains.
+//
+// A driver registered with Notifications true, and added to the enum, is still
+// refused by the API server the moment a projection configures watch.notify:
+// everything the documentation asks for has been done and the projection is
+// rejected anyway, with a message naming postgres. So the rules are compared
+// with the registry too — the drivers a rule allows have to be exactly those
+// whose registration claims the capability the rule is about.
+func TestTheCELRulesNameTheDriversThatClaimTheCapability(t *testing.T) {
+	crd := readCRD(t)
+
+	for _, capability := range []struct {
+		field     string
+		supported func(string) bool
+	}{
+		{field: "self.watch.notify", supported: crispsql.SupportsNotifications},
+		{field: "self.statementTimeout", supported: crispsql.SupportsStatementTimeout},
+	} {
+		t.Run(capability.field, func(t *testing.T) {
+			allowed := driversNamedByRuleOn(t, crd, capability.field)
+			sort.Strings(allowed)
+
+			capable := make([]string, 0, len(allowed))
+			for _, driver := range crispsql.RegisteredDrivers() {
+				if capability.supported(driver) {
+					capable = append(capable, driver)
+				}
+			}
+			sort.Strings(capable)
+
+			if strings.Join(allowed, ",") != strings.Join(capable, ",") {
+				t.Errorf("the CRD allows %s for %v; pkg/sql registers %v as capable of it",
+					capability.field, allowed, capable)
+			}
+		})
+	}
+}
+
+// driverEquality matches the only shape these rules compare a driver name in,
+// whichever field the rule reaches it through: self.driver on the data source,
+// self.dataSource.driver from the spec.
+var driverEquality = regexp.MustCompile(`driver\s*==\s*'([^']+)'`)
+
+// driversNamedByRuleOn pulls the driver names out of the one CEL rule that
+// guards a field.
+//
+// Written as a search over every rule in the CRD rather than a path to one,
+// because a rule is attached wherever it can see what it compares: the notify
+// rule sits on spec, which is the only level from which both watch and
+// dataSource are reachable, while the timeout rule sits on dataSource itself.
+// A path would make this test agree with today's placement rather than with the
+// rules.
+func driversNamedByRuleOn(t *testing.T, crd map[string]any, field string) []string {
+	t.Helper()
+
+	matched := map[string][]string{}
+	for _, rule := range celRules(crd) {
+		names := driverEquality.FindAllStringSubmatch(rule, -1)
+		if len(names) == 0 || !strings.Contains(rule, field) {
+			continue
+		}
+		drivers := make([]string, 0, len(names))
+		for _, name := range names {
+			drivers = append(drivers, name[1])
+		}
+		matched[rule] = drivers
+	}
+
+	switch len(matched) {
+	case 1:
+		for _, drivers := range matched {
+			return drivers
+		}
+	case 0:
+		t.Fatalf("no CEL rule in the CRD restricts %s to named drivers", field)
+	default:
+		t.Fatalf("%d CEL rules in the CRD restrict %s to named drivers; this test compares one",
+			len(matched), field)
+	}
+	return nil
+}
+
+// celRules collects every x-kubernetes-validations rule in the CRD, wherever in
+// the schema it is attached.
+func celRules(node any) []string {
+	var rules []string
+	switch node := node.(type) {
+	case map[string]any:
+		validations, _ := node["x-kubernetes-validations"].([]any)
+		for _, validation := range validations {
+			entry, ok := validation.(map[string]any)
+			if !ok {
+				continue
+			}
+			if rule, ok := entry["rule"].(string); ok {
+				rules = append(rules, rule)
+			}
+		}
+		for _, child := range node {
+			rules = append(rules, celRules(child)...)
+		}
+	case []any:
+		for _, child := range node {
+			rules = append(rules, celRules(child)...)
+		}
+	}
+	return rules
+}
+
+// readCRD parses the manifest these tests are about.
+func readCRD(t *testing.T) map[string]any {
+	t.Helper()
+
+	raw, err := os.ReadFile(crdPath)
+	if err != nil {
+		t.Fatalf("reading the CRD: %v", err)
+	}
+
+	var crd map[string]any
+	if err := yaml.Unmarshal(raw, &crd); err != nil {
+		t.Fatalf("parsing the CRD: %v", err)
+	}
+	return crd
 }
 
 // driverEnum digs spec.dataSource.driver's enum out of the served version.

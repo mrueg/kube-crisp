@@ -352,16 +352,20 @@ disagree — and an object with nothing left over writes NULL rather than `{}`.
 `managedFields` is stored the same way when `mapping.managedFields` names a column, which is what
 lets server-side apply detect a conflict rather than silently overwriting another manager's field.
 
-`ownerReferences` are stored and served, which is what lets the cluster's
-garbage collector reach projected objects — it deletes a child whose owner is
-gone through the same API as any other client. They are held to the same rules
-the kube-apiserver applies to any object: `apiVersion`, `kind`, `name` and `uid`
-are required, only one reference may be the controller, and the same owner
-cannot appear twice. A reference the collector cannot resolve is how objects get
+`ownerReferences` are stored and served when `mapping.ownerReferences` names a
+column, which is what lets the cluster's garbage collector reach projected
+objects — it deletes a child whose owner is gone through the same API as any
+other client. Where that column exists they are held to the same rules the
+kube-apiserver applies to any object: `apiVersion`, `kind`, `name` and `uid` are
+required, only one reference may be the controller, and the same owner cannot
+appear twice. A reference the collector cannot resolve is how objects get
 deleted by surprise, so it is refused on write and on read rather than stored.
 What is not checked is whether the owner exists — that is the collector's
 question, asked continuously, and answering it here would only be a guess with a
-race attached.
+race attached. Where the column does not exist there is nowhere to put the
+field: a write carrying `ownerReferences` is accepted and the references are
+dropped, unvalidated, rather than refused, so an object that reads back without
+the owner its client set is a projection that maps no column for them.
 
 A collection delete on a projection with finalizers removes objects one at a
 time rather than in a single statement, because one statement cannot tell which

@@ -277,6 +277,21 @@ func (m *Mapper) SplitName(name string) (map[string]any, error) {
 	return args, nil
 }
 
+// nameSource names the columns an object's name is built from, for a message
+// about a name that turned out not to be one.
+//
+// mapping.name is empty on a projection that uses nameColumns, so a message
+// interpolating it blamed column "" for a name assembled from three others —
+// pointing at nothing, in the one case where knowing which column to look at
+// matters most.
+func (m *Mapper) nameSource() string {
+	columns := m.NameColumns()
+	if len(columns) == 1 {
+		return fmt.Sprintf("column %q", columns[0])
+	}
+	return fmt.Sprintf("columns %q", columns)
+}
+
 // NameFrom builds an object's name out of a row, for a caller that wants the
 // identity without mapping the whole object — a tombstone row has nothing else
 // in it to map.
@@ -401,8 +416,8 @@ func (m *Mapper) Row(row crispsql.Row) (*unstructured.Unstructured, error) {
 		return nil, err
 	}
 	if !isDNS1123Subdomain(name) {
-		return nil, fmt.Errorf("column %q produced %q, which is not a valid object name: %s",
-			m.mapping.Name, name, strings.Join(validation.IsDNS1123Subdomain(name), "; "))
+		return nil, fmt.Errorf("%s produced %q, which is not a valid object name: %s",
+			m.nameSource(), name, strings.Join(validation.IsDNS1123Subdomain(name), "; "))
 	}
 	obj.SetName(name)
 

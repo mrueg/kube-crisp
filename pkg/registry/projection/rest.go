@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	goerrors "errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -1103,6 +1104,26 @@ func highestVersion(items []unstructured.Unstructured) string {
 	return highest
 }
 
+// pageSize is how many rows to read to serve a page of limit rows.
+//
+// One more than the page, because that extra row is what reveals whether
+// another page exists — without it the last page and a full one look alike and
+// a client is told it has seen everything one page early.
+//
+// Asking for one more is not always possible. limit is whatever the client
+// sent, ListOptions bounds it at nothing, and MaxInt64 + 1 wraps to a negative
+// bind value: PostgreSQL refuses a negative LIMIT outright and SQLite reads it
+// as no limit at all, so an absurd page size answered with a 500 or with the
+// whole collection rather than with the page that was asked for. A limit that
+// large already covers every row the statement may return, so there is nothing
+// beyond it to look for and the bound is simply the largest one there is.
+func pageSize(limit int64) int64 {
+	if limit == math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return limit + 1
+}
+
 func (r *REST) listObjects(ctx context.Context, namespace string, options *metainternalversion.ListOptions, mode readMode) (*unstructured.UnstructuredList, error) {
 	return r.listWith(ctx, namespace, options, mode, r.session(ctx, namespace, ""))
 }
@@ -1149,9 +1170,8 @@ func (r *REST) listWith(
 		consumed = token.Consumed
 
 		if paging {
-			// One extra row reveals whether another page exists.
 			limit = options.Limit
-			args["limit"] = limit + 1
+			args["limit"] = pageSize(limit)
 		} else {
 			// Resuming without a limit asks for the whole remainder in one
 			// answer, so the only bound left is the one an unpaged list uses.
@@ -1896,11 +1916,12 @@ func (w *WritableREST) applyUpdate(
 
 	if merge != nil {
 		merge(incoming, current)
-		incoming.SetResourceVersion(requested)
 	}
 
 	// The precondition the statement binds is the version this server actually
-	// read, not the one the client asserted.
+	// read, not the one the client asserted. That holds for the merged writes
+	// too: statusOnly rebuilds the object from the stored one, so whatever
+	// version came in has already been replaced by this point either way.
 	//
 	// They agree whenever the client asserted anything — the comparison above
 	// has just required it. What differs is the case where it asserted nothing,

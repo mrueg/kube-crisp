@@ -1,0 +1,78 @@
+# Fuzzing, which the ordinary test run does not do.
+#
+# `go test` executes a fuzz target's seed corpus and stops there, so every pull
+# request checks the inputs somebody already thought of and none of the ones
+# nobody did. That is the half worth having for the SQL scanner: it decides
+# where a string literal ends and whether a statement returns rows, and reading
+# either wrong has already produced a committed write answered with 404 and a
+# request value interpolated into a fixed literal.
+#
+# Nightly rather than per pull request. A fuzz run is time-boxed exploration, so
+# a per-PR budget would spend most of it re-covering the same ground while
+# adding that long to every review. What a pull request needs from the corpus it
+# already gets, because a crasher found here is committed as a seed and runs
+# from then on with the unit tests.
+name: Fuzz
+
+on:
+  schedule:
+    # Nothing depends on the hour; it is offset from the top of it so this is
+    # not queued alongside every other repository's midnight cron.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  # Per target. Long enough to reach past the seed corpus, short enough that the
+  # whole matrix finishes well inside the job timeout.
+  FUZZTIME: 10m
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Every target runs even when one of them finds something: they cover
+      # different code, and stopping the others would hide a second crasher
+      # behind the first.
+      fail-fast: false
+      matrix:
+        include:
+          - package: ./pkg/sql
+            target: FuzzRewrite
+          - package: ./pkg/sql
+            target: FuzzTables
+          - package: ./pkg/projection
+            target: FuzzIsDNS1123Subdomain
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # -run '^$' so the package's ordinary tests do not run twice: they ran on
+      # the commit that got here, and this job is for the fuzzing.
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          go test ${{ matrix.package }} \
+            -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime '${{ env.FUZZTIME }}'
+
+      # The whole value of a failed run is the input that caused it. Go writes a
+      # minimised reproducer under testdata/fuzz/<target>/, which is also where
+      # it belongs in the repository -- committing it turns the crasher into a
+      # seed that every later test run replays.
+      - name: Keep the input that failed
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: '**/testdata/fuzz/**'
+          if-no-files-found: warn

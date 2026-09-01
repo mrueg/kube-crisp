@@ -24,6 +24,19 @@ build-plugin:
 	go build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/kubectl-crisp ./cmd/kubectl-crisp
 	ln -sf kubectl-crisp $(BIN_DIR)/kubectl_complete-crisp
 
+# Fuzzing, for the targets CI runs nightly. FUZZTIME is short by default so this
+# is usable while working on one; CI gives each target longer.
+FUZZTIME ?= 30s
+FUZZ_TARGETS := ./pkg/sql:FuzzRewrite ./pkg/sql:FuzzTables ./pkg/projection:FuzzIsDNS1123Subdomain
+
+.PHONY: fuzz
+fuzz:
+	@for entry in $(FUZZ_TARGETS); do \
+		package=$${entry%%:*}; target=$${entry##*:}; \
+		echo "==> $$target"; \
+		go test $$package -run '^$$' -fuzz "^$$target$$" -fuzztime '$(FUZZTIME)' || exit $$?; \
+	done
+
 .PHONY: test
 test:
 	go test ./...

@@ -760,6 +760,31 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 			return v, nil
 		case int64:
 			return v != 0, nil
+		case float64:
+			// resultFormat: JSONArray decodes the whole collection with
+			// encoding/json, which makes every number a float64 — and a boolean
+			// is a number by the time it arrives here. MySQL's BOOLEAN is
+			// TINYINT(1) and JSON_ARRAYAGG renders it as 0 or 1, and SQLite's
+			// json_group_array does the same. Without this, every row carrying
+			// a flag was unmappable, and under the default onUnmappableRow the
+			// collection quietly emptied.
+			//
+			// An integral value is read as the same value scanned directly
+			// would be, so which result format a projection chooses stays a
+			// transport detail rather than changing what the objects say.
+			//
+			// Everything else is refused rather than guessed at. Reading any
+			// non-zero as true is the tempting shortcut and the worse answer:
+			// a measurement column somebody mapped as a boolean by mistake
+			// would then read as a confident `true` on every row, with nothing
+			// anywhere to notice, where refusing names the column and the
+			// value. NaN is neither true nor false under any reading, and an
+			// infinity did not come from a flag either.
+			if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) {
+				return nil, fmt.Errorf(
+					"value %v is not a boolean; map this column as type: number if it is a measurement", v)
+			}
+			return v != 0, nil
 		case string:
 			return strconv.ParseBool(strings.TrimSpace(v))
 		default:

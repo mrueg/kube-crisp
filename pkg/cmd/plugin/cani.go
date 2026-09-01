@@ -88,6 +88,18 @@ func NewCommandCanI(out, errOut io.Writer) *cobra.Command {
 	f.StringVar(&o.asUser, "as", "", "Username to check instead of the current user.")
 	f.StringSliceVar(&o.asGroups, "as-group", nil, "Group to check. Repeatable.")
 	f.StringVarP(&o.output, "output", "o", "table", "Output format: table or json.")
+	cmd.ValidArgsFunction = completeProjectionNames(o.client.projections, &o.filenames)
+	_ = cmd.MarkFlagFilename("filename", "yaml", "yml")
+	_ = cmd.RegisterFlagCompletionFunc("output", fixed("table", "json"))
+	_ = cmd.RegisterFlagCompletionFunc("namespace",
+		func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			return completeFrom(cmd, o.client.namespaces, nil, toComplete)
+		})
+	// A username and a group name are not enumerable -- the cluster holds no
+	// list of them -- and offering files instead would be a worse guess than
+	// offering nothing.
+	_ = cmd.RegisterFlagCompletionFunc("as", cobra.NoFileCompletions)
+	_ = cmd.RegisterFlagCompletionFunc("as-group", cobra.NoFileCompletions)
 	o.client.bind(cmd)
 
 	return cmd

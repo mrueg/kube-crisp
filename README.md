@@ -241,6 +241,12 @@ however much the plugin itself knows — so the plugin answers to that name as w
 the whole of it. There is no second program to install or to keep in step. Skipping it costs the
 completion and nothing else.
 
+What completes: the subcommands, the projection names `rbac`, `can-i` and `schema` take — read from
+the cluster and described by the resource each one serves — the output formats each command accepts,
+`--context` from the kubeconfig, and `-n` from the cluster's namespaces. A completion that cannot
+reach the cluster says nothing and offers no filenames, since a filename is never the right guess in
+a position that wants a projection.
+
 On Windows the lookup goes through `PATHEXT`, so the copy has to be named `kubectl_complete-crisp.exe`
 to be found.
 

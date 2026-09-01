@@ -435,7 +435,14 @@ failures are split because they point at different people:
 | `shed` | Refused at `maxConcurrentQueries` before it ran | Raise the limit, or reduce the load |
 | `invalid` | The projection's schema or CEL rules rejected the request | The client sending it |
 | `conflict` | A write lost to a concurrent one | Nobody; the client retries |
+| `contended` | A read the database rolled back rather than serialise against a concurrent transaction | Nobody at first; sustained, whoever owns the schema or the isolation level |
 | `error` | The database refused the statement | The projection author: a renamed column, a dropped table |
+
+`contended` is deliberately not `unavailable`. The database answered — it answered that it could not
+be consistent — so counting it as unreachable would fire `KubeCrispDatabaseUnreachable`, a critical
+alert, every time a table got hot. The client is told `503` and no `Retry-After`: the request may
+work on another attempt, and the server does not instruct every client to make one, because the
+transaction it rolled back had already cost the database a whole query.
 
 The last one is the one worth wiring to a pager first. It does not clear on its own, retrying does
 not help, and no amount of database capacity changes it — but before this split it was

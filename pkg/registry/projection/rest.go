@@ -10,6 +10,7 @@ import (
 	goerrors "errors"
 	"fmt"
 	"math"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -2960,6 +2961,8 @@ func (r *REST) queryError(err error, verb string) error {
 		return tooManyRequests(r.groupResource())
 	case goerrors.Is(err, context.DeadlineExceeded), crispsql.IsStatementTimeout(err):
 		return timedOut(r.groupResource())
+	case crispsql.IsSerializationFailure(err):
+		return serializationFailed(r.groupResource())
 	case crispsql.IsUnavailable(err):
 		return unavailable(r.groupResource(), err)
 	default:
@@ -3001,6 +3004,51 @@ func isStatusError(err error) bool {
 func timedOut(gr schema.GroupResource) error {
 	return errors.NewTimeoutError(
 		fmt.Sprintf("the database behind %s did not answer in time", gr.String()), 0)
+}
+
+// reasonSerializationFailure marks the answer a contended read gets.
+//
+// A reason of its own rather than ServiceUnavailable, which is what the code
+// would otherwise imply, because the metric label is derived from it and the two
+// are not the same event: unavailable is a database that could not be reached,
+// and this is one that answered, and answered that it could not serialise this
+// read against a concurrent transaction. KubeCrispDatabaseUnreachable is a
+// critical alert on the first, so letting a hot table produce it would page
+// somebody about an outage that is not happening.
+const reasonSerializationFailure metav1.StatusReason = "SerializationFailure"
+
+// serializationFailed reports a read the database rolled back rather than
+// serialise.
+//
+// A write in the same position answers 409: the caller re-reads and reapplies,
+// which is a thing to do. A read has nothing to reapply, so what it needs to be
+// told is that nothing is wrong with the request and the answer may exist on
+// another attempt -- which is 503, and why the status is not reused from the
+// write path.
+//
+// Deliberately without a Retry-After. The rule this project settled on is that
+// one is set where a retry is cheap, and a shed request or a refused connection
+// costs the database nothing. This costs it a whole query: the database ran the
+// transaction and threw the work away. Telling every client to retry ten times
+// over would put ten times the load on a database that is already too contended
+// to serialise the first attempt, which is the same mistake measured on
+// timeouts. The status still says the request may be repeated, so a client that
+// wants to may; the server does not instruct it to.
+func serializationFailed(gr schema.GroupResource) error {
+	return &errors.StatusError{ErrStatus: metav1.Status{
+		Status: metav1.StatusFailure,
+		Code:   http.StatusServiceUnavailable,
+		Reason: reasonSerializationFailure,
+		Message: fmt.Sprintf(
+			"the database behind %s rolled back a read rather than serialise it against a concurrent transaction",
+			gr.String()),
+	}}
+}
+
+// isSerializationFailure reports whether an answer is the one above.
+func isSerializationFailure(err error) bool {
+	var status errors.APIStatus
+	return goerrors.As(err, &status) && status.Status().Reason == reasonSerializationFailure
 }
 
 // unavailable reports that the database is unreachable.
@@ -3287,6 +3335,8 @@ func resultFor(err error) string {
 		return crispmetrics.ResultNotFound
 	case errors.IsTimeout(err), errors.IsServerTimeout(err):
 		return crispmetrics.ResultTimeout
+	case isSerializationFailure(err):
+		return crispmetrics.ResultContended
 	case errors.IsServiceUnavailable(err):
 		return crispmetrics.ResultUnavailable
 	case errors.IsTooManyRequests(err):

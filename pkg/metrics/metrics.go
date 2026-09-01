@@ -36,6 +36,12 @@ const (
 	ResultInvalid = "invalid"
 	// ResultConflict is a write that lost to a concurrent one.
 	ResultConflict = "conflict"
+	// ResultContended is a read the database rolled back rather than serialise
+	// against a concurrent transaction. Separate from unavailable, which is a
+	// database that could not be reached: this one answered, and answered that
+	// it was too busy to be consistent. Conflating them would page somebody
+	// about an outage every time a table got hot.
+	ResultContended = "contended"
 
 	// ResultError is everything else, which in practice is a statement the
 	// database refused — the projection's own SQL being wrong.

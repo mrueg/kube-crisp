@@ -2816,6 +2816,18 @@ func translateWriteError(err error, gr schema.GroupResource, name, verb string) 
 		return timedOut(gr)
 	case crispsql.IsUnavailable(err):
 		return unavailable(gr, err)
+	case crispsql.IsSerializationFailure(err):
+		// A conflict, like a stale resourceVersion, but not the same one, and
+		// the cause has to say which: there the client holds an object that has
+		// moved on and has to read it again, while here the write it sent was
+		// never applied and can be sent again exactly as it is. Both are 409
+		// because both mean "not now, try again", which is what makes a
+		// controller requeue instead of treating it as a server fault — and a
+		// 500 is what it got before, for the one failure the database raises
+		// specifically to say no harm was done.
+		return errors.NewConflict(gr, name, fmt.Errorf(
+			"the database could not run this write alongside a concurrent one and rolled it back; "+
+				"nothing was changed and it can be retried unchanged: %w", err))
 	case crispsql.IsUniqueViolation(err):
 		return errors.NewAlreadyExists(gr, name)
 	case crispsql.IsForeignKeyViolation(err):

@@ -28,9 +28,20 @@ func TestThePoolKeyDoesNotMoveWhenTheTokenDoes(t *testing.T) {
 	}
 
 	// The connection string a provider is given never carries the password, so
-	// this is the only string there is, and it is the same one an hour later.
-	if PoolKey(authed, dsn) != PoolKey(authed, dsn) {
-		t.Fatal("the pool key is not stable for an unchanged data source")
+	// this is the only string there is — and the same projection read again an
+	// hour later, into a fresh object with a fresh map, is the same key.
+	//
+	// The two data sources here are equal and not identical, which is what the
+	// controller actually has: every sync decodes the projection again.
+	resynced := crispv1alpha1.DataSource{
+		Driver: "postgres",
+		Auth: &crispv1alpha1.DataSourceAuth{
+			Provider: "aws-rds-iam",
+			Options:  map[string]string{"region": "eu-central-1"},
+		},
+	}
+	if PoolKey(authed, dsn) != PoolKey(resynced, dsn) {
+		t.Fatal("the same data source decoded twice produced two pool keys, so every sync rebuilds the pool")
 	}
 
 	// The stanza itself is part of the identity, though: the same database

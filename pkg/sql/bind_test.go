@@ -284,6 +284,43 @@ func TestHasReturning(t *testing.T) {
 			stmt:   `INSERT INTO items (id) VALUES ('C:\') RETURNING id`,
 			want:   true,
 		},
+		{
+			// PostgreSQL block comments nest, which is what happens when you
+			// comment out a block that already had a comment in it. Ending at
+			// the first */ left "returning id */" being read as statement text,
+			// so the write ran as a query, committed, and answered nothing.
+			name:   "the word inside a nested block comment",
+			driver: "postgres",
+			stmt:   "INSERT INTO orders (id) VALUES (:name) /* outer /* inner */ returning id */",
+			want:   false,
+		},
+		{
+			// The same statement on a database whose comments do not nest. The
+			// outer comment ends at the first */ there, so the keyword really
+			// is statement text and MySQL really would return the row.
+			name:   "mysql block comments do not nest",
+			driver: "mysql",
+			stmt:   "INSERT INTO orders (id) VALUES (:name) /* outer /* inner */ returning id */",
+			want:   true,
+		},
+		{
+			// An unknown driver counts the nesting, because that is the reading
+			// that skips more and so invents fewer keywords.
+			name:   "an unknown driver counts nested comments",
+			driver: "nonesuch",
+			stmt:   "INSERT INTO orders (id) VALUES (:name) /* outer /* inner */ returning id */",
+			want:   false,
+		},
+		{
+			// E'' asks PostgreSQL for backslash escapes in one literal, which
+			// is the only reason to write it. Read as an ordinary literal it
+			// ended at the escaped quote, and everything after it — RETURNING
+			// included — was read as more string.
+			name:   "the word after an escape string is still code",
+			driver: "postgres",
+			stmt:   `INSERT INTO orders (note) VALUES (E'it\'s') RETURNING id`,
+			want:   true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -418,6 +455,50 @@ func TestRewriteHandlesDriverSpecificSyntax(t *testing.T) {
 			name: "sqlite has no hash comment", driver: "sqlite",
 			sql:     "SELECT id FROM t # :name",
 			wantSQL: "SELECT id FROM t # ?", wantParams: []string{"name"},
+		},
+		{
+			// E'' is how PostgreSQL is asked for backslash escapes in one
+			// literal, so \' there does not end it. Read as an ordinary literal
+			// it ended at that quote and the rewriter carried on through what
+			// is still string — leaving the :b after it unbound, and
+			// PostgreSQL a statement with a placeholder short.
+			name: "postgres escape string escapes with a backslash", driver: "postgres",
+			sql:     `INSERT INTO t (a, b) VALUES (E'it\'s', :b)`,
+			wantSQL: `INSERT INTO t (a, b) VALUES (E'it\'s', $1)`, wantParams: []string{"b"},
+		},
+		{
+			// The E has to be a prefix and not the last letter of a word.
+			// PostgreSQL spells a typed constant date'...', so the character
+			// before a literal's opening quote is routinely part of an
+			// identifier, and reading one as a prefix would give that literal
+			// escapes it does not have.
+			name: "a type-prefixed literal is not an escape string", driver: "postgres",
+			sql:     `SELECT date'a\' AS d, :name AS n`,
+			wantSQL: `SELECT date'a\' AS d, $1 AS n`, wantParams: []string{"name"},
+		},
+		{
+			// PostgreSQL comments nest, so :ghost is inside one and there is
+			// one parameter here, not two. Ending the comment at the first */
+			// bound both, and PostgreSQL answered "bind message supplies 2
+			// parameters, but prepared statement requires 1".
+			name: "postgres block comments nest", driver: "postgres",
+			sql:     "/* outer /* inner */ :ghost */ SELECT :id",
+			wantSQL: "/* outer /* inner */ :ghost */ SELECT $1", wantParams: []string{"id"},
+		},
+		{
+			// MySQL's do not: its comment ended at the first */, so what
+			// follows really is statement text.
+			name: "mysql block comments do not nest", driver: "mysql",
+			sql:     "/* outer /* inner */ :ghost */ SELECT :id",
+			wantSQL: "/* outer /* inner */ ? */ SELECT ?", wantParams: []string{"ghost", "id"},
+		},
+		{
+			// The * of the opener cannot also close it: /*/ is a comment
+			// nobody has closed, so the rest of the statement is inside it.
+			// Reading it as closed handed that text back as code.
+			name: "an opening /*/ does not close itself", driver: "postgres",
+			sql:     "SELECT 1 /*/ :ghost",
+			wantSQL: "SELECT 1 /*/ :ghost", wantParams: nil,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -112,6 +112,17 @@ func TestTables(t *testing.T) {
 			sql:    "SELECT $$ from secrets $$ FROM orders",
 			want:   []string{"orders"},
 		},
+		{
+			// PostgreSQL comments nest, which is what commenting out a block
+			// that already had a comment produces. Ending at the first */ read
+			// the tail of the outer comment as statement text, so
+			// status.requiredSchema named a table that appears nowhere but
+			// inside a comment.
+			name:   "a name inside a nested comment is not a table",
+			driver: "postgres",
+			sql:    "SELECT 1 /* a /* b */ FROM secrets */ FROM orders",
+			want:   []string{"orders"},
+		},
 		// A set-returning function is not a table; a column list on an insert
 		// is the same punctuation meaning the opposite thing.
 		{

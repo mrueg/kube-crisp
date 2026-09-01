@@ -225,6 +225,33 @@ func (d lexDialect) dollarQuotes() bool {
 	return d == lexPostgres || d == lexConservative
 }
 
+// escapeStrings reports whether E'...' is a literal in which a backslash
+// escapes the character after it.
+//
+// PostgreSQL's answer to standard_conforming_strings: the prefix is how you ask
+// for the old behaviour for one literal, which is the whole reason anybody
+// writes E'it\'s'. Read as an ordinary literal it ended at that escaped quote,
+// and the scanner carried on through what is still string — so RETURNING after
+// one went unseen and the :name after one went unbound.
+//
+// Only PostgreSQL needs to be asked. MySQL has no such prefix and escapes
+// everywhere anyway, and lexConservative already escapes in every literal.
+func (d lexDialect) escapeStrings() bool {
+	return d == lexPostgres
+}
+
+// nestedBlockComments reports whether /* ... /* ... */ ... */ is one comment
+// rather than one that ended at the first */.
+//
+// PostgreSQL nests, which is not a curiosity: nesting is what happens when you
+// comment out a block that already had a comment in it. Ending at the first */
+// left the tail of the outer comment — the half after the inner one closed —
+// being read as statement text, which is where an invented RETURNING and an
+// invented bind parameter came from.
+func (d lexDialect) nestedBlockComments() bool {
+	return d == lexPostgres || d == lexConservative
+}
+
 // hashComments reports whether # opens a line comment. MySQL only: in
 // PostgreSQL # is an operator, and SQLite has no such comment at all.
 func (d lexDialect) hashComments() bool {
@@ -255,6 +282,17 @@ func skipNonCode(stmt string, i int, dialect lexDialect) (int, bool) {
 	case c == '\'':
 		return endOfString(stmt, i, dialect.backslashEscapes()), true
 
+	// PostgreSQL escape string, E'...'.
+	//
+	// The prefix has to be a prefix and not the tail of a word: a column called
+	// "type" followed by 'x' would otherwise have its e read as one. Nothing
+	// but a name character can precede an identifier's last letter, so that is
+	// the test.
+	case (c == 'E' || c == 'e') && dialect.escapeStrings() &&
+		i+1 < len(stmt) && stmt[i+1] == '\'' &&
+		(i == 0 || !isNameChar(stmt[i-1])):
+		return endOfString(stmt, i+1, true), true
+
 	// PostgreSQL dollar-quoted string, $$...$$ or $tag$...$tag$.
 	//
 	// Anything else starting with $ — a hand-written positional placeholder, an
@@ -282,14 +320,41 @@ func skipNonCode(stmt string, i int, dialect lexDialect) (int, bool) {
 
 	// Block comment.
 	case c == '/' && i+1 < len(stmt) && stmt[i+1] == '*':
-		j := strings.Index(stmt[i:], "*/")
-		if j < 0 {
-			return len(stmt), true
-		}
-		return i + j + 2, true
+		return endOfBlockComment(stmt, i, dialect.nestedBlockComments()), true
 	}
 
 	return 0, false
+}
+
+// endOfBlockComment reports where the /* comment opened at i ends, or the end
+// of the statement when it is never closed.
+//
+// nested is the database's rule for what closes it. PostgreSQL counts opens, so
+// the comment ends at the */ that balances the last of them; MySQL and SQLite
+// end at the first one regardless.
+//
+// Either way the scan starts after the opening /*, so the * of the opener
+// cannot also serve as the * of a closer: /*/ opens a comment that nothing has
+// closed yet, and reading it as a closed one handed the rest of the statement
+// back as code.
+func endOfBlockComment(stmt string, i int, nested bool) int {
+	depth := 1
+	for j := i + 2; j+1 < len(stmt); {
+		switch {
+		case nested && stmt[j] == '/' && stmt[j+1] == '*':
+			depth++
+			j += 2
+		case stmt[j] == '*' && stmt[j+1] == '/':
+			depth--
+			j += 2
+			if depth == 0 {
+				return j
+			}
+		default:
+			j++
+		}
+	}
+	return len(stmt)
 }
 
 // endOfString reports where the '...' literal opened at i ends, or the end of

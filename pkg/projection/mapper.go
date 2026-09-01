@@ -764,6 +764,16 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 		}
 
 	case crispv1alpha1.FieldTypeNumber:
+		// Every integer width the integer branch takes is taken here too. A
+		// driver decides what Go type a column arrives as, and the same column
+		// can arrive as int64 or int or uint depending on the driver, the
+		// protocol, and whether prepared statements are on -- so a width
+		// accepted for type: integer and refused for type: number makes the
+		// mapping's declared type, rather than the data, decide whether a row
+		// exists. There is no range check on the way to a float64 the way there
+		// is on the way to an int64: a float64 takes any of these, and what it
+		// loses at the top of a uint64 it loses for a float64 source too, which
+		// the string cases below already say.
 		switch v := raw.(type) {
 		case float64:
 			return v, nil
@@ -771,7 +781,15 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 			return float64(v), nil
 		case int64:
 			return float64(v), nil
+		case int32:
+			return float64(v), nil
+		case int:
+			return float64(v), nil
 		case uint64:
+			return float64(v), nil
+		case uint32:
+			return float64(v), nil
+		case uint:
 			return float64(v), nil
 		case string:
 			// A number field is a float64, which is what JSON has. PostgreSQL

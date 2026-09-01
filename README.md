@@ -430,12 +430,16 @@ attaches build provenance.
   exists is the garbage collector's question rather than this server's.
 - **Server-side apply tracks ownership only when asked to.** Without `mapping.managedFields` there
   is nowhere to keep it, so applies merge but never conflict.
-- **`--projection-dir` reads one directory, not a tree.** Subdirectories are skipped, so a
-  directory holding only folders loads nothing and says nothing — which is exactly what happened to
-  this repository's own `examples/` when it grew subfolders. Point the flag at the directory holding
-  the manifests.
+- **`--projection-dir` reads a tree.** Every `.yaml` and `.yml` file under the directory is loaded,
+  subdirectories included, so pointing it at a directory of folders works — which it did not, and a
+  directory holding only folders used to load nothing and say nothing, as this repository's own
+  `examples/` did once it grew subfolders. Directories whose name starts with a dot are skipped,
+  which is what makes the flag safe to point at a mounted ConfigMap: the mount keeps its real files
+  in a timestamped `..`-prefixed directory beside the symlinks that name them, and reading both
+  would load every projection twice.
 - **`--projection-dir` is re-read while running.** A file changing is picked up the way a projection
-  changing in the cluster is: the directory is watched and re-read on every sync. A file that does
+  changing in the cluster is: the directory and everything under it is watched, and re-read on every
+  sync. A file that does
   not parse keeps the last good set rather than taking every file-backed projection out of service.
   Backed by a ConfigMap, the wait is the kubelet's rather than this server's — around a minute in the
   e2e cluster, with no restart.

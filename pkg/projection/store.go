@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,39 +32,66 @@ import (
 // cluster at all. Projections that do live in the cluster are watched and
 // installed while the server runs, by pkg/controller/projection.
 func LoadDir(dir string) ([]crispv1alpha1.CustomResourceProjection, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("reading projection directory %s: %w", dir, err)
-	}
-
 	var out []crispv1alpha1.CustomResourceProjection
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		ext := strings.ToLower(filepath.Ext(e.Name()))
-		if ext != ".yaml" && ext != ".yml" {
-			continue
-		}
-
-		// The directory is one the operator named on the command line and the
-		// entries come from reading it, so neither half of this path is
-		// attacker-controlled and no name can climb out of it.
-		path := filepath.Join(dir, e.Name())
-
+	err := walkManifests(dir, func(path string) error {
+		// The root is one the operator named on the command line and the rest
+		// comes from reading it, so no part of this path is attacker-controlled
+		// and no name can climb out of it.
 		loaded, err := LoadFile(path)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for i := range loaded {
 			if err := Validate(&loaded[i]); err != nil {
-				return nil, fmt.Errorf("%s: %w", path, err)
+				return fmt.Errorf("%s: %w", path, err)
 			}
 		}
 		out = append(out, loaded...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
 	return out, nil
+}
+
+// walkManifests calls fn for every .yaml or .yml file under dir, subdirectories
+// included, in lexical order.
+//
+// Directories whose name begins with a dot are skipped, and that is what makes
+// this safe to point at a mounted ConfigMap. Such a mount is not a flat
+// directory: the keys are symlinks beside a `..data` symlink pointing at a
+// real, timestamped directory holding the files. Descending into that one would
+// load every projection a second time, under a second path — and two
+// projections claiming one resource is a conflict, so a recursive read of a
+// ConfigMap would otherwise fail every projection in the mount against its own
+// twin. The symlinks need no rule: WalkDir does not follow them, so `..data` is
+// a non-directory with no manifest extension, and each key is read exactly once
+// through the name the ConfigMap gave it.
+//
+// Skipping dotted directories costs nothing else: `.git`, `.helm`, and an
+// editor's `.cache` are not where anybody keeps a manifest they mean to serve.
+func walkManifests(dir string, fn func(path string) error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != dir && strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(d.Name())) {
+		case ".yaml", ".yml":
+			return fn(path)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reading projection directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 // LoadPath reads a file, or every .yaml and .yml file in a directory, as
@@ -74,7 +102,7 @@ func LoadDir(dir string) ([]crispv1alpha1.CustomResourceProjection, error) {
 // that makes it reachable — where stopping at the first projection that would
 // not compile means running the command again to find the second.
 //
-// Subdirectories are skipped, matching --projection-dir.
+// Subdirectories are read too, matching --projection-dir.
 func LoadPath(path string) ([]crispv1alpha1.CustomResourceProjection, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -84,26 +112,17 @@ func LoadPath(path string) ([]crispv1alpha1.CustomResourceProjection, error) {
 		return LoadFile(path)
 	}
 
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return nil, err
-	}
-
 	var out []crispv1alpha1.CustomResourceProjection
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		ext := strings.ToLower(filepath.Ext(e.Name()))
-		if ext != ".yaml" && ext != ".yml" {
-			continue
-		}
-
-		loaded, err := LoadFile(filepath.Join(path, e.Name()))
+	err = walkManifests(path, func(file string) error {
+		loaded, err := LoadFile(file)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		out = append(out, loaded...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }

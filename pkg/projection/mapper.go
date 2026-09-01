@@ -1332,5 +1332,24 @@ func CoerceValue(value string, t crispv1alpha1.FieldType) (any, error) {
 	if t == "" || t == crispv1alpha1.FieldTypeString {
 		return value, nil
 	}
+
+	// A json literal binds as the text it already is, which is what the Field
+	// source does with the value it encodes. The row conversion is the wrong
+	// direction here: it exists to turn a column into part of an object, so it
+	// decodes JSON into a Go map — and database/sql cannot bind one of those.
+	// The parameter reached the driver as "unsupported type
+	// map[string]interface {}", so every request through a query declaring one
+	// failed, whatever the literal said.
+	//
+	// Parsed only to be sure it is JSON at all. A malformed literal sent on to
+	// the database would be answered by the database, in its own words, about
+	// a value the client never supplied and cannot change.
+	if t == crispv1alpha1.FieldTypeJSON {
+		if !json.Valid([]byte(value)) {
+			return nil, fmt.Errorf("the declared value is not valid JSON")
+		}
+		return value, nil
+	}
+
 	return coerce(value, t)
 }

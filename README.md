@@ -75,6 +75,7 @@ group while the server runs, and deleting it takes the group away again. No rest
 | **Scale-out** | reads can go to a read replica while writes stay on the primary, and leader election leaves one replica polling at full rate |
 | **Identity** | one column, or several joined into a name for a table with a composite key |
 | **Drivers** | PostgreSQL (pgx), MySQL, SQLite — all three are covered by the e2e suite, and the set is a registry rather than a switch |
+| **Credentials** | a connection string in a Secret, watched so a rotation lands when it happens — or, for a managed database that has no password to store, a registered provider that mints one per connection, so a fifteen-minute IAM token does not rebuild the pool four times an hour |
 | **Observability** | Prometheus metrics, audited writes, and OTLP traces carrying a span per statement, so a slow read names the projection and the query rather than ending at the handler |
 
 ## Tutorials
@@ -291,6 +292,39 @@ You are building your own binary either way — a `database/sql` driver has to b
 linked in — so the same build regenerates the CRD, whose `driver` enum lists what
 that build accepts.
 
+### Adding a credential provider
+
+`spec.dataSource.auth.provider` names a registered credential provider, and that
+registry is open the same way:
+
+```go
+sql.RegisterCredentialProvider(sql.CredentialProvider{
+    Name: "aws-rds-iam",
+    Open: func(req sql.CredentialRequest) (sql.Credentials, error) {
+        // req carries the driver, the connection string from the Secret, and
+        // whatever dataSource.auth.options said. Return something that mints a
+        // password; it is called once per new connection.
+        return signer(req)
+    },
+})
+```
+
+It exists for the managed databases that have no password to put in a Secret:
+AWS RDS IAM, Cloud SQL and Entra all authenticate with a token minted on demand
+and good for about a quarter of an hour. The pool is opened from a
+`database/sql` connector rather than from a connection string, so the token is
+minted per connection and never becomes part of the pool's identity — which is
+what keeps a fifteen-minute credential from rebuilding the pool four times an
+hour. See [Passwords that are minted rather than
+stored](docs/reference.md#passwords-that-are-minted-rather-than-stored).
+
+The reason this is a registration and not a flag is that every provider is a
+cloud SDK, and kube-crisp links no dependency a given build does not need. The
+image published here registers none, so `RegisteredCredentialProviders()` is
+empty and a projection asking for one is refused when it is compiled, with that
+said plainly. A build that wants AWS is a binary somebody assembled on purpose —
+which for a `database/sql` driver was already true.
+
 ## Development
 
 The e2e suite is split so it does not have to be run whole. `make e2e-up` provisions the cluster and
@@ -414,10 +448,11 @@ attaches build provenance.
   by a statement picked from a closed set keyed on the driver's name, so a driver registered with
   `SessionVariables: true` that is not in that set loads cleanly and then fails on the first request
   that binds one. And the CRD pins driver names in more than the enum: CEL rules allow `watch.notify`
-  only for `postgres` and `statementTimeout` only for `postgres` and `cockroach`, so a driver
+  only for `postgres`, `statementTimeout` only for `postgres` and `cockroach`, and `dataSource.auth`
+  only for those two and `mysql`, so a driver
   registered with `Notifications: true` and added to the enum — everything
   [Adding a driver](#adding-a-driver) asks for — is still refused by the API server the moment a
-  projection configures the capability that driver declared. Tests compare the enum and both rules against what the registry claims, so a gap
+  projection configures the capability that driver declared. Tests compare the enum and all three rules against what the registry claims, so a gap
   between them is a CI failure rather than something found in a cluster.
 - **The table has to exist.** kube-crisp projects rows; it does not create or migrate tables. A
   projection whose table is missing reports `CompilationFailed` with the database's own message and

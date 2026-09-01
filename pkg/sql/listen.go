@@ -92,7 +92,13 @@ func (p *Pool) Listen(ctx context.Context, channel string) (<-chan struct{}, err
 	// dataSource.maxOpenConns, which bounds the connections doing query work.
 	// No lifetime on it either: a subscription is meant to be long-lived, and
 	// recycling the connection underneath one would drop it on a timer.
-	listener, err := sql.Open(driver.SQLDriver, p.dsn)
+	// Through the pool's connector when it has one, so that a subscription on a
+	// data source using dataSource.auth authenticates with a minted password
+	// like every other connection. Opening it from the DSN instead would open
+	// it with no password at all, and the failure would be a watch that never
+	// receives a notification rather than anything that looks like a
+	// credential.
+	listener, err := p.openConnection(driver)
 	if err != nil {
 		return nil, fmt.Errorf("opening a connection to listen on: %w", err)
 	}

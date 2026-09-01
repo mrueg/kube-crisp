@@ -233,6 +233,7 @@ type NotifySpec struct {
 // always read from a Secret so that credentials never appear in this object.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.statementTimeout) || !self.statementTimeout || self.driver == 'postgres' || self.driver == 'cockroach'",message="statementTimeout is supported on the postgres and cockroach drivers only: MySQL bounds read-only SELECTs rather than every statement, and SQLite has no equivalent"
+// +kubebuilder:validation:XValidation:rule="!has(self.auth) || self.driver == 'cockroach' || self.driver == 'mysql' || self.driver == 'postgres'",message="auth is supported on the cockroach, mysql and postgres drivers only: a password minted per connection needs a driver that can be handed one, and SQLite is a local file with no password at all"
 type DataSource struct {
 	// Driver selects the database/sql driver. One of: postgres, cockroach,
 	// mysql, sqlite.
@@ -270,6 +271,36 @@ type DataSource struct {
 	// connection string. Defaults to DSNKey.
 	// +optional
 	ReadDSNKey string `json:"readDsnKey,omitempty"`
+
+	// Auth says how the password is obtained, for a database that does not have
+	// one to put in a Secret.
+	//
+	// AWS RDS IAM, Cloud SQL and Entra all authenticate with a token that lives
+	// about a quarter of an hour, minted on demand from the identity the process
+	// already has. Without this, using one of them means a sidecar rewriting the
+	// Secret every few minutes so that the connection string briefly holds a
+	// valid token — which works, because the pool is keyed by the connection
+	// string, but rebuilds the pool every time it happens.
+	//
+	// The Secret is still required and still carries the connection string: the
+	// host, the port, the user, the database, and the TLS settings. What this
+	// changes is only where the password comes from — it is minted per
+	// connection rather than read out of the DSN, so the pool is opened once
+	// from a string that never contains a token, keeps its connections and its
+	// prepared statements while the token behind them turns over, and only a
+	// connection actually being opened pays for a new one.
+	//
+	// Which providers exist is a property of the build. Every one of them means
+	// a cloud SDK linked into the binary, and kube-crisp links no dependency a
+	// given build does not need, so the image this repository publishes
+	// registers none: naming a provider needs a binary that registers it. A
+	// projection naming one this build does not have is refused when it is
+	// compiled, with the registered names in the message.
+	//
+	// Omit it and nothing changes: the connection string is used exactly as it
+	// is, which is what every projection did before this field existed.
+	// +optional
+	Auth *DataSourceAuth `json:"auth,omitempty"`
 
 	// MaxOpenConns bounds the connection pool. Defaults to 10.
 	// +optional
@@ -360,6 +391,44 @@ type DataSource struct {
 	// --max-open-conns-per-datasource.
 	// +optional
 	MaxConcurrentQueries *int32 `json:"maxConcurrentQueries,omitempty"`
+}
+
+// DataSourceAuth names the credential provider that mints this data source's
+// password, and hands it its settings.
+//
+// There is deliberately no enum on Provider, which the driver field has. The
+// two are not the same kind of set: a driver is linked into the binary and the
+// CRD that binary ships with can list what it accepts, whereas the providers a
+// build registers are whatever whoever assembled it chose, and the CRD in this
+// repository would have to enumerate an empty set. So the API accepts any
+// well-formed name and the projection is refused when it is compiled, by name,
+// with the providers this build does have. That is the same place a projection
+// naming an unknown driver is refused, and the same place it is read.
+type DataSourceAuth struct {
+	// Provider names a registered credential provider, such as "aws-rds-iam".
+	//
+	// The shape is constrained rather than the set: lowercase, so that the name
+	// in a projection is the name in the registry regardless of who typed it.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+	Provider string `json:"provider"`
+
+	// Options are provider-specific settings, passed through unchanged.
+	//
+	// A map rather than fields, because the alternative is an API change for
+	// every provider anybody adds — and the provider is the only thing that can
+	// validate its own settings anyway, since it is the only thing that knows
+	// them. It rejects what it does not understand when the projection is
+	// compiled, so a misspelt key is an error and not a default quietly taken.
+	//
+	// Nothing secret belongs here: this object is readable by anybody who can
+	// read projections. Options address a database and name an identity —
+	// a region, a user — while the credential behind them comes from the
+	// process's own identity, which is the point of using a provider at all.
+	// +kubebuilder:validation:MaxProperties=32
+	// +optional
+	Options map[string]string `json:"options,omitempty"`
 }
 
 // SecretReference names the Secret holding a data source's connection string.

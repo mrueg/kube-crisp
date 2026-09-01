@@ -892,6 +892,70 @@ watched: those are the ones a projection could read anyway. An update that chang
 does not rebuild anything, so relabelling a Secret is free. Without the RBAC to list and watch
 them (see `manifests/20-rbac.yaml`) rotation still lands within the 10 minute resync.
 
+### Passwords that are minted rather than stored
+
+A managed cloud database increasingly has no password to put in a Secret at all. AWS RDS IAM, Cloud
+SQL and Entra all authenticate with a token minted on demand from the identity the process already
+has, and it lives about a quarter of an hour. `dataSource.auth` says where such a token comes from:
+
+```yaml
+dataSource:
+  driver: postgres
+  secretRef:
+    name: orders-db
+    namespace: kube-crisp
+  auth:
+    provider: aws-rds-iam
+    options:
+      region: eu-central-1
+```
+
+The Secret is still required and still carries the connection string — the host, the port, the user,
+the database, and the TLS settings. What `auth` changes is only where the password comes from.
+
+The distinction that matters is that the token is a property of a *connection* and not of a pool.
+Rotation as described above works by the connection string changing, and that is exactly what must
+not happen here: the pool is keyed by a hash of the connection string, so a token inside it would
+produce a new pool every fifteen minutes — every live connection dropped, every prepared statement
+thrown away, the database asked to authenticate everything again, four times an hour, for a
+credential that changed and a database that did not. Written in once and never refreshed it is worse
+still: the pool survives and every connection opened after the token expires fails to authenticate,
+which looks like the database going down rather than like a credential running out.
+
+So the pool is opened from a `database/sql` connector rather than from a connection string, and the
+token is minted inside it, once per new connection. The pool key never sees one. A connection that is
+already open keeps working for as long as it is open; only a connection actually being opened pays
+for a token. Which is also why a provider should cache: connections are opened in bursts after an
+idle period, and `maxIdleConns` defaults to `maxOpenConns` precisely so that those bursts are rare.
+
+**Which providers exist is a property of the build.** Every one of them is a cloud SDK linked into
+the binary, and kube-crisp links no dependency a given build does not need — the same reason a driver
+is a registration rather than a switch — so the image published from this repository registers none.
+Naming a provider needs a binary that registers it; see [Adding a credential
+provider](../README.md#adding-a-credential-provider). A projection naming one this build does not
+have is refused when it is compiled, by name, with the providers it does have — the same place, and
+the same `Ready` condition, as a projection naming an unknown driver.
+
+`postgres`, `cockroach` and `mysql` only. SQLite is a local file with no password and no connection,
+and the CRD refuses `auth` on it outright.
+
+**IAM authentication over an unencrypted connection is refused, not warned about.** An ordinary
+plaintext connection is only logged about, because a password in a Secret is a shared secret and an
+operator who puts one on a plaintext connection has decided something about the network it crosses —
+a unix socket, a sidecar proxy, a host it never leaves. A minted token is a bearer credential: valid for
+whoever holds it, for the quarter of an hour it lives, with nothing else standing between it and the
+database. It is also sent as typed — an RDS IAM token is a signed URL checked as a cleartext password
+— so there is no challenge-response hiding it on the wire. Refusing costs nothing, either, because
+the cloud refuses it too: RDS requires TLS for IAM authentication and drops the connection itself. So
+this is not a policy imposed on an operator, it is the database's own rule, said while the projection
+is being compiled and with the name of the setting in it. Write `sslmode=require` for PostgreSQL or
+`tls=true` for MySQL.
+
+That refusal is what makes the MySQL side work at all: an IAM token is checked with the
+`mysql_clear_password` plugin, which the driver will not use unless it is told to, and kube-crisp
+turns it on for a data source with `auth` — safely, because it has already established that the
+connection is encrypted.
+
 ## Registration
 
 kube-crisp creates the `APIService` that delegates each projected group to it, corrects it if it

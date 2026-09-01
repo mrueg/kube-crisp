@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -257,6 +258,37 @@ func Validate(p *crispv1alpha1.CustomResourceProjection) error {
 	if _, known := crispsql.Lookup(p.Spec.DataSource.Driver); !known {
 		return fmt.Errorf("projection %s: spec.dataSource.driver is %q; this build knows %s",
 			p.Name, p.Spec.DataSource.Driver, strings.Join(crispsql.RegisteredDrivers(), ", "))
+	}
+
+	// A provider this build does not have has to be refused here, while the
+	// projection is being compiled, and not when a connection is opened.
+	//
+	// This is the trap the CockroachDB session-variable bug fell into, described
+	// at length on sessionDialectFor in pkg/sql/session.go: a capability granted
+	// in one place and denied in another, where the denial is on a path nobody
+	// watches. A projection whose auth provider is missing would compile clean,
+	// report Ready, and then fail every request with a message about a
+	// credential provider — for a build that could never have served it. The
+	// answer belongs in the Ready condition, alongside an unknown driver, where
+	// it names the providers this build does register.
+	if auth := p.Spec.DataSource.Auth; auth != nil {
+		if !crispsql.SupportsCredentialProviders(p.Spec.DataSource.Driver) {
+			return fmt.Errorf(
+				"projection %s: spec.dataSource.auth needs a driver that can be handed a password per "+
+					"connection, which %q is not",
+				p.Name, p.Spec.DataSource.Driver)
+		}
+		if _, known := crispsql.LookupCredentialProvider(auth.Provider); !known {
+			registered := crispsql.RegisteredCredentialProviders()
+			if len(registered) == 0 {
+				return fmt.Errorf(
+					"projection %s: spec.dataSource.auth.provider is %q; this build registers no credential "+
+						"provider at all, so it has to be built with one linked in",
+					p.Name, auth.Provider)
+			}
+			return fmt.Errorf("projection %s: spec.dataSource.auth.provider is %q; this build knows %s",
+				p.Name, auth.Provider, strings.Join(registered, ", "))
+		}
 	}
 
 	if timeout := p.Spec.DataSource.StatementTimeout; timeout != nil && *timeout &&
@@ -542,9 +574,57 @@ func (e EnvDSNResolver) ResolveRead(ctx context.Context, ds crispv1alpha1.DataSo
 // always belonged: a prepared statement is cached by its SQL text, and the
 // statement timeout is set with SET LOCAL inside the transaction that runs the
 // query, so neither is a property of the connection.
+//
+// And the auth stanza, when there is one — but never the credential it produces.
+//
+// That is the whole reason a minted password is a connection's property rather
+// than a pool's. A token in the connection string would land in this hash, so
+// every refresh would be a different key: a new pool four times an hour, live
+// connections dropped, the prepared statement cache emptied, and the database
+// asked to authenticate everything again, for a credential that changed but a
+// database that did not. Keyed on the auth stanza instead, the key is as stable
+// as the connection string is, and two projections that reach one database with
+// one provider share one pool exactly as they always did.
+//
+// The stanza itself has to be in there, though: two projections with the same
+// connection string and different providers are two different ways of
+// authenticating, and sharing a pool between them would silently give both
+// whichever one opened it first.
+//
+// A data source with no auth hashes exactly what it hashed before, so no pool
+// key in an existing deployment moves.
 func PoolKey(ds crispv1alpha1.DataSource, dsn string) string {
-	digest := sha256.Sum256([]byte(dsn))
-	return ds.Driver + "#" + hex.EncodeToString(digest[:4])
+	if ds.Auth == nil {
+		digest := sha256.Sum256([]byte(dsn))
+		return ds.Driver + "#" + hex.EncodeToString(digest[:4])
+	}
+
+	digest := sha256.New()
+	_, _ = digest.Write([]byte(dsn))
+	_, _ = digest.Write([]byte(authFingerprint(*ds.Auth)))
+	return ds.Driver + "#" + hex.EncodeToString(digest.Sum(nil)[:4])
+}
+
+// authFingerprint renders an auth stanza as something stable enough to hash.
+//
+// Sorted, because Go's map iteration is not, and a pool key that changed
+// between two syncs of an unchanged projection would rebuild the pool on a coin
+// toss. Length-prefixed, so that a provider and an option cannot be arranged to
+// produce the same bytes as a different provider and a different option.
+func authFingerprint(auth crispv1alpha1.DataSourceAuth) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "%d:%s", len(auth.Provider), auth.Provider)
+
+	keys := make([]string, 0, len(auth.Options))
+	for key := range auth.Options {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := auth.Options[key]
+		fmt.Fprintf(&out, "|%d:%s=%d:%s", len(key), key, len(value), value)
+	}
+	return out.String()
 }
 
 // PoolLabel names a data source in metrics. It is the pool key, which carries

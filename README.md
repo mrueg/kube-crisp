@@ -387,23 +387,38 @@ attaches build provenance.
   encoded to protobuf — the same reason custom resources cannot be. Clients negotiate JSON, YAML or
   CBOR instead, which is what every Kubernetes client already does for a custom resource.
 - **Adding a driver is a registration, within limits.** `spec.dataSource.driver` names a registered
-  driver and the registry is open, which covers a database that differs only in placeholders,
-  session variables, or whether it can be told to abort a statement — CockroachDB ships as its own
-  driver for exactly that reason, being PostgreSQL without `LISTEN`/`NOTIFY`. It does not cover one
-  that writes back rows differently: detecting whether a statement returns rows looks for
-  `RETURNING`, so SQL Server's `OUTPUT` needs more than a registration. Registering one is not quite
-  all of it either — `spec.dataSource.driver` carries an enum, so the CRD has to list the name as
-  well or the API server rejects the projection before any of this is reached. A test compares the
-  two.
+  driver and the registry is open, which covers a database whose differences are the ones the
+  `Driver` struct already states — which of session variables, statement timeouts and notifications
+  it claims, and what its connection string needs before it is opened. CockroachDB ships as its own
+  driver for exactly that reason, being PostgreSQL without `LISTEN`/`NOTIFY`. Four things are more
+  than a registration, and each of them is quiet in its own way. Placeholders are a choice of two,
+  `$N` and `?`, and the rewriter emits nothing else, so SQL Server's `@pN` is a third style to add
+  rather than a field to set. Detecting whether a statement answers with the rows it wrote looks for
+  the word `RETURNING`, so SQL Server's `OUTPUT` is read as a write with nothing to return, and the
+  client is told its object was not found for a write that in fact landed. Session variables are set
+  by a statement picked from a closed set keyed on the driver's name, so a driver registered with
+  `SessionVariables: true` that is not in that set loads cleanly and then fails on the first request
+  that binds one. And the CRD pins driver names in more than the enum: CEL rules allow `watch.notify`
+  only for `postgres` and `statementTimeout` only for `postgres` and `cockroach`, so a driver
+  registered with `Notifications: true` and added to the enum — everything
+  [Adding a driver](#adding-a-driver) asks for — is still refused by the API server the moment a
+  projection configures the capability that driver declared. Tests compare the enum and both rules against what the registry claims, so a gap
+  between them is a CI failure rather than something found in a cluster.
 - **The table has to exist.** kube-crisp projects rows; it does not create or migrate tables. A
   projection whose table is missing reports `CompilationFailed` with the database's own message and
   keeps retrying, so it starts serving once the table appears — and `status.requiredSchema` says what
   the table would have to contain, for handing to whatever manages the schema.
-- **No subresource beyond `/status` and `/scale`.**
+- **`/status` and `/scale` are the only subresources**, which is parity rather than a shortfall:
+  those two are the only ones Kubernetes defines for a custom resource, so there is no third a
+  projection could be missing. Both are served — `/status` owned separately from the rest of the
+  object, so a controller writing status cannot walk over a spec, and `/scale` so `kubectl scale`
+  and the horizontal pod autoscaler work against a table.
 - **Watch history is bounded** by `watch.historySize` and lives in memory, so it is lost on restart
   and not shared between replicas — but a projection that maps a `resourceVersion` and has a
-  `deletedQuery` is resumed from the database instead of relisting, which survives both. Without
-  tombstones a replay could not report removals, so those clients still relist.
+  `deletedQuery` is resumed from the database instead of relisting, which survives both for as long
+  as the gap is a short one: past the greater of the collection size and 100 changed rows the replay
+  would cost more than the relist it is avoiding and is refused, as it is if either query errors.
+  Without tombstones a replay could not report removals, so those clients still relist.
 - **Multiple replicas need a mapped `resourceVersion`.** The version a list reports is derived from
   the data, so every replica agrees — but only when the projection maps a version column. Without
   one, each replica falls back to its own counter and must run alone. With leader election on — the

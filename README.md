@@ -347,6 +347,17 @@ to a database as a password: `--credential-token-file-dirs` says where
 credentials live, and defaults to one directory that exists for this and nothing
 else. See [A credential kept in a file](docs/reference.md#a-credential-kept-in-a-file).
 
+**`token-command` is registered too and runs nothing** until an operator sets
+`--credential-command-dir`. It is for the tool that prints a credential and
+exits rather than writing one, and it is treated as the escalation it is:
+running a command inside the API server pod means running as the server, and a
+projection is a cluster object, so a boolean switch would hand that to whoever
+can write one. The flag names a directory the operator filled instead, and a
+projection names one file in it by its bare name with no arguments — a choice
+among things the operator wrote, the same shape as choosing among the providers
+a build linked. Prefer `token-file` where you can. See [A credential printed by a
+command](docs/reference.md#a-credential-printed-by-a-command-which-an-operator-has-to-turn-on).
+
 ## Development
 
 The e2e suite is split so it does not have to be run whole. `make e2e-up` provisions the cluster and

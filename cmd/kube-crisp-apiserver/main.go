@@ -3,16 +3,29 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/component-base/cli"
 
 	"github.com/mrueg/kube-crisp/pkg/cmd/server"
+	"github.com/mrueg/kube-crisp/pkg/credentials/rdsiam"
 	"github.com/mrueg/kube-crisp/pkg/version"
 )
 
 func main() {
+	// Before the server starts, so that a projection naming the provider is
+	// compiled against a registry that already has it -- and so that `validate`,
+	// which needs no cluster and no database, still checks a projection against
+	// the providers the build serving it will have. Registration fails only on a
+	// name collision with another provider this binary registered, which is a
+	// mistake here rather than in a cluster, hence a refusal to start.
+	if err := rdsiam.Register(); err != nil {
+		fmt.Fprintf(os.Stderr, "registering the AWS RDS IAM credential provider: %v\n", err)
+		os.Exit(1)
+	}
+
 	ctx := genericapiserver.SetupSignalContext()
 
 	options := server.NewCrispServerOptions(os.Stdout, os.Stderr)

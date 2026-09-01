@@ -21,12 +21,16 @@
 //	    options:
 //	      region: eu-central-1     # optional; read off the endpoint otherwise
 //
-// This is a module of its own, and deliberately. Linking it pulls in fifteen AWS
-// SDK modules that a build projecting a SQLite file can never reach, and
-// kube-crisp links no dependency a given build does not need. So the binary
-// published from the kube-crisp repository does not have this, and a build that
-// wants it is one somebody assembled — see cmd/kube-crisp-apiserver in this
-// module for the whole of what that takes.
+// Linked into the server rather than kept in a module of its own. It costs
+// fifteen AWS SDK modules and about 4 MB of binary that a build projecting a
+// SQLite file never reaches, which is a real cost and was weighed: the
+// alternative made the published server unable to authenticate to RDS at all,
+// so anybody wanting it had to assemble a build first. A provider nobody can
+// use without rebuilding is not a provider that ships.
+//
+// The registry stays open either way. A build wanting a provider this
+// repository does not have registers its own the same way cmd does below, and
+// pays for that one alone.
 package rdsiam
 
 import (

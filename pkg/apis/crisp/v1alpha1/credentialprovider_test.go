@@ -15,11 +15,11 @@ import (
 // A driver is linked into the binary, so the CRD that binary ships with can
 // enumerate exactly what it accepts, and TestTheDriverEnumListsEveryRegistered
 // Driver holds the two together. Providers cannot be enumerated that way: the
-// build published from this repository registers none — every provider is a
-// cloud SDK it would otherwise link for nothing — so an enum here would be an
-// empty list that rejects everything, and a build that added one would have to
-// remember to widen it. The same class of bug the enum test exists for, with
-// the failure moved one step further away.
+// published build registers aws-rds-iam and a build wanting another registers
+// it in its own main, without touching this repository or the CRD it ships. An
+// enum would reject that provider at apply time on a build that has it, and
+// widening it would mean a fork. The same class of bug the enum test exists
+// for, with the failure moved one step further away.
 //
 // So the field is constrained by shape and not by set, and this is the test
 // that says the shape admits what the registry holds. A build that registers
@@ -30,18 +30,17 @@ func TestTheAuthProviderFieldAcceptsEveryRegisteredCredentialProvider(t *testing
 	crd := readCRD(t)
 	field := authProviderSchema(t, crd)
 
-	// The registry as this build holds it. Empty in the published build, which
-	// is why the table below exists as well.
+	// The registry as this build holds it.
 	for _, name := range crispsql.RegisteredCredentialProviders() {
 		if err := field.accepts(name); err != nil {
 			t.Errorf("this build registers the %q credential provider and the CRD would reject it: %v", name, err)
 		}
 	}
 
-	// And the shapes a provider name is likely to take, so that the published
-	// build — which registers nothing — still checks that the field is usable
-	// at all. Every name here is one a provider in this project's own
-	// documentation carries or plausibly would.
+	// And the shapes a provider name is likely to take, since the ones this
+	// build holds are not the ones a custom build will add. Every name here is
+	// one a provider in this project's own documentation carries or plausibly
+	// would.
 	for _, name := range []string{"aws-rds-iam", "gcp-cloudsql-iam", "azure-entra", "vault"} {
 		if err := field.accepts(name); err != nil {
 			t.Errorf("the CRD rejects %q, which is the shape a credential provider name has: %v", name, err)

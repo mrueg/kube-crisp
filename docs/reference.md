@@ -958,23 +958,21 @@ connection is encrypted.
 
 ### AWS RDS IAM
 
-The one provider this repository ships, in `providers/aws`. RDS accepts, in place of a password, a
-URL signed with SigV4 by an identity holding `rds-db:connect` on the database user; it is valid for
-fifteen minutes and there is no extra service to run.
+The provider this server ships with. RDS accepts, in place of a password, a URL signed with SigV4 by
+an identity holding `rds-db:connect` on the database user; it is valid for fifteen minutes and there
+is no extra service to run.
 
-It is a **Go module of its own**, and the binary published here does not contain it. Linking it pulls
-in fifteen AWS SDK modules and about 4 MB of binary that a build projecting a SQLite file can never
-reach. A build tag would not have helped: a file excluded by a tag still contributes its imports to
-the module graph, so `go.mod` and `go.sum` would carry the SDK either way and so would every project
-that depends on kube-crisp as a library. A separate module is the only shape in which the cost is
-paid by the builds that want it.
+It is **linked into the published binary and image**, so a projection can use it without a rebuild.
+That costs fifteen AWS SDK modules and about 4 MB of binary which a build projecting a SQLite file
+never reaches — weighed against a provider nobody could use without first assembling their own
+server, which is not a provider that ships.
 
-Building one is a `main` function and a `go.mod` — see
-[`providers/aws/cmd/kube-crisp-apiserver`](../providers/aws/cmd/kube-crisp-apiserver/main.go), which
-is the stock server plus `rdsiam.Register()`:
+The registry stays open, and adding another is one line in a `main` — see
+[`cmd/kube-crisp-apiserver`](../cmd/kube-crisp-apiserver/main.go), which registers this one the same
+way:
 
 ```go
-import rdsiam "github.com/mrueg/kube-crisp/providers/aws"
+import "github.com/mrueg/kube-crisp/pkg/credentials/rdsiam"
 
 if err := rdsiam.Register(); err != nil { ... }
 ```

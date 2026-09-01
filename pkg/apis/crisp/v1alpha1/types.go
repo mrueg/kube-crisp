@@ -397,12 +397,14 @@ type DataSource struct {
 // password, and hands it its settings.
 //
 // There is deliberately no enum on Provider, which the driver field has. The
-// two are not the same kind of set: a driver is linked into the binary and the
-// CRD that binary ships with can list what it accepts, whereas the providers a
-// build registers are whatever whoever assembled it chose, and the CRD in this
-// repository would have to enumerate an empty set. So the API accepts any
-// well-formed name and the projection is refused when it is compiled, by name,
-// with the providers this build does have. That is the same place a projection
+// two are not the same kind of set. Every driver a build can serve is linked
+// into it, so the CRD that binary ships with lists exactly what it accepts;
+// providers are open in a way drivers are not -- the server ships aws-rds-iam
+// and a build wanting another registers it in main, without touching this
+// repository or its CRD. An enum would reject that provider at apply time, for
+// a build that has it. So the API accepts any well-formed name and the
+// projection is refused when it is compiled, by name, with the providers this
+// build does have. That is the same place a projection
 // naming an unknown driver is refused, and the same place it is read.
 type DataSourceAuth struct {
 	// Provider names a registered credential provider, such as "aws-rds-iam".

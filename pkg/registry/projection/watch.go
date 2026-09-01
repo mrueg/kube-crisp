@@ -267,21 +267,6 @@ func (c *watchCache) Watch(ctx context.Context, namespace string, selector label
 		}
 	}
 
-	// A client resuming from beyond the in-memory window may still be
-	// answerable from the database. Attempted before the lock, because reading
-	// it is a round trip and the cache lock is held by every List.
-	//
-	// The check here is advisory and the authoritative one happens below: if
-	// the ring turns out to cover the version after all, memory wins.
-	var (
-		fromDatabase   []recordedEvent
-		databaseReplay bool
-	)
-	if !sendInitialEvents && resourceVersion != "" && resourceVersion != "0" &&
-		!c.canReplayFromMemory(resourceVersion) {
-		fromDatabase, databaseReplay = c.replayFromDatabase(ctx, resourceVersion, gvk)
-	}
-
 	c.mu.Lock()
 
 	first := len(c.watchers) == 0
@@ -309,14 +294,22 @@ func (c *watchCache) Watch(ctx context.Context, namespace string, selector label
 	//     for and believing it resumed.
 	replay := sendInitialEvents || resourceVersion == "" || resourceVersion == "0"
 
-	var missed []recordedEvent
+	var (
+		missed         []recordedEvent
+		databaseReplay bool
+	)
 	if !replay {
 		var resumable bool
 		missed, resumable = c.replayable(resourceVersion)
-		if !resumable && databaseReplay {
-			missed, resumable = fromDatabase, true
-		}
-		if !resumable {
+
+		// Beyond the in-memory window the database may still be able to
+		// answer, but reading it is a round trip and this lock is held by
+		// every List — so that read happens below, after this watcher is
+		// registered and with the lock released. All that is decided here is
+		// whether the projection could answer that way at all, which is two
+		// nil checks and no query.
+		databaseReplay = !resumable
+		if databaseReplay && !c.hasDatabaseHistory() {
 			c.nextID--
 			c.mu.Unlock()
 			w.terminate()
@@ -378,6 +371,36 @@ func (c *watchCache) Watch(ctx context.Context, namespace string, selector label
 		slices.SortFunc(snapshot, func(a, b *unstructured.Unstructured) int {
 			return strings.Compare(cacheKey(a), cacheKey(b))
 		})
+	}
+
+	// What the client missed, read out of the database — and read here, for the
+	// same reason the snapshot above is: after this watcher is registered, and
+	// with the cache lock released.
+	//
+	// Registration is the half that was missing. The read used to happen before
+	// the lock was ever taken, so a poll landing in the window between it and
+	// the watcher joining c.watchers snapshotted its targets without this
+	// watcher and broadcast past it — while its rows were committed after the
+	// replay's own query and so were not in the replay either. They were in
+	// neither half. The watcher was admitted with no 410 and never heard about
+	// them again, which is exactly the silent loss the database replay exists
+	// to avoid.
+	//
+	// Registered first, a poll in that window is delivered to this watcher and
+	// prepend puts the replay in front of it. A row that the replay and the
+	// poll both carry then arrives twice, which a watch is allowed to do — and
+	// is the direction to be wrong in.
+	if databaseReplay {
+		fromDatabase, answered := c.replayFromDatabase(ctx, resourceVersion, gvk)
+		if !answered {
+			// Registered already, so it has to be taken back out — and stop is
+			// what also leaves the poll group when this was the only watcher.
+			c.stop(w.id)
+			w.terminate()
+			return nil, apierrors.NewResourceExpired(fmt.Sprintf(
+				"too old resource version: %s (%s)", resourceVersion, version))
+		}
+		missed = fromDatabase
 	}
 
 	initial := make([]watch.Event, 0, len(snapshot)+len(missed)+1)
@@ -1410,18 +1433,16 @@ func (r *REST) Watch(ctx context.Context, options *metainternalversion.ListOptio
 // noise: re-reading a handful of rows is not cheaper than being handed them.
 const minDatabaseReplay = 100
 
-// canReplayFromMemory reports whether the history ring covers a version.
+// hasDatabaseHistory reports whether this projection could answer a resume out
+// of the database at all.
 //
-// Advisory, and taken without committing to anything: the authoritative check
-// happens again under the lock that registers the watcher. This one only
-// decides whether it is worth asking the database, which cannot be done while
-// holding the cache lock.
-func (c *watchCache) canReplayFromMemory(version string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	_, ok := c.replayable(version)
-	return ok
+// Both queries are required. Reading forward from a version needs the
+// incremental one, and saying what went away needs the deletion one — without
+// that a replay reports every change and no removal, so the client keeps
+// objects that are gone. It is a pair of nil checks and no query, which is what
+// lets it be asked with the cache lock held.
+func (c *watchCache) hasDatabaseHistory() bool {
+	return c.incremental != nil && c.deleted != nil
 }
 
 // replayFromDatabase answers a watcher resuming from beyond the in-memory
@@ -1444,7 +1465,7 @@ func (c *watchCache) replayFromDatabase(
 	since string,
 	gvk schema.GroupVersionKind,
 ) ([]recordedEvent, bool) {
-	if c.incremental == nil || c.deleted == nil || since == "" {
+	if !c.hasDatabaseHistory() || since == "" {
 		return nil, false
 	}
 

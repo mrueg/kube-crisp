@@ -11,19 +11,32 @@ import (
 
 	"github.com/mrueg/kube-crisp/pkg/cmd/server"
 	"github.com/mrueg/kube-crisp/pkg/credentials/rdsiam"
+	"github.com/mrueg/kube-crisp/pkg/credentials/tokenfile"
 	"github.com/mrueg/kube-crisp/pkg/version"
 )
 
 func main() {
-	// Before the server starts, so that a projection naming the provider is
-	// compiled against a registry that already has it -- and so that `validate`,
+	// Before the server starts, so that a projection naming a provider is
+	// compiled against a registry that already has it — and so that `validate`,
 	// which needs no cluster and no database, still checks a projection against
-	// the providers the build serving it will have. Registration fails only on a
-	// name collision with another provider this binary registered, which is a
+	// the providers the build serving it will have. Registration fails only on
+	// a name collision with another provider this binary registered, which is a
 	// mistake here rather than in a cluster, hence a refusal to start.
-	if err := rdsiam.Register(); err != nil {
-		fmt.Fprintf(os.Stderr, "registering the AWS RDS IAM credential provider: %v\n", err)
-		os.Exit(1)
+	//
+	// Adding a provider is one more line here. What a provider is allowed to
+	// reach is not settled here either way: tokenfile reads only where an
+	// operator's flag permits, parsed after this returns.
+	for _, register := range []struct {
+		name string
+		fn   func() error
+	}{
+		{rdsiam.ProviderName, rdsiam.Register},
+		{tokenfile.ProviderName, tokenfile.Register},
+	} {
+		if err := register.fn(); err != nil {
+			fmt.Fprintf(os.Stderr, "registering the %s credential provider: %v\n", register.name, err)
+			os.Exit(1)
+		}
 	}
 
 	ctx := genericapiserver.SetupSignalContext()

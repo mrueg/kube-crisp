@@ -323,17 +323,29 @@ what keeps a fifteen-minute credential from rebuilding the pool four times an
 hour. See [Passwords that are minted rather than
 stored](docs/reference.md#passwords-that-are-minted-rather-than-stored).
 
-The reason this is a registration and not a flag is that the set is open: a
-provider is a cloud SDK, and no build should have to carry every cloud's. A
-projection naming one this build does not have is refused when it is compiled,
-with that said plainly, rather than failing at the first query.
+The reason this is a registration and not a flag is that the set is open, and a
+provider that talks to a cloud is that cloud's SDK. A projection naming one this
+build does not have is refused when it is compiled, with that said plainly,
+rather than failing at the first query.
 
-**AWS RDS IAM** is the one this server ships with, registered in
-[`cmd/kube-crisp-apiserver`](cmd/kube-crisp-apiserver/main.go) — a projection can
-use it with the published image and no rebuild. That puts the AWS SDK in this
-server's dependencies, which is the price of the provider being usable rather
-than assemblable. A build wanting another writes the same one-line registration
-against its own `main`, and carries that SDK alone. See [AWS RDS IAM](docs/reference.md#aws-rds-iam).
+**AWS RDS IAM** is registered in
+[`cmd/kube-crisp-apiserver`](cmd/kube-crisp-apiserver/main.go), so a projection
+can use it with the published image and no rebuild. That puts the AWS SDK in
+this server's dependencies, which is the price of the provider being usable
+rather than assemblable. A build wanting another cloud's writes the same
+one-line registration against its own `main`, and carries that SDK alone. See
+[AWS RDS IAM](docs/reference.md#aws-rds-iam).
+
+**`token-file`** is registered too, and links nothing: it mints no token, it
+reads the one something else already refreshes into a file on a mounted volume —
+a projected ServiceAccount token, a Vault Agent sidecar, a cloud token refresher.
+The file is read per connection, so a rewritten one is picked up without
+restarting anything. Which files a projection may name is an operator's decision
+rather than the projection's, since a projection is a cluster object and an
+unconstrained path would be a way to read the server's own identity and hand it
+to a database as a password: `--credential-token-file-dirs` says where
+credentials live, and defaults to one directory that exists for this and nothing
+else. See [A credential kept in a file](docs/reference.md#a-credential-kept-in-a-file).
 
 ## Development
 

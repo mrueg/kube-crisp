@@ -125,11 +125,12 @@ func LookupCredentialProvider(name string) (CredentialProvider, bool) {
 
 // RegisteredCredentialProviders lists what a projection may name, sorted.
 //
-// Ordinarily empty: the binary this repository builds registers no provider at
-// all, because every one of them is a cloud SDK it would otherwise link for
-// nothing. It is what an error about an unknown provider offers instead, and
-// "this build has none" is the right answer to give somebody who has just
-// deployed the stock image and asked it for AWS credentials.
+// Short, and sometimes empty. A provider that talks to a cloud is that cloud's
+// SDK linked into the binary, so the one this repository builds carries none of
+// them and registers only what needs nothing — reading a credential out of a
+// file. This is what an error about an unknown provider offers instead, so that
+// somebody who deployed the stock image and asked it for AWS credentials is
+// told what it does have rather than only what it does not.
 func RegisteredCredentialProviders() []string {
 	credentialsMu.RLock()
 	defer credentialsMu.RUnlock()

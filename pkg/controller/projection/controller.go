@@ -585,8 +585,14 @@ func (c *Controller) sync(ctx context.Context) error {
 			"projection", name)
 	}
 
+	// Creation times, for settling a resource two projections both claim. Kept
+	// here because the candidate is the only place the object itself is in
+	// hand; a compilation does not carry one.
+	created := make(map[string]metav1.Time, len(candidates))
+
 	for _, cand := range candidates {
 		name := cand.projection.Name
+		created[name] = cand.projection.CreationTimestamp
 
 		prepared, err := c.compiler.Prepare(ctx, cand.projection)
 		if err != nil {
@@ -629,6 +635,24 @@ func (c *Controller) sync(ctx context.Context) error {
 		resources = append(resources, compiled...)
 	}
 
+	// A resource two projections both claim used to fail the whole rebuild, and
+	// with it every other projection: sync returned before c.compiled was
+	// replaced and before hasSynced was set, so on a cold start the
+	// projections-synced readiness gate never closed and the server served
+	// nothing at all. One projection's mistake, and the only evidence a line in
+	// the log.
+	//
+	// Settled here instead, the way a compile failure is: the projections that
+	// lose a claim are failed by name and every other projection installs.
+	// Before the retirement pass below, so that a loser that was serving has
+	// its storage released rather than left polling its table with nobody
+	// reading the result.
+	for name, err := range resolveClaims(surviving, created, c.compiled) {
+		delete(surviving, name)
+		failures[name] = err
+		klog.ErrorS(err, "projection claims a resource another projection serves", "projection", name)
+	}
+
 	// Anything gone from the cluster entirely keeps whatever it had until here
 	// and then loses it. A projection that merely failed to compile is in
 	// surviving and is not retired: it is still serving what it last compiled
@@ -637,6 +661,13 @@ func (c *Controller) sync(ctx context.Context) error {
 		if _, still := surviving[name]; !still {
 			retired = append(retired, previous.resources...)
 		}
+	}
+
+	// Rebuilt from what survived rather than carried along, since a projection
+	// that lost a claim has to take its resources out of the set with it.
+	resources = resources[:0]
+	for _, compiled := range surviving {
+		resources = append(resources, compiled.resources...)
 	}
 
 	if err := c.router.Rebuild(resources); err != nil {
@@ -1351,4 +1382,89 @@ func (c *Controller) warnIfUnversioned(p *crispv1alpha1.CustomResourceProjection
 		"projection", p.Name, "resource", resource,
 		"fix", "map a column that advances on every write to mapping.resourceVersion, "+
 			"or run a single replica")
+}
+
+// resourceClaim identifies the API path a projection asks to serve. Two
+// projections naming the same one is the conflict resolveClaims settles.
+type resourceClaim struct {
+	group   string
+	version string
+	plural  string
+}
+
+func (k resourceClaim) String() string {
+	return fmt.Sprintf("%s.%s/%s", k.plural, k.group, k.version)
+}
+
+// resolveClaims decides which projection serves a resource that more than one
+// claims, and returns an error for each projection that loses.
+//
+// The router refuses to install two storages at one path, and rightly: the
+// second would silently replace the first, so a request for somebody's rows
+// would be answered from somebody else's table. What it cannot do is say which
+// projection should give way, so it failed the rebuild -- taking every
+// unrelated projection down with the pair that disagreed.
+//
+// Losing is decided so that the answer does not move:
+//
+//   - A projection already serving the resource keeps it. Applying a
+//     conflicting projection must not take a working API group away from the
+//     one that had it; the mistake is in the object just applied, and that is
+//     the object that should fail.
+//   - Otherwise the older projection wins, which on a cold start usually
+//     re-elects whoever was serving before the restart.
+//   - Then the name, so that two created in the same instant still settle the
+//     same way in every replica.
+//
+// A projection loses whole. One that claims two resources and conflicts on one
+// of them serves neither: half a projection is a surface whose absent half
+// looks like a projection that was never applied.
+func resolveClaims(
+	surviving map[string]compilation,
+	created map[string]metav1.Time,
+	serving map[string]compilation,
+) map[string]error {
+	names := make([]string, 0, len(surviving))
+	for name := range surviving {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		a, b := names[i], names[j]
+		if _, ai := serving[a]; ai != mapHas(serving, b) {
+			return ai
+		}
+		at, bt := created[a], created[b]
+		if !at.Equal(&bt) {
+			return at.Before(&bt)
+		}
+		return a < b
+	})
+
+	claimed := make(map[resourceClaim]string, len(surviving))
+	losses := map[string]error{}
+	for _, name := range names {
+		held := false
+		for _, res := range surviving[name].resources {
+			claim := resourceClaim{group: res.Group, version: res.Version, plural: res.Plural}
+			if other, taken := claimed[claim]; taken {
+				losses[name] = fmt.Errorf(
+					"resource %s is claimed by projection %q as well, which serves it", claim, other)
+				held = true
+				break
+			}
+		}
+		if held {
+			continue
+		}
+		for _, res := range surviving[name].resources {
+			claimed[resourceClaim{group: res.Group, version: res.Version, plural: res.Plural}] = name
+		}
+	}
+	return losses
+}
+
+// mapHas keeps the comparison in resolveClaims' sort readable.
+func mapHas(m map[string]compilation, name string) bool {
+	_, ok := m[name]
+	return ok
 }

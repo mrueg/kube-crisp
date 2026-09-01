@@ -860,6 +860,22 @@ and `--apiservice-service-port`, supply `--apiservice-ca-bundle-file` if you hav
 certificate, or turn the whole thing off with `--manage-apiservices=false` — in which case
 `examples/apiservice.yaml` is the object to write per group.
 
+### Two projections claiming one resource
+
+`plural.group/version` identifies an API path, and only one projection can answer it. When two claim
+the same one, the projection already serving it keeps it and the other is failed by name, with the
+conflict in its `Ready` condition and its ClusterRole left alone. Nothing else changes: every other
+projection installs, and the server becomes ready as usual.
+
+Whoever is serving wins, because the mistake is in the object just applied and applying it must not
+take a working API group away from whichever projection had it. On a cold start nothing is serving
+yet, so the older projection wins instead — usually re-electing whoever was serving before the
+restart — with the name as the tie-break, so every replica settles on the same answer.
+
+A projection loses whole. One claiming two resources and conflicting on one of them serves neither,
+since a half-installed projection is a surface whose missing half looks exactly like a projection
+nobody applied.
+
 Applying one by hand while the reconciler is on is the case worth avoiding: it carries no
 `managed-by` label, so the server will not touch it, and it outlives the projection it was written
 for. The aggregation layer then reports that group as unavailable, which degrades `kubectl

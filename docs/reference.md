@@ -928,13 +928,16 @@ already open keeps working for as long as it is open; only a connection actually
 for a token. Which is also why a provider should cache: connections are opened in bursts after an
 idle period, and `maxIdleConns` defaults to `maxOpenConns` precisely so that those bursts are rare.
 
-**Which providers exist is a property of the build.** Every one of them is a cloud SDK linked into
-the binary, and kube-crisp links no dependency a given build does not need — the same reason a driver
-is a registration rather than a switch — so the image published from this repository registers none.
-Naming a provider needs a binary that registers it; see [Adding a credential
-provider](../README.md#adding-a-credential-provider). A projection naming one this build does not
-have is refused when it is compiled, by name, with the providers it does have — the same place, and
-the same `Ready` condition, as a projection naming an unknown driver.
+**Which providers exist is a property of the build.** A provider that talks to a cloud is that
+cloud's SDK linked into the binary, and kube-crisp links no dependency a given build does not need —
+the same reason a driver is a registration rather than a switch — so the image published from this
+repository carries none of them. Naming one needs a binary that registers it; see [Adding a
+credential provider](../README.md#adding-a-credential-provider). A projection naming a provider this
+build does not have is refused when it is compiled, by name, with the providers it does have — the
+same place, and the same `Ready` condition, as a projection naming an unknown driver.
+
+What the published build does register is `token-file`, below, which needs no SDK because it does not
+mint anything: the token comes from whatever already refreshes it, and kube-crisp reads it.
 
 `postgres`, `cockroach` and `mysql` only. SQLite is a local file with no password and no connection,
 and the CRD refuses `auth` on it outright.
@@ -1008,6 +1011,77 @@ still shaking hands, and the result is an intermittent authentication failure un
 about the least diagnosable thing this could do. Signing is local — SigV4 over a URL, with no request
 to AWS — so the cache is not about the cost of a token; it is about not signing eight of them when a
 pool refills after an idle period.
+
+### A credential kept in a file
+
+`token-file` is the cloud-agnostic shape of the same idea, and it is registered in the published
+build. Something else mints the credential and keeps the current one in a file; kube-crisp reads that
+file when it opens a connection. In Kubernetes that something else has been written several times
+over — a projected ServiceAccount token, a Vault Agent sidecar, a cloud token refresher, a Secrets
+Store CSI driver — and every one of them delivers the same way, as a file on a mounted volume,
+rewritten before it expires.
+
+```yaml
+dataSource:
+  driver: postgres
+  secretRef: {name: orders-db, namespace: kube-crisp}
+  auth:
+    provider: token-file
+    options:
+      path: /var/run/kube-crisp/credentials/orders-db
+```
+
+**The file is read on every connection and never held on to.** That is the property the whole seam
+exists for. A provider that read it once at startup would authenticate with a credential that stopped
+being valid an hour ago and fail every new connection in a way that reads as the database going down;
+writing it into the connection string instead would rebuild the pool each time the file changed.
+Reading it per connection means whoever rewrites the file has to do nothing else — no restart, no
+rolled deployment, no pool rebuilt — and the connections already open are not disturbed either.
+
+There is deliberately no cache, which is the opposite of the advice above, for the opposite reason.
+Caching is asked of a provider that *signs* a token, because signing has a cost and sometimes a bill.
+This reads a page the kernel already has, once per new connection, and connections are opened rarely
+by construction. A cache would buy microseconds and pay for them in staleness — a credential held for
+a few seconds after the writer replaced it is a connection that fails authentication for no visible
+reason.
+
+**Which files a projection may name is the operator's decision, not the projection's.** A
+`CustomResourceProjection` is a cluster object, so whoever can create one chooses the path; an
+unconstrained path would let them have the server read any file its process can — its own
+ServiceAccount token, its serving key, a Secret mounted for something else — and hand it to a
+database as a password. That is an escalation from "may define a projection" to "may exfiltrate the
+server's identity", and no option is worth it. So a path must be absolute and must lie inside a
+directory named by `--credential-token-file-dirs`, which defaults to `/var/run/kube-crisp/credentials`
+— a path nothing else in a container image uses, so that the default answer to "which files may a
+projection name" is "the ones somebody mounted here on purpose". A refresher that writes elsewhere,
+`/vault/secrets` or a projected token under `/var/run/secrets`, is named in that flag deliberately.
+Setting it to nothing permits nothing, and every projection naming the provider is then refused with
+the flag in the message rather than reported as an unknown provider, which would send somebody to
+rebuild a binary that already has it.
+
+The containment check is made twice: lexically when the projection is compiled, and again on the
+resolved path each time the file is read, because a symlink planted inside a permitted directory
+would otherwise point wherever it liked. Resolving per read is also what makes a projected volume
+work at all — Kubernetes writes those as a symlink into a timestamped directory and rotates them by
+swapping the link, so a resolution cached once would pin the pool to a directory the kubelet has
+since deleted.
+
+The failures are worth knowing from outside. A file that does not exist **when the projection is
+compiled** is only logged, because the refresher writing it and this server start in no particular
+order, and a projection failed for that race would stay failed after the race was over. A file that
+does not exist **when a connection is opened** fails that connection, naming the path. An empty file
+is refused rather than sent as an empty password, which would otherwise authenticate as whoever the
+database lets in without one. Anything larger than 64 KiB is refused rather than truncated — a
+credential cut in half is refused by the database with nothing pointing at the cause — and so is
+anything that is not a regular file, since a FIFO would block the connection opener until somebody
+wrote to it. The trailing newline is stripped, and nothing else is: almost everything that writes a
+file writes a line, and a database refusing a token because of a byte that does not print is the
+least diagnosable failure in this path. Spaces are left alone, because unlike a line ending they can
+be part of a credential somebody chose.
+
+Everything the seam refuses applies here unchanged. Whatever is in the file is a bearer credential
+sent as typed, so an unencrypted connection is refused when the projection is compiled, exactly as it
+is for a token minted from an SDK.
 
 ## Registration
 

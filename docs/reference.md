@@ -1092,6 +1092,20 @@ Not only namespaces holding projected objects: the controller sweeps every resou
 way. Installing a server that made that mistake stopped every namespace in the cluster from being
 deleted.
 
+### Patch types
+
+A projected resource accepts a JSON Patch (`kubectl patch --type=json`), a merge patch
+(`--type=merge`) and a server-side apply (`kubectl apply --server-side`). It does not accept a
+strategic merge patch — which is exactly what `kubectl patch` sends when no `--type` is given, so
+that is the one form of the command that has to be spelled out.
+
+The reason is the reason protobuf is missing. A strategic merge patch decides how to merge each
+field by reading `patchStrategy` and `patchMergeKey` struct tags off the Go type the object decodes
+into, and a projected object decodes into an unstructured map, which has neither. Custom resources
+have the identical problem and give the identical answer: the type is never offered, so a client
+that sends one is refused during content negotiation with a `415` naming the three that do work,
+rather than accepted and then failed halfway through the merge.
+
 ## What a projection needs from the database
 
 kube-crisp does not create tables. A projection whose table is missing compiles against the database

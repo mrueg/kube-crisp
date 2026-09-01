@@ -353,6 +353,14 @@ func (r *Router) Rebuild(resources []Resource) error {
 		container.Add(discovery.NewAPIGroupHandler(codecs, apiGroup).WebService())
 	}
 
+	// The routes are published before anything can reach them, so this is the
+	// last chance to correct what they claim. See narrowPatchTypes: the generic
+	// installer advertises strategic merge patch, which no projected kind can
+	// serve, and go-restful is what turns a Content-Type nothing consumes into
+	// a 415 rather than letting the request through to fail deeper.
+	accepted := narrowPatchTypes(container)
+	container.ServiceErrorHandler(serviceErrorHandler(codecs, accepted))
+
 	for _, res := range resources {
 		paths = append(paths, res.Path())
 	}

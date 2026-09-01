@@ -62,7 +62,7 @@ group while the server runs, and deleting it takes the group away again. No rest
 | | |
 |---|---|
 | **Read** | `get`, `list`, label and field selectors pushed down to the database where a column backs them, `resourceVersionMatch`, metadata-only requests, keyset pagination with `remainingItemCount`, optional caching |
-| **Write** | `create` (including `generateName`), `update`, `patch`, `delete`, `deleteCollection`, `dryRun`, with optimistic concurrency, and multi-statement writes in a transaction |
+| **Write** | `create` (including `generateName`), `update`, `patch` (JSON Patch, merge patch and apply — a custom resource's set, so not strategic merge), `delete`, `deleteCollection`, `dryRun`, with optimistic concurrency, and multi-statement writes in a transaction |
 | **Subresources** | `/status`, owned separately from the rest of the object, and `/scale`, so `kubectl scale` and the horizontal pod autoscaler work |
 | **Watch** | incremental polling — or `LISTEN`/`NOTIFY`, so a change wakes the watch in milliseconds rather than at the next tick — resumable from recent history, with periodic bookmarks and the `WatchList` protocol, so client-go informers work |
 | **Schema** | enforced on writes including `x-kubernetes-validations` CEL rules and ratcheting, defaults applied, unknown fields pruned or rejected, published as OpenAPI, and used by server-side apply |

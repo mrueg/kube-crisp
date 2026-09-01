@@ -40,6 +40,7 @@ func main() {
 	root.AddCommand(plugin.NewCommandCanI(os.Stdout, os.Stderr))
 	root.AddCommand(plugin.NewCommandPrune(os.Stdout, os.Stderr))
 	root.AddCommand(plugin.NewCommandSchema(os.Stdout, os.Stderr))
+	root.AddCommand(plugin.NewCommandStatus(os.Stdout, os.Stderr))
 
 	root.SetContext(ctx)
 	// Not os.Args[1:]: run under the name kubectl completes plugins through,

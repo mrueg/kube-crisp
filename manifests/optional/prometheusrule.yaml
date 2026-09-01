@@ -304,10 +304,15 @@ spec:
             description: >-
               A write invalidates the cache of the replica that served it and of
               no other, so a read routed elsewhere can be answered from an entry
-              that predates the write for as long as cacheTTL. The client cannot
-              tell which replica it reached, and the answer is old rather than
-              wrong, which looks exactly like not having written yet. A
-              projection whose clients read back what they wrote wants one
+              that predates the write. The client cannot tell which replica it
+              reached, and the answer is old rather than wrong, which looks
+              exactly like not having written yet. How old depends on whether
+              anything is watching the projection: a watched one polls on every
+              replica and drops what a poll saw change, so the window is one poll
+              interval, while an unwatched one does not poll at all and the
+              window is the whole cacheTTL. Watching is a property of the clients
+              connected at the time, not of the projection, so this fires either
+              way. A projection whose clients read back what they wrote wants one
               replica, or no cacheTTL.
 
     - name: kube-crisp.latency

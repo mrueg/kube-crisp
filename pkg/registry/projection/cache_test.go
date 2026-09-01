@@ -59,6 +59,50 @@ func TestCacheInvalidateWithoutNamespaceDropsEverything(t *testing.T) {
 	}
 }
 
+// A poll reads every namespace in one query, so what it observed changing is a
+// set rather than the single namespace a write knows about. The set is dropped
+// in one pass over the cache, and the tenants outside it keep their entries.
+func TestCacheInvalidateNamespacesDropsTheWholeSetAndNothingElse(t *testing.T) {
+	c := seedCache(t)
+	c.putList("initech#", "initech", &unstructured.UnstructuredList{})
+
+	c.invalidateNamespaces([]string{"acme", "globex", "acme"})
+
+	for _, key := range []string{"acme/order-1", "acme#", "globex/order-9", "globex#", "#"} {
+		if _, ok := c.lookup(key); ok {
+			t.Errorf("entry %q survived a poll that saw its namespace change", key)
+		}
+	}
+	if _, ok := c.lookup("initech#"); !ok {
+		t.Error("initech's list was dropped by a change in another tenant")
+	}
+}
+
+// An unscoped change anywhere in the set subsumes every scoped one: it names no
+// namespace to narrow to, so narrowing would mean keeping an entry that may
+// well be stale.
+func TestCacheInvalidateNamespacesWithAnUnscopedChangeDropsEverything(t *testing.T) {
+	c := seedCache(t)
+
+	c.invalidateNamespaces([]string{"acme", ""})
+
+	if got := c.Len(); got != 0 {
+		t.Errorf("cache holds %d entries after an unscoped change, want 0", got)
+	}
+}
+
+// A poll that observed nothing has learned that the entries are still good.
+// Dropping them anyway would leave cacheTTL meaning almost nothing.
+func TestCacheInvalidateNamespacesWithAnEmptySetKeepsEverything(t *testing.T) {
+	c := seedCache(t)
+
+	c.invalidateNamespaces(nil)
+
+	if got, want := c.Len(), 5; got != want {
+		t.Errorf("cache holds %d entries after invalidating nothing, want %d", got, want)
+	}
+}
+
 func TestCacheNilReceiverIsInert(t *testing.T) {
 	var c *readCache
 

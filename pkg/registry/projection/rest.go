@@ -2399,22 +2399,8 @@ func (w *WritableREST) DeleteCollection(
 	}
 
 	if w.canDeleteInBulk(listOptions) {
-		args := w.builtinArgs(ctx, namespace)
-		if listOptions != nil && listOptions.LabelSelector != nil {
-			args["labelSelector"] = listOptions.LabelSelector.String()
-		}
-		if err := w.applyParameters(ctx, args, w.deleteCollection.parameters, namespace, "", nil); err != nil {
-			return nil, errors.NewInternalError(err)
-		}
-
-		ctx, done := w.startQuery(ctx, "deletecollection")
-		_, affected, err := w.run(ctx, w.deleteCollection, args, w.session(ctx, namespace, ""))
-		w.cache.invalidate(namespace)
-		w.flights.detach(namespace)
-		w.auditWrite(ctx, "deletecollection", w.deleteCollection, affected)
-		done(len(list.Items), err)
-		if err != nil {
-			return nil, errors.NewInternalError(fmt.Errorf("deleting the collection: %w", err))
+		if err := w.deleteInBulk(ctx, namespace, listOptions, len(list.Items)); err != nil {
+			return nil, err
 		}
 		return list, nil
 	}
@@ -2433,6 +2419,60 @@ func (w *WritableREST) DeleteCollection(
 		return nil, err
 	}
 	return list, nil
+}
+
+// deleteInBulk removes the whole collection with the projection's single
+// statement. reported is what the response will say went, which is what the
+// query metrics record for the request; the statement's own affected count is
+// what the audit annotation carries.
+func (w *WritableREST) deleteInBulk(
+	ctx context.Context,
+	namespace string,
+	listOptions *metainternalversion.ListOptions,
+	reported int,
+) error {
+	args := w.builtinArgs(ctx, namespace)
+	if listOptions != nil && listOptions.LabelSelector != nil {
+		args["labelSelector"] = listOptions.LabelSelector.String()
+	}
+	if err := w.applyParameters(ctx, args, w.deleteCollection.parameters, namespace, "", nil); err != nil {
+		return errors.NewInternalError(err)
+	}
+
+	// Under the projection's concurrency limit, like every other statement.
+	// This is one statement but rarely a small one: a collection delete is
+	// often the heaviest write the projection ever sends, and it was the only
+	// write that could start while the projection was already at its limit.
+	// The per-object fallback below has always been bounded, so `delete --all`
+	// respected the limit or ignored it depending on which path it took.
+	release, err := w.acquire(ctx)
+	if err != nil {
+		return err
+	}
+
+	ctx, done := w.startQuery(ctx, "deletecollection")
+	_, affected, err := w.run(ctx, w.deleteCollection, args, w.session(ctx, namespace, ""))
+
+	// In the order every other write uses. Detaching before invalidating is
+	// what stops a reader arriving between the two from joining a query that
+	// started before this delete and then storing its pre-delete rows in the
+	// cache — rows that would then outlive the request by the whole cacheTTL.
+	release()
+	w.flights.detach(namespace)
+	w.cache.invalidate(namespace)
+
+	w.auditWrite(ctx, "deletecollection", w.deleteCollection, affected)
+	done(reported, err)
+	if err != nil {
+		// Translated like any other write, and for the reason the single
+		// delete gives: wrapping it made every failure a 500, so a collection
+		// something else references answered "internal error" rather than 409,
+		// an unreachable database answered 500 rather than 503 with a
+		// Retry-After, and a shed request lost the 429 it had been given.
+		// There is no one object to name, so the error names the verb.
+		return translateWriteError(err, w.groupResource(), "", "deletecollection")
+	}
+	return nil
 }
 
 // deleteEach removes objects concurrently and reports the first real failure.
@@ -2781,7 +2821,13 @@ func translateWriteError(err error, gr schema.GroupResource, name, verb string) 
 	case crispsql.IsForeignKeyViolation(err):
 		return errors.NewConflict(gr, name, err)
 	default:
-		return errors.NewInternalError(fmt.Errorf("%s %s: %w", verb, name, err))
+		// A collection delete has no one object to name, and "deletecollection
+		// : ..." reads like something went missing from the message.
+		subject := verb
+		if name != "" {
+			subject += " " + name
+		}
+		return errors.NewInternalError(fmt.Errorf("%s: %w", subject, err))
 	}
 }
 

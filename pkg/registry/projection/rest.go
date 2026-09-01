@@ -1123,24 +1123,41 @@ func (r *REST) listWith(
 	// silently truncate the collection and tell the client it had seen
 	// everything.
 	keyset := r.list.declares("after")
-	paging := (keyset || r.list.declares("offset")) && options != nil && options.Limit > 0
+	pageable := keyset || r.list.declares("offset")
+	paging := pageable && options != nil && options.Limit > 0
+
+	// A continue token with no limit is a request in its own right, not a
+	// malformed page: ValidateListOptions accepts it — only pairing continue
+	// with resourceVersionMatch is rejected — and the etcd store answers it by
+	// resuming where the token points and returning everything that is left.
+	// Treating it as an unpaged list instead would quietly serve page one over
+	// again, so a client that dropped the limit on its follow-up request would
+	// see every item it already had a second time and never learn it had.
+	resuming := pageable && options != nil && options.Limit <= 0 && options.Continue != ""
 
 	var (
 		limit    int64
 		token    continueToken
 		consumed int64
 	)
-	if paging {
-		limit = options.Limit
-
+	switch {
+	case paging || resuming:
 		var err error
 		if token, err = decodeContinue(options.Continue); err != nil {
 			return nil, errors.NewBadRequest(err.Error())
 		}
 		consumed = token.Consumed
 
-		// One extra row reveals whether another page exists.
-		args["limit"] = limit + 1
+		if paging {
+			// One extra row reveals whether another page exists.
+			limit = options.Limit
+			args["limit"] = limit + 1
+		} else {
+			// Resuming without a limit asks for the whole remainder in one
+			// answer, so the only bound left is the one an unpaged list uses.
+			args["limit"] = int64(r.list.statement.MaxRows) + 1
+		}
+
 		if keyset {
 			// Keyset paging resumes after the last row of the previous page,
 			// so rows inserted meanwhile cannot shift the window.
@@ -1148,7 +1165,7 @@ func (r *REST) listWith(
 		} else {
 			args["offset"] = token.Offset
 		}
-	} else {
+	default:
 		// Bound rather than left NULL: MySQL and SQLite accept no expression
 		// after LIMIT, so "LIMIT :limit" has to be usable without paging. One
 		// past maxRows keeps the overflow check meaningful, so an oversized
@@ -1198,6 +1215,8 @@ func (r *REST) listWith(
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(r.listGVK)
 
+	// Only a limited request can have a next page: resuming without one
+	// returned everything that was left, so there is no token to hand back.
 	more := false
 	if paging && int64(len(rows)) > limit {
 		rows = rows[:limit]

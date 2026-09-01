@@ -21,12 +21,12 @@
 //	    options:
 //	      region: eu-central-1     # optional; read off the endpoint otherwise
 //
-// Linked into the server rather than kept in a module of its own. It costs
-// fifteen AWS SDK modules and about 4 MB of binary that a build projecting a
-// SQLite file never reaches, which is a real cost and was weighed: the
-// alternative made the published server unable to authenticate to RDS at all,
-// so anybody wanting it had to assemble a build first. A provider nobody can
-// use without rebuilding is not a provider that ships.
+// Linked into the server rather than kept in a module of its own. That puts the
+// AWS SDK in kube-crisp's dependencies, where a build projecting a SQLite file
+// never reaches it, and the cost was weighed: keeping it out made the published
+// server unable to authenticate to RDS at all, so anybody wanting it had to
+// assemble a build first. A provider nobody can use without rebuilding is not a
+// provider that ships.
 //
 // The registry stays open either way. A build wanting a provider this
 // repository does not have registers its own the same way cmd does below, and

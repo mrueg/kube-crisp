@@ -963,9 +963,9 @@ an identity holding `rds-db:connect` on the database user; it is valid for fifte
 is no extra service to run.
 
 It is **linked into the published binary and image**, so a projection can use it without a rebuild.
-That costs fifteen AWS SDK modules and about 4 MB of binary which a build projecting a SQLite file
-never reaches — weighed against a provider nobody could use without first assembling their own
-server, which is not a provider that ships.
+That puts the AWS SDK in this server's dependencies, where a build projecting a SQLite file never
+reaches it — weighed against a provider nobody could use without first assembling their own server,
+which is not a provider that ships.
 
 The registry stays open, and adding another is one line in a `main` — see
 [`cmd/kube-crisp-apiserver`](../cmd/kube-crisp-apiserver/main.go), which registers this one the same

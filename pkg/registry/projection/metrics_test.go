@@ -113,11 +113,11 @@ func TestGetWithoutAGetQueryReportsRowsRead(t *testing.T) {
 	store := newStorage(t, spec).(*REST)
 	ctx := namespacedContext("acme")
 
-	if _, _, err := store.getObject(ctx, "order-1001", shared); err != nil {
+	if _, _, err := store.getObject(ctx, "order-1001", shared, ""); err != nil {
 		t.Fatalf("getObject() returned error: %v", err)
 	}
 
-	_, rows, err := store.getObject(ctx, "order-1001", fresh)
+	_, rows, err := store.getObject(ctx, "order-1001", fresh, "")
 	if err != nil {
 		t.Fatalf("getObject() returned error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestGetWithoutAGetQueryReportsRowsRead(t *testing.T) {
 func TestGetWithAGetQueryReportsOneRow(t *testing.T) {
 	store := newTestREST(t)
 
-	_, rows, err := store.getObject(namespacedContext("acme"), "order-1001", fresh)
+	_, rows, err := store.getObject(namespacedContext("acme"), "order-1001", fresh, "")
 	if err != nil {
 		t.Fatalf("getObject() returned error: %v", err)
 	}
@@ -149,10 +149,10 @@ func TestCachedGetReportsNoRows(t *testing.T) {
 	store := newStorage(t, spec).(*REST)
 	ctx := namespacedContext("acme")
 
-	if _, _, err := store.getObject(ctx, "order-1001", shared); err != nil {
+	if _, _, err := store.getObject(ctx, "order-1001", shared, ""); err != nil {
 		t.Fatalf("priming the cache: %v", err)
 	}
-	_, rows, err := store.getObject(ctx, "order-1001", shared)
+	_, rows, err := store.getObject(ctx, "order-1001", shared, "")
 	if err != nil {
 		t.Fatalf("getObject() returned error: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestReadsAreCountedByTheDatabaseThatAnsweredThem(t *testing.T) {
 
 	// A write's precondition cannot go to a replica, so it counts as primary.
 	before := routed(t, crispmetrics.RolePrimary)
-	if _, err := store.read(ctx, "order-1001", fresh); err != nil {
+	if _, err := store.read(ctx, "order-1001", fresh, ""); err != nil {
 		t.Fatalf("reading the write base: %v", err)
 	}
 	if got := routed(t, crispmetrics.RolePrimary); got <= before {

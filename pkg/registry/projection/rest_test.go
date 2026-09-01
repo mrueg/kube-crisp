@@ -2093,7 +2093,7 @@ func TestManagedFieldsSurviveAWriteAndRead(t *testing.T) {
 	}
 
 	// Read back through a path that has no cached copy to fall back on.
-	after, err := writable.read(ctx, "order-1001", fresh)
+	after, err := writable.read(ctx, "order-1001", fresh, "")
 	if err != nil {
 		t.Fatalf("reading back: %v", err)
 	}

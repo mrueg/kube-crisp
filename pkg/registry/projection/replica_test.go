@@ -118,7 +118,7 @@ func TestWritesAndTheirBaseGoToThePrimary(t *testing.T) {
 	setCustomer(t, replica, "order-1001", "replica-says")
 
 	// The write's base is read fresh, which means the primary.
-	base, err := store.read(ctx, "order-1001", fresh)
+	base, err := store.read(ctx, "order-1001", fresh, "")
 	if err != nil {
 		t.Fatalf("reading the write base: %v", err)
 	}

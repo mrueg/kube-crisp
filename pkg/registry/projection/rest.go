@@ -917,14 +917,28 @@ const (
 )
 
 // Get answers a single-object read.
+//
+// A resourceVersion on the request is a floor, not a selector: it says the
+// client has already seen that version and must not be handed anything older.
+// Nothing here can reconstruct a past version of a row, so the only thing that
+// can be too old is a cached copy — and that is what the version turns away.
+// List has said this about a cached page since caching arrived; a client
+// reading one object had the same request ignored.
 func (r *REST) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
-	return r.read(ctx, name, shared)
+	notOlderThan := ""
+	if options != nil {
+		notOlderThan = options.ResourceVersion
+	}
+	return r.read(ctx, name, shared, notOlderThan)
 }
 
 // read answers a single-object read in the given mode, and records it.
-func (r *REST) read(ctx context.Context, name string, mode readMode) (runtime.Object, error) {
+//
+// notOlderThan is the version a cached copy has to have reached to be usable,
+// and is empty for the reads that go to the database whatever it says.
+func (r *REST) read(ctx context.Context, name string, mode readMode, notOlderThan string) (runtime.Object, error) {
 	ctx, done := r.startQuery(ctx, "get")
-	obj, rows, err := r.getObject(ctx, name, mode)
+	obj, rows, err := r.getObject(ctx, name, mode, notOlderThan)
 	done(rows, err)
 	return obj, err
 }
@@ -932,7 +946,7 @@ func (r *REST) read(ctx context.Context, name string, mode readMode) (runtime.Ob
 // getObject answers a single-object read, reporting how many rows it read to
 // do it. That is not always one: a projection with no get query filters the
 // list instead, and the whole collection is what it cost.
-func (r *REST) getObject(ctx context.Context, name string, mode readMode) (runtime.Object, int, error) {
+func (r *REST) getObject(ctx context.Context, name string, mode readMode, notOlderThan string) (runtime.Object, int, error) {
 	namespace := namespaceFrom(ctx, r.NamespaceScoped())
 	session := r.session(ctx, namespace, name)
 
@@ -945,7 +959,10 @@ func (r *REST) getObject(ctx context.Context, name string, mode readMode) (runti
 	}
 	key := objectKey(namespace, name) + sessionKey(session) + r.callerKey(ctx, callerQuery)
 	if mode == shared {
-		if cached, ok := r.cache.getObject(key); ok {
+		// A cached object may be older than the version the client insisted
+		// on, and then it is not an answer to the request that was made. The
+		// same check List makes on a cached page, for the same reason.
+		if cached, ok := r.cache.getObject(key); ok && freshEnoughVersion(cached.GetResourceVersion(), notOlderThan) {
 			// Answered without touching the database; the cache has its own
 			// metric and this one counts round trips.
 			return cached, 0, nil
@@ -1608,13 +1625,31 @@ func (r *REST) checkResourceVersionMatch(options *metainternalversion.ListOption
 // freshEnough reports whether a cached page still satisfies the version the
 // client asked not to read behind.
 func (r *REST) freshEnough(list *unstructured.UnstructuredList, options *metainternalversion.ListOptions) bool {
-	if options == nil || options.ResourceVersion == "" || options.ResourceVersion == "0" {
+	if options == nil {
 		return true
 	}
-	if list.GetResourceVersion() == options.ResourceVersion {
+	return freshEnoughVersion(list.GetResourceVersion(), options.ResourceVersion)
+}
+
+// freshEnoughVersion reports whether something read at have still answers a
+// client that asked not to read behind want.
+//
+// An empty version, and the zero every client-go cache read sends, mean the
+// client is not asserting anything and anything may answer it. Anything else
+// is a floor: only a copy that has reached it will do, and a projection that
+// maps no resourceVersion has nothing to show and re-reads instead.
+//
+// Shared by the object and the collection so the two cannot drift: a client
+// that gets one answer from Get and another from List over the same rows has
+// no way to tell which of them to believe.
+func freshEnoughVersion(have, want string) bool {
+	if want == "" || want == "0" {
 		return true
 	}
-	return movesForward(options.ResourceVersion, list.GetResourceVersion())
+	if have == want {
+		return true
+	}
+	return movesForward(want, have)
 }
 
 // remainingItems reports how many objects a client still has to page through,
@@ -1835,7 +1870,7 @@ func (w *WritableREST) applyUpdate(
 	// client's resourceVersion is checked against and what an unmodified half
 	// of the object is merged onto, so a stale copy turns optimistic
 	// concurrency into a check against something that has already moved.
-	existing, err := w.read(ctx, name, fresh)
+	existing, err := w.read(ctx, name, fresh, "")
 	if err != nil {
 		return nil, false, err
 	}
@@ -2053,7 +2088,7 @@ func (w *WritableREST) deleteObject(
 	existing := known
 	if existing == nil {
 		var err error
-		if existing, err = w.read(ctx, name, fresh); err != nil {
+		if existing, err = w.read(ctx, name, fresh, ""); err != nil {
 			return nil, false, err
 		}
 	}

@@ -323,20 +323,17 @@ what keeps a fifteen-minute credential from rebuilding the pool four times an
 hour. See [Passwords that are minted rather than
 stored](docs/reference.md#passwords-that-are-minted-rather-than-stored).
 
-The reason this is a registration and not a flag is that every provider is a
-cloud SDK, and kube-crisp links no dependency a given build does not need. The
-image published here registers none, so `RegisteredCredentialProviders()` is
-empty and a projection asking for one is refused when it is compiled, with that
-said plainly. A build that wants AWS is a binary somebody assembled on purpose —
-which for a `database/sql` driver was already true.
+The reason this is a registration and not a flag is that the set is open: a
+provider is a cloud SDK, and no build should have to carry every cloud's. A
+projection naming one this build does not have is refused when it is compiled,
+with that said plainly, rather than failing at the first query.
 
-**AWS RDS IAM** ships in `providers/aws`, as a module of its own for exactly that
-reason: linking it costs fifteen AWS SDK modules and about 4 MB of binary, and a
-build tag would not have kept them out of `go.mod` — a file excluded by a tag
-still contributes its imports to the module graph.
-[`providers/aws/cmd/kube-crisp-apiserver`](providers/aws/cmd/kube-crisp-apiserver/main.go)
-is the whole of what a build with it looks like: the stock server plus one
-`Register()` call. See [AWS RDS IAM](docs/reference.md#aws-rds-iam).
+**AWS RDS IAM** is the one this server ships with, registered in
+[`cmd/kube-crisp-apiserver`](cmd/kube-crisp-apiserver/main.go) — a projection can
+use it with the published image and no rebuild. It costs about 4 MB of binary,
+which is the price of the provider being usable rather than assemblable. A build
+wanting another writes the same one-line registration against its own `main` and
+pays for that one alone. See [AWS RDS IAM](docs/reference.md#aws-rds-iam).
 
 ## Development
 

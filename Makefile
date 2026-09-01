@@ -25,56 +25,8 @@ build-plugin:
 	ln -sf kubectl-crisp $(BIN_DIR)/kubectl_complete-crisp
 
 .PHONY: test
-test: providers-test
+test:
 	go test ./...
-
-# The optional credential providers, each a module of its own so that its cloud
-# SDK stays out of this one's go.mod.
-#
-# A nested module is invisible to ./... , so without these targets the AWS
-# provider would build against a kube-crisp it is no longer compatible with and
-# nothing would say so until somebody tried to build it. They are cheap: the
-# provider is one file.
-PROVIDERS := providers/aws
-
-.PHONY: providers-test
-providers-test:
-	@set -e; for module in $(PROVIDERS); do \
-		echo "==> $$module"; go -C $$module test ./...; \
-	done
-
-.PHONY: providers-build
-providers-build:
-	@set -e; for module in $(PROVIDERS); do \
-		go -C $$module build ./...; \
-	done
-
-.PHONY: providers-vet
-providers-vet:
-	@set -e; for module in $(PROVIDERS); do \
-		go -C $$module vet ./...; \
-	done
-
-.PHONY: providers-tidy
-providers-tidy:
-	@set -e; for module in $(PROVIDERS); do \
-		go -C $$module mod tidy; \
-	done
-
-# The same check tidy-check makes, per provider module.
-.PHONY: providers-tidy-check
-providers-tidy-check:
-	@set -e; for module in $(PROVIDERS); do \
-		cp $$module/go.mod $$module/go.mod.orig; cp $$module/go.sum $$module/go.sum.orig; \
-		go -C $$module mod tidy; \
-		status=0; \
-		if ! cmp -s $$module/go.mod $$module/go.mod.orig || ! cmp -s $$module/go.sum $$module/go.sum.orig; then \
-			echo "go mod tidy produced changes in $$module; run 'make providers-tidy' and commit the result"; \
-			status=1; \
-		fi; \
-		mv $$module/go.mod.orig $$module/go.mod; mv $$module/go.sum.orig $$module/go.sum; \
-		[ $$status -eq 0 ] || exit $$status; \
-	done
 
 # Every build goes through goreleaser, which drives ko for the image side.
 # There is no Dockerfile and no separate ko config.
@@ -266,7 +218,7 @@ fmt-check:
 
 # Fails if go.mod or go.sum would change, without leaving the change behind.
 .PHONY: tidy-check
-tidy-check: providers-tidy-check
+tidy-check:
 	@cp go.mod go.mod.orig && cp go.sum go.sum.orig
 	@go mod tidy
 	@status=0; \
@@ -340,34 +292,29 @@ vulncheck:
 	bin=$$(mktemp -d); \
 	GOBIN=$$bin go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) \
 	  || { echo "==> could not install govulncheck"; rm -rf $$bin; exit 1; }; \
-	status=0; \
-	for module in . $(PROVIDERS); do \
-	  echo "==> $$module"; \
-	  output=$$(cd $$module && $$bin/govulncheck ./... 2>&1); \
-	  code=$$?; \
-	  echo "$$output"; \
-	  case $$code in \
-	    0) ;; \
-	    3) if echo "$$output" | grep -q "Your code is affected by"; then \
-	         echo "==> reachable vulnerabilities found in $$module"; status=1; \
-	       else \
-	         echo "==> only unreachable vulnerabilities in required modules; not failing"; \
-	       fi ;; \
-	    *) echo "==> govulncheck failed to run in $$module"; status=$$code ;; \
-	  esac; \
-	done; \
+	output=$$($$bin/govulncheck ./... 2>&1); \
+	code=$$?; \
 	rm -rf $$bin; \
-	exit $$status
+	echo "$$output"; \
+	case $$code in \
+	  0) exit 0 ;; \
+	  3) if echo "$$output" | grep -q "Your code is affected by"; then \
+	       echo "==> reachable vulnerabilities found"; exit 1; \
+	     fi; \
+	     echo "==> only unreachable vulnerabilities in required modules; not failing"; \
+	     exit 0 ;; \
+	  *) echo "==> govulncheck failed to run"; exit $$code ;; \
+	esac
 
 # Both tag sets: the e2e suite is behind a build tag and would otherwise never
 # be vetted.
 .PHONY: vet
-vet: providers-vet
+vet:
 	go vet ./...
 	go vet -tags e2e ./...
 
 .PHONY: tidy
-tidy: providers-tidy
+tidy:
 	go mod tidy
 
 .PHONY: deploy

@@ -255,8 +255,39 @@ stops answering; that surfaces as `504` once the query's timeout expires. A stat
 
 ## What a projection reports about itself
 
-`kubectl get customresourceprojections` is the first place to look, and the
-object carries more than the printed columns:
+`kubectl crisp status` is the short way in. It joins the projection's own
+conditions to the `APIService` behind its group, which is where the aggregation
+layer keeps its half of the answer, and prints only the projections with
+something to report:
+
+```console
+$ kubectl crisp status
+pagila-films  films.pagila.example.com/v1alpha1
+  Ready is False (CompilationFailed): relation "film" does not exist
+  serving generation 2 while 4 is applied: the spec answering requests is not the
+  spec in the cluster. Usually the newer one failed to compile — see Ready.
+
+1 projection(s), 0 serving, 1 with something to report
+```
+
+Three states are invisible without that join, and each looks like something
+else. A projection with no status at all has been seen by no server — the
+conditions are written by kube-crisp and by nothing else, so an empty status
+means the thing that would have told you is the thing that is down, and
+`kubectl get` shows the same blank column for that as for a projection nobody
+applied. A projection that is `Ready` while its `APIService` is unavailable
+compiled here and is reachable from nowhere. And `observedGeneration` trailing
+`generation` means requests succeed against a spec that is not the one in the
+cluster, which looks healthy from every angle except that comparison.
+
+`--verbose` prints every projection and every condition, including the ones that
+are fine; `-o json` gives the same report structured. It reads the cluster only:
+no database is opened and no Secret is read, since whether the data source is
+reachable is a question the server has already answered in
+`DataSourceConnected`.
+
+The underlying objects carry more than the printed columns, and
+`kubectl get customresourceprojections` is where to see them:
 
 ```console
 $ kubectl get crp orders -o jsonpath='{.status}' | jq

@@ -220,7 +220,8 @@ install granted them — while the documentation described each as a grant to ma
 ### Installing the kubectl plugin
 
 `kubectl crisp` writes the RBAC a projected group needs to be reachable, shows who may reach it,
-finds the roles a deleted projection left behind, and says what a projection needs from its database.
+finds the roles a deleted projection left behind, says what a projection needs from its database, and
+says why one is not answering.
 kubectl finds it by name: any executable called `kubectl-crisp` on `PATH` becomes `kubectl crisp`.
 
 Releases carry one archive per platform holding the plugin alone, for Linux, macOS and Windows — it
@@ -330,7 +331,9 @@ no arguments reads the projections in the cluster instead. `kubectl crisp can-i`
 do what, including the case neither gate can see alone: a verb RBAC grants and the projection cannot
 serve, which is authorized and returns 405. `kubectl crisp prune` finds the roles a deleted
 projection left behind, and `kubectl crisp schema` says what a projection needs from its database,
-for handing to whatever manages the tables. It is a separate binary because it needs
+for handing to whatever manages the tables. `kubectl crisp status` answers the other question — why a
+projection is not answering — by joining its conditions to the `APIService` behind its group, which is
+the half of the answer that lives somewhere else. It is a separate binary because it needs
 neither a database nor a driver, unlike `validate`, whose answer depends on which drivers the build
 linked in.
 

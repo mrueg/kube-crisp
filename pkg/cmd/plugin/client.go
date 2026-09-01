@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -61,6 +62,21 @@ func (c *clientFlags) crisp() (crispclient.Interface, error) {
 		return nil, err
 	}
 	return crispclient.NewForConfig(config)
+}
+
+// dynamic returns a client for objects this binary has no typed client for.
+//
+// APIServices, in practice: the aggregation layer's own resource, which is what
+// says whether a projected group is reachable from outside. k8s.io/kube-aggregator
+// is not a dependency and is not worth becoming one for one Get, so the
+// resource is addressed by its GroupVersionResource -- the same way the
+// controller that writes those objects addresses them.
+func (c *clientFlags) dynamic() (dynamic.Interface, error) {
+	config, err := c.config()
+	if err != nil {
+		return nil, err
+	}
+	return dynamic.NewForConfig(config)
 }
 
 // kube returns a client for the cluster's own objects: the ClusterRoles a

@@ -1222,4 +1222,6 @@ column as `string` to carry it exactly, and let the client parse it.
 `integer` covers the full signed 64-bit range. A MySQL `BIGINT UNSIGNED` above
 that cannot be a JSON number at all; the row is refused with an error naming
 `type: string` as the way to carry it, rather than being dropped from the
-collection.
+collection. A `string` holds the whole unsigned range exactly, whatever width
+the driver picked. That is also what makes `id BIGINT UNSIGNED` usable as
+`mapping.name`, since every mapped identity field is rendered as text.

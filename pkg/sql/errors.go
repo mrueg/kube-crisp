@@ -26,6 +26,18 @@ const (
 	mysqlForeignKeyMissing = 1452
 )
 
+// PostgreSQL SQLSTATE class 40, transaction rollback: the database refusing a
+// transaction it cannot serialise against a concurrent one. CockroachDB reports
+// its retry errors as 40001 too.
+const (
+	pgSerializationFailure = "40001"
+	pgDeadlockDetected     = "40P01"
+)
+
+// MySQL's number for the same: "Deadlock found when trying to get lock; try
+// restarting transaction".
+const mysqlDeadlock = 1213
+
 // IsUniqueViolation reports whether a write failed because the row already
 // exists, so callers can answer with AlreadyExists rather than an opaque error.
 //
@@ -72,6 +84,49 @@ func IsForeignKeyViolation(err error) bool {
 	}
 
 	return containsAny(err, "foreign key")
+}
+
+// IsSerializationFailure reports whether the database rolled a write back
+// because it could not run it alongside a concurrent one.
+//
+// This is the one class of failure a database raises specifically to say that
+// nothing was changed and the same request will probably succeed if it is sent
+// again: PostgreSQL's serialization_failure and deadlock_detected, and MySQL's
+// deadlock, whose message ends "try restarting transaction". A projection using
+// queries.create.statements for a check-then-insert meets it under any real
+// concurrency, and so does any projection whose database runs at SERIALIZABLE.
+// CockroachDB reports its retries the same way, and always at SERIALIZABLE.
+//
+// Deliberately not a lock wait timeout — MySQL 1205, or SQLite giving up after
+// its busy timeout. Those say a lock was held too long, not that this write
+// lost a race, and the difference matters twice over. They mean sustained
+// contention rather than an unlucky interleaving, so telling a controller to
+// come straight back makes the pile-up worse where a timeout carries
+// backpressure. And MySQL rolls back only the statement on 1205 unless
+// innodb_rollback_on_timeout is set, so "nothing was changed" is exactly what
+// cannot be promised about a multi-statement write. They stay with the other
+// timeouts.
+//
+// SQLite has no code in this class to report: it takes one writer at a time and
+// the pool gives it a busy timeout, so what a projection meets there is the
+// lock wait above.
+func IsSerializationFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == pgSerializationFailure || pgErr.Code == pgDeadlockDetected
+	}
+
+	var mysqlErr *mysqldriver.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == mysqlDeadlock
+	}
+
+	return containsAny(err,
+		"could not serialize access",
+		"deadlock detected",
+		"deadlock found",
+		"restart transaction",
+	)
 }
 
 // pgQueryCanceled is the SQLSTATE PostgreSQL reports when it stops a statement

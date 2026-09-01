@@ -5,6 +5,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,8 +88,21 @@ type PoolOptions struct {
 	// warm. Zero disables it.
 	KeepAliveInterval time.Duration
 
+	// Auth says how the password for this data source is obtained, when it is
+	// not the one in the connection string. Nil is the ordinary case: the
+	// Secret carries the whole DSN and nothing mints anything.
+	Auth *AuthOptions
+
 	// Name labels this pool's metrics.
 	Name string
+}
+
+// AuthOptions names a registered credential provider and hands it its settings.
+// It is spec.dataSource.auth, carried through unchanged so that the pool layer
+// makes the same decision the API object asked for.
+type AuthOptions struct {
+	Provider string
+	Options  map[string]string
 }
 
 // Pool is a driver-aware connection pool for one data source.
@@ -105,6 +119,13 @@ type Pool struct {
 	// own. It carries credentials and is never logged; the pool's own label is
 	// a hash of it.
 	dsn string
+
+	// connector is set when the password is minted per connection rather than
+	// read out of the DSN. A notification listener opens its own connection
+	// outside the pool, and it needs a token as much as any other connection
+	// does — so it is opened from the same connector, not from the DSN, which
+	// in this case has no password in it at all.
+	connector driver.Connector
 
 	// prepare enables the statement cache; stmts is it, bounded and evicting
 	// least-recently-used. Pools are shared by every projection reaching the
@@ -207,8 +228,23 @@ func Open(opts PoolOptions) (*Pool, error) {
 		dsn = driver.PrepareDSN(dsn)
 	}
 
-	db, err := sql.Open(driver.SQLDriver, dsn)
+	// Two ways to open the same database, and which one is used is decided
+	// here, once.
+	//
+	// Without auth this is exactly what it always was: a driver name and a
+	// connection string, handed to database/sql. With auth the connection
+	// string has no password in it and one is minted per connection, so the
+	// pool is built from a connector instead. Everything below this point is
+	// the same either way — the *sql.DB does not know which it came from.
+	connector, err := authConnector(driver, dsn, opts.Auth)
 	if err != nil {
+		return nil, fmt.Errorf("opening %s data source: %w", opts.Driver, err)
+	}
+
+	var db *sql.DB
+	if connector != nil {
+		db = sql.OpenDB(connector)
+	} else if db, err = sql.Open(driver.SQLDriver, dsn); err != nil {
 		return nil, fmt.Errorf("opening %s data source: %w", opts.Driver, err)
 	}
 
@@ -252,11 +288,12 @@ func Open(opts PoolOptions) (*Pool, error) {
 	}
 
 	pool := &Pool{
-		db:      db,
-		dsn:     dsn,
-		name:    opts.Name,
-		driver:  opts.Driver,
-		prepare: opts.PreparedStatements,
+		db:        db,
+		dsn:       dsn,
+		connector: connector,
+		name:      opts.Name,
+		driver:    opts.Driver,
+		prepare:   opts.PreparedStatements,
 		// Only where it can actually be set. A driver that cannot honour it
 		// would otherwise pay for a transaction per query and get nothing.
 		statementTimeout: opts.StatementTimeout && SupportsStatementTimeout(opts.Driver),

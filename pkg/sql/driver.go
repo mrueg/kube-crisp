@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"sort"
 	"strings"
@@ -54,6 +55,16 @@ type Driver struct {
 	// that belongs to the driver rather than to the projection. Optional.
 	PrepareDSN func(dsn string) string
 
+	// AuthConnector builds a database/sql connector whose every new connection
+	// authenticates with a password minted for it, rather than with one carried
+	// in the connection string. Optional; a driver that cannot do this refuses
+	// a projection that configures dataSource.auth.
+	//
+	// It is the seam a short-lived cloud credential needs, and the only one
+	// there is. See pkg/sql/authconnector.go for why the token cannot live in
+	// the connection string, and pkg/sql/credentials.go for what mints it.
+	AuthConnector func(dsn string, creds Credentials) (driver.Connector, error)
+
 	// Encrypted reports whether a connection string asks for transport
 	// encryption. Optional; a driver that does not answer is never warned about.
 	//
@@ -82,6 +93,15 @@ func Register(d Driver) error {
 		return fmt.Errorf("a driver needs a name")
 	case d.SQLDriver == "":
 		return fmt.Errorf("driver %q does not say which database/sql driver to open it with", d.Name)
+	case d.AuthConnector != nil && d.Encrypted == nil:
+		// A driver that mints a password per connection has to be able to say
+		// whether the connection is encrypted, because a minted password is a
+		// bearer token and is refused on a connection that is not. A driver
+		// that says nothing would be a driver for which that refusal silently
+		// does not apply — and it would be silent in the direction that sends
+		// a live credential across the network in the clear.
+		return fmt.Errorf(
+			"driver %q offers per-connection credentials but reports nothing about transport encryption", d.Name)
 	}
 
 	driversMu.Lock()
@@ -157,6 +177,7 @@ func init() {
 			StatementTimeout: true,
 			Notifications:    true,
 			Encrypted:        postgresEncrypted,
+			AuthConnector:    pgxAuthConnector,
 		},
 		{
 			// CockroachDB speaks the PostgreSQL wire protocol, so it is the
@@ -175,6 +196,7 @@ func init() {
 			StatementTimeout: true,
 			Notifications:    false,
 			Encrypted:        postgresEncrypted,
+			AuthConnector:    pgxAuthConnector,
 		},
 		{
 			Name:             "mysql",
@@ -183,6 +205,7 @@ func init() {
 			SessionVariables: true,
 			Encrypted:        mysqlEncrypted,
 			PrepareDSN:       mysqlFoundRows,
+			AuthConnector:    mysqlAuthConnector,
 		},
 		{
 			Name:         "sqlite",

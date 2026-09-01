@@ -55,6 +55,7 @@ func TestTheCELRulesNameTheDriversThatClaimTheCapability(t *testing.T) {
 	}{
 		{field: "self.watch.notify", supported: crispsql.SupportsNotifications},
 		{field: "self.statementTimeout", supported: crispsql.SupportsStatementTimeout},
+		{field: "self.auth", supported: crispsql.SupportsCredentialProviders},
 	} {
 		t.Run(capability.field, func(t *testing.T) {
 			allowed := driversNamedByRuleOn(t, crd, capability.field)

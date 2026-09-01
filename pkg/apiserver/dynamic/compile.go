@@ -546,6 +546,13 @@ func (c *Compiler) poolFor(ds crispv1alpha1.DataSource, dsn string) (*crispsql.P
 			// Off unless asked for: it puts every query in a transaction.
 			StatementTimeout: ds.StatementTimeout != nil && *ds.StatementTimeout,
 		}
+		// Carried through rather than resolved here: the provider is looked up
+		// and the credentials built inside Open, which is also where a pool
+		// opened from a connection string alone is built, so the two paths part
+		// company in one place.
+		if ds.Auth != nil {
+			opts.Auth = &crispsql.AuthOptions{Provider: ds.Auth.Provider, Options: ds.Auth.Options}
+		}
 		if ds.KeepAliveInterval != nil {
 			opts.KeepAliveInterval = ds.KeepAliveInterval.Duration
 		}

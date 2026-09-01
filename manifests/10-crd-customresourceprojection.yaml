@@ -86,6 +86,67 @@ spec:
               dataSource:
                 description: DataSource identifies the SQL database backing this projection.
                 properties:
+                  auth:
+                    description: |-
+                      Auth says how the password is obtained, for a database that does not have
+                      one to put in a Secret.
+
+                      AWS RDS IAM, Cloud SQL and Entra all authenticate with a token that lives
+                      about a quarter of an hour, minted on demand from the identity the process
+                      already has. Without this, using one of them means a sidecar rewriting the
+                      Secret every few minutes so that the connection string briefly holds a
+                      valid token — which works, because the pool is keyed by the connection
+                      string, but rebuilds the pool every time it happens.
+
+                      The Secret is still required and still carries the connection string: the
+                      host, the port, the user, the database, and the TLS settings. What this
+                      changes is only where the password comes from — it is minted per
+                      connection rather than read out of the DSN, so the pool is opened once
+                      from a string that never contains a token, keeps its connections and its
+                      prepared statements while the token behind them turns over, and only a
+                      connection actually being opened pays for a new one.
+
+                      Which providers exist is a property of the build. Every one of them means
+                      a cloud SDK linked into the binary, and kube-crisp links no dependency a
+                      given build does not need, so the image this repository publishes
+                      registers none: naming a provider needs a binary that registers it. A
+                      projection naming one this build does not have is refused when it is
+                      compiled, with the registered names in the message.
+
+                      Omit it and nothing changes: the connection string is used exactly as it
+                      is, which is what every projection did before this field existed.
+                    properties:
+                      options:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Options are provider-specific settings, passed through unchanged.
+
+                          A map rather than fields, because the alternative is an API change for
+                          every provider anybody adds — and the provider is the only thing that can
+                          validate its own settings anyway, since it is the only thing that knows
+                          them. It rejects what it does not understand when the projection is
+                          compiled, so a misspelt key is an error and not a default quietly taken.
+
+                          Nothing secret belongs here: this object is readable by anybody who can
+                          read projections. Options address a database and name an identity —
+                          a region, a user — while the credential behind them comes from the
+                          process's own identity, which is the point of using a provider at all.
+                        maxProperties: 32
+                        type: object
+                      provider:
+                        description: |-
+                          Provider names a registered credential provider, such as "aws-rds-iam".
+
+                          The shape is constrained rather than the set: lowercase, so that the name
+                          in a projection is the name in the registry regardless of who typed it.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - provider
+                    type: object
                   connMaxIdleTime:
                     description: |-
                       ConnMaxIdleTime closes a connection that has been idle this long, before
@@ -311,6 +372,12 @@ spec:
                     statement, and SQLite has no equivalent'
                   rule: '!has(self.statementTimeout) || !self.statementTimeout ||
                     self.driver == ''postgres'' || self.driver == ''cockroach'''
+                - message: 'auth is supported on the cockroach, mysql and postgres
+                    drivers only: a password minted per connection needs a driver
+                    that can be handed one, and SQLite is a local file with no password
+                    at all'
+                  rule: '!has(self.auth) || self.driver == ''cockroach'' || self.driver
+                    == ''mysql'' || self.driver == ''postgres'''
               mapping:
                 description: Mapping describes how a result row becomes an API object.
                 properties:

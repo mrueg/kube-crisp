@@ -157,20 +157,29 @@ func isNameChar(c byte) bool {
 type lexDialect uint8
 
 const (
-	// lexConservative is what a driver this build does not recognise gets.
+	// lexConservative is what a driver this build does not recognise gets —
+	// anything a build that links its own database/sql driver has registered,
+	// since a registration says which placeholder style a database wants and
+	// nothing at all about how it reads a literal.
 	//
 	// Every rule that makes a region something other than code is turned on at
 	// once, so this scan skips at least as much text as any named dialect below
-	// would. That is the safe direction for all three readers, because each of
-	// them is looking for something and the harm is in finding one that is not
-	// there: a table name read out of a comment is invented, and a RETURNING
-	// read out of one turns a write into a query that commits and answers with
-	// no rows, which the registry reports as a 404 or a conflict for a write
-	// that landed. Missing one only means a write is run for its effect, which
-	// is what a write is for.
+	// would. Skipping too much and skipping too little are both wrong and they
+	// are not equally wrong. Skipping too much misses something that was there:
+	// HasReturning runs a write for its effect, which is what a write is for;
+	// Tables leaves a name out of a status that already says it is not a
+	// complete schema; Rewrite leaves a :name in the statement, which the
+	// database either rejects when the statement is prepared or reads as a
+	// parameter of its own, so the projection either fails to compile or fails
+	// every request with a missing argument. Skipping too little finds
+	// something that was never there: an invented table name, an invented
+	// RETURNING that turns a write into a query which commits and answers no
+	// rows — reported to the client as a 404 for a write that landed — or an
+	// invented bind parameter, which puts a request-supplied value inside what
+	// the author wrote as a fixed literal. Those are the quiet ones.
 	//
-	// Rewrite never sees this value. An unregistered driver has no placeholder
-	// style either, so it is refused before the scan begins.
+	// A driver whose grammar this build should read exactly has to be named in
+	// lexDialectFor; the README says so under adding a driver.
 	lexConservative lexDialect = iota
 	lexPostgres
 	lexMySQL

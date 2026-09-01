@@ -71,6 +71,11 @@ func NewCommandRBAC(out, errOut io.Writer) *cobra.Command {
 	f.StringVarP(&o.output, "output", "o", "yaml", "Output format: yaml or json.")
 	f.StringVar(&o.namePrefix, "name-prefix", rbac.DefaultNamePrefix,
 		"Prefix for the generated role names.")
+	cmd.ValidArgsFunction = completeProjectionNames(o.client.projections, &o.filenames)
+	_ = cmd.MarkFlagFilename("filename", "yaml", "yml")
+	_ = cmd.RegisterFlagCompletionFunc("output", fixed("yaml", "json"))
+	// A prefix is whatever the operator chose; filenames are the wrong guess.
+	_ = cmd.RegisterFlagCompletionFunc("name-prefix", cobra.NoFileCompletions)
 	o.client.bind(cmd)
 
 	return cmd

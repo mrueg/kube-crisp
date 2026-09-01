@@ -26,6 +26,13 @@ func (c *clientFlags) bind(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.StringVar(&c.kubeconfig, "kubeconfig", "", "Path to the kubeconfig file to use.")
 	f.StringVar(&c.kubecontext, "context", "", "Name of the kubeconfig context to use.")
+
+	// Bound here rather than per command, since these are the flags every
+	// command that reaches a cluster carries. The errors are the ones
+	// RegisterFlagCompletionFunc returns for a flag that does not exist, and
+	// both were just declared.
+	_ = cmd.MarkFlagFilename("kubeconfig")
+	_ = cmd.RegisterFlagCompletionFunc("context", c.completeContexts)
 }
 
 // config resolves the kubeconfig the usual way: --kubeconfig, then $KUBECONFIG,

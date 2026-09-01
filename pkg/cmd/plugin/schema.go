@@ -59,6 +59,9 @@ func NewCommandSchema(out, errOut io.Writer) *cobra.Command {
 	f.StringSliceVarP(&o.filenames, "filename", "f", nil,
 		"Manifest file or directory to read projections from, instead of the cluster. Repeatable.")
 	f.StringVarP(&o.output, "output", "o", "text", "Output format: text or json.")
+	cmd.ValidArgsFunction = completeProjectionNames(o.client.projections, &o.filenames)
+	_ = cmd.MarkFlagFilename("filename", "yaml", "yml")
+	_ = cmd.RegisterFlagCompletionFunc("output", fixed("text", "json"))
 	o.client.bind(cmd)
 
 	return cmd

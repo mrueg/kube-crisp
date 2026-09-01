@@ -48,6 +48,10 @@ func NewCommandPrune(out, errOut io.Writer) *cobra.Command {
 		},
 	}
 
+	// prune takes no arguments, and saying so is what stops the shell offering
+	// filenames in a position that accepts nothing.
+	cmd.ValidArgsFunction = cobra.NoFileCompletions
+
 	cmd.Flags().BoolVar(&o.delete, "delete", false,
 		"Delete the orphaned roles rather than printing them.")
 	o.client.bind(cmd)

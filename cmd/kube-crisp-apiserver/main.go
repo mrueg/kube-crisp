@@ -11,6 +11,7 @@ import (
 
 	"github.com/mrueg/kube-crisp/pkg/cmd/server"
 	"github.com/mrueg/kube-crisp/pkg/credentials/rdsiam"
+	"github.com/mrueg/kube-crisp/pkg/credentials/tokencommand"
 	"github.com/mrueg/kube-crisp/pkg/credentials/tokenfile"
 	"github.com/mrueg/kube-crisp/pkg/version"
 )
@@ -32,6 +33,13 @@ func main() {
 	}{
 		{rdsiam.ProviderName, rdsiam.Register},
 		{tokenfile.ProviderName, tokenfile.Register},
+		// Registered, and refusing everything until --credential-command-dir
+		// names a directory of commands. Registered rather than left out so
+		// that a projection naming it is told the operator has not enabled it,
+		// which is something to act on, instead of being told this build has
+		// never heard of it, which would send somebody to rebuild the binary
+		// they already have.
+		{tokencommand.ProviderName, tokencommand.Register},
 	} {
 		if err := register.fn(); err != nil {
 			fmt.Fprintf(os.Stderr, "registering the %s credential provider: %v\n", register.name, err)

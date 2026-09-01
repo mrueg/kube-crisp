@@ -3,13 +3,25 @@ name: kube-crisp
 description: Serve any SQL database as Kubernetes custom resources
 type: application
 
-# The chart tracks the application: there is one thing to release, and a second
-# number to reason about would only be a second thing to get wrong. Both numbers
-# are the released version, so `helm install` with no values deploys the image
-# of the same name -- which is what left this at 0.1.0 while 0.2.0 was the
-# release, and every default install a version behind.
-version: 0.2.0
-appVersion: "0.2.0"
+# Not a release, and deliberately not a number that could be mistaken for one.
+#
+# The chart people install is the one published to ghcr, and the release stamps
+# both numbers onto it from the tag -- `helm package --version --app-version` --
+# so whatever is written here is replaced at release time and cannot reach a
+# user. What is written here is only what a `helm install ./charts/kube-crisp`
+# from a checkout gets.
+#
+# It used to be the previous release's number, which made that install silently
+# deploy the previous server: 0.1.0 while 0.2.0 was out, then 0.2.0 while 0.3.0
+# was. Bumping it by hand fixed it twice and was forgotten twice, because
+# nothing in a release makes this file move. A version that is never a release
+# number cannot go stale, and says what this copy is.
+#
+# appVersion is the image tag, so `latest` is what makes a checkout install
+# usable at all -- it deploys the newest release. Set image.tag to pin one, or
+# to the image you just built.
+version: 0.0.0-dev
+appVersion: "latest"
 
 kubeVersion: ">=1.29.0-0"
 home: https://github.com/mrueg/kube-crisp

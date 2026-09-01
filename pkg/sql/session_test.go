@@ -2,8 +2,10 @@ package sql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,9 +59,12 @@ func TestValidateSessionVariableName(t *testing.T) {
 func TestSupportsSessionVariables(t *testing.T) {
 	for driver, want := range map[string]bool{
 		"postgres": true,
-		"mysql":    true,
-		"sqlite":   false,
-		"":         false,
+		// cockroach was missing from this table, and from the switch that
+		// picks the statement, while the registry said it had them.
+		"cockroach": true,
+		"mysql":     true,
+		"sqlite":    false,
+		"":          false,
 	} {
 		if got := SupportsSessionVariables(driver); got != want {
 			t.Errorf("SupportsSessionVariables(%q) = %v, want %v", driver, got, want)
@@ -206,5 +211,106 @@ func TestIsStatementTimeout(t *testing.T) {
 	}
 	if IsStatementTimeout(nil) {
 		t.Error("no error was read as a timeout")
+	}
+}
+
+// A driver may not claim session variables that this server has no statement to
+// set.
+//
+// The claim lives in the registry and the statement lives in sessionDialectFor,
+// and nothing joined them: cockroach declared the capability, was never named
+// in the dialect, and so was accepted at compile time and refused at request
+// time — for row-level security, which is what session variables are for. The
+// CRD enum has its own version of this test for the same reason, and its
+// comment records the same driver shipping unusable once before.
+func TestEveryDriverClaimingSessionVariablesCanSetOne(t *testing.T) {
+	for _, name := range RegisteredDrivers() {
+		d, ok := Lookup(name)
+		if !ok {
+			t.Fatalf("RegisteredDrivers() named %q, which does not resolve", name)
+		}
+		if d.SessionVariables && sessionDialectFor(name) == sessionUnsupported {
+			t.Errorf("driver %q is registered with SessionVariables: true and has no dialect, "+
+				"so a projection using them compiles and then fails every request", name)
+		}
+	}
+}
+
+// TestSessionDialects pins which shape each driver takes, since the two are not
+// interchangeable: set_config is scoped to the transaction and a MySQL user
+// variable outlives it and has to be cleared.
+func TestSessionDialects(t *testing.T) {
+	for driver, want := range map[string]sessionDialect{
+		"postgres":  sessionSetConfig,
+		"cockroach": sessionSetConfig,
+		"mysql":     sessionUserVariable,
+		"sqlite":    sessionUnsupported,
+		"oracle":    sessionUnsupported,
+		"":          sessionUnsupported,
+	} {
+		if got := sessionDialectFor(driver); got != want {
+			t.Errorf("sessionDialectFor(%q) = %d, want %d", driver, got, want)
+		}
+	}
+}
+
+// CockroachDB has to be sent the statement PostgreSQL is sent.
+//
+// Asserted on the statement rather than on the dialect, because the bug was not
+// that the mapping was wrong — there was no mapping, and the default branch
+// returned an error naming a capability the driver had been registered with.
+func TestCockroachSetsSessionVariablesLikePostgres(t *testing.T) {
+	for _, driver := range []string{"postgres", "cockroach"} {
+		t.Run(driver, func(t *testing.T) {
+			db, err := sql.Open("session-recorder", "")
+			if err != nil {
+				t.Fatalf("opening the recorder: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+
+			ctx := context.Background()
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("beginning: %v", err)
+			}
+			t.Cleanup(func() { _ = tx.Rollback() })
+
+			recorded := resetSessionRecorder()
+			pool := &Pool{db: db, driver: driver}
+			if err := pool.applySession(ctx, tx, []SessionVariable{
+				{Name: "app.tenant", Value: "acme"},
+			}); err != nil {
+				t.Fatalf("applySession() on %s: %v", driver, err)
+			}
+
+			execs := recorded()
+			if len(execs) != 1 {
+				t.Fatalf("ran %d statements, want 1: %+v", len(execs), execs)
+			}
+			if !strings.Contains(execs[0].sql, "set_config") {
+				t.Errorf("statement was %q, want set_config", execs[0].sql)
+			}
+			// Bound, never interpolated -- the name reaches the database as a
+			// parameter, which is what makes validating it a second defence
+			// rather than the only one.
+			if len(execs[0].args) != 2 ||
+				execs[0].args[0].Value != "app.tenant" ||
+				execs[0].args[1].Value != "acme" {
+				t.Errorf("bound %+v, want the name and the value", execs[0].args)
+			}
+		})
+	}
+}
+
+// clearSession has nothing to undo after set_config, on either driver that
+// takes it: the local flag already scoped the setting to the transaction.
+func TestClearSessionIsANoOpForSetConfigDrivers(t *testing.T) {
+	for _, driver := range []string{"postgres", "cockroach"} {
+		// A nil transaction would panic if this tried to use one.
+		if err := (&Pool{driver: driver}).clearSession(context.Background(), nil, []SessionVariable{
+			{Name: "app.tenant", Value: "acme"},
+		}); err != nil {
+			t.Errorf("clearSession() on %s: %v", driver, err)
+		}
 	}
 }

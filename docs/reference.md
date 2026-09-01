@@ -920,6 +920,9 @@ single column to page on, so it has to be named.
 Define `queries.count` and a paged list also reports `remainingItemCount`; the count only runs when
 a client actually pages.
 
+A continue token sent without a limit is a request in its own right, as it is against etcd: the read
+resumes where the token points and returns everything left, in one answer and with no further token.
+
 A projection that can do neither ignores the client's limit and returns everything, rather than
 truncating the collection while telling the client it saw all of it.
 

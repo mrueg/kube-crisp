@@ -1,8 +1,10 @@
 package sql
 
 import (
+	"context"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestRewrite(t *testing.T) {
@@ -235,6 +237,53 @@ func TestHasReturning(t *testing.T) {
 			stmt:   "UPDATE orders SET note = 'returning' WHERE id = :name",
 			want:   false,
 		},
+		{
+			// An unknown driver is read with every comment rule at once, so a
+			// keyword is never invented out of one. Inventing is the harmful
+			// direction: the write below is run as a query, commits, and
+			// answers with no rows, which the client is told is a 404.
+			name:   "an unknown driver does not read the keyword out of a comment",
+			driver: "nonesuch",
+			stmt:   "INSERT INTO orders (id) VALUES (:name) --returning id",
+			want:   false,
+		},
+		{
+			// SQLite is not MySQL. A backslash in a literal is data there, so
+			// this literal is closed and RETURNING is statement text. Read with
+			// MySQL's escapes the scanner ran past the closing quote, saw the
+			// rest of the statement as string, and answered false — so a write
+			// that does return the row it wrote was run for its effect instead.
+			name:   "sqlite backslash is data, so the word after the literal is code",
+			driver: "sqlite",
+			stmt:   `INSERT INTO items (id) VALUES ('C:\') RETURNING id`,
+			want:   true,
+		},
+		{
+			// The other direction, and the expensive one. SQLite needs no
+			// whitespace after the dashes, so this is a comment; MySQL's rule
+			// made it statement text. The write then ran as a query, committed,
+			// and answered zero rows, which the registry reports as a 404 or a
+			// conflict for a row that is in the table.
+			name:   "sqlite needs no space after the dashes for a comment",
+			driver: "sqlite",
+			stmt:   "INSERT INTO items (id) VALUES (:name) --returning id",
+			want:   false,
+		},
+		{
+			// # is a comment on MySQL and nothing at all on SQLite, so the
+			// keyword after one is still code.
+			name:   "sqlite has no hash comment",
+			driver: "sqlite",
+			stmt:   "INSERT INTO items (id) VALUES (:name) # returning id",
+			want:   true,
+		},
+		{
+			// CockroachDB is PostgreSQL's grammar as well as its protocol.
+			name:   "cockroach reads a literal the way postgres does",
+			driver: "cockroach",
+			stmt:   `INSERT INTO items (id) VALUES ('C:\') RETURNING id`,
+			want:   true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -246,7 +295,41 @@ func TestHasReturning(t *testing.T) {
 	}
 }
 
-// TestRewriteHandlesDriverSpecificSyntax covers three places where the scanner
+// TestEveryBuiltInDriverIsReadWithItsOwnGrammar pins the mapping the scanner
+// runs on.
+//
+// PlaceholderStyle used to stand in for it, and it cannot: there are two
+// placeholder styles and three grammars, so SQLite was read as MySQL for as
+// long as the two shared a ?. A built-in added here without being named in
+// lexDialectFor would fall through to the conservative reading — safe, but not
+// the reading of a database whose grammar this build does know.
+func TestEveryBuiltInDriverIsReadWithItsOwnGrammar(t *testing.T) {
+	want := map[string]lexDialect{
+		// CockroachDB speaks PostgreSQL's grammar, not only its wire protocol.
+		"postgres":  lexPostgres,
+		"cockroach": lexPostgres,
+		"mysql":     lexMySQL,
+		"sqlite":    lexSQLite,
+	}
+
+	for name, expected := range want {
+		if _, ok := Lookup(name); !ok {
+			t.Errorf("the %s driver is not registered", name)
+			continue
+		}
+		if got := lexDialectFor(name); got != expected {
+			t.Errorf("lexDialectFor(%q) = %v, want %v", name, got, expected)
+		}
+	}
+
+	// A driver registered by a build that links its own database/sql driver is
+	// read conservatively, because nothing here knows its grammar.
+	if got := lexDialectFor("nonesuch"); got != lexConservative {
+		t.Errorf("lexDialectFor(%q) = %v, want the conservative reading", "nonesuch", got)
+	}
+}
+
+// TestRewriteHandlesDriverSpecificSyntax covers the places where the scanner
 // read one database's rules into another's. Each produced a statement the
 // server then refused, with an error pointing at the wrong thing.
 func TestRewriteHandlesDriverSpecificSyntax(t *testing.T) {
@@ -299,6 +382,43 @@ func TestRewriteHandlesDriverSpecificSyntax(t *testing.T) {
 			sql:     "SELECT 1--:ignored\n, :name AS n",
 			wantSQL: "SELECT 1--:ignored\n, $1 AS n", wantParams: []string{"name"},
 		},
+		{
+			// SQLite shares MySQL's ? placeholders and none of its lexical
+			// rules. A backslash is data there, so this literal ends at the
+			// quote; read as an escape the scanner ran on to the end of the
+			// statement and :name was handed to SQLite as a named parameter of
+			// its own — which admission accepts, because SQLite accepts it, and
+			// which then fails at request time with a missing named argument.
+			name: "sqlite backslash is data, not an escape", driver: "sqlite",
+			sql:     `SELECT 'C:\' AS prefix, :name AS n`,
+			wantSQL: `SELECT 'C:\' AS prefix, ? AS n`, wantParams: []string{"name"},
+		},
+		{
+			// The same thing in the shape people actually write it: an escape
+			// character for LIKE. What went missing was the parameter that
+			// scopes the query to one namespace.
+			name: "sqlite keeps the parameter after a LIKE escape clause", driver: "sqlite",
+			sql:        `SELECT id FROM t WHERE name LIKE '%\_%' ESCAPE '\' AND tenant = :namespace`,
+			wantSQL:    `SELECT id FROM t WHERE name LIKE '%\_%' ESCAPE '\' AND tenant = ?`,
+			wantParams: []string{"namespace"},
+		},
+		{
+			// SQLite needs no whitespace after the dashes either, so this is a
+			// comment and the :not_a_param inside it is not a parameter. Bound
+			// as one it produced two arguments for one placeholder.
+			name: "sqlite double dash needs no space", driver: "sqlite",
+			sql:     "SELECT id FROM t WHERE id = :name --:not_a_param",
+			wantSQL: "SELECT id FROM t WHERE id = ? --:not_a_param", wantParams: []string{"name"},
+		},
+		{
+			// SQLite has no # comment, so nothing after one is hidden and the
+			// parameter is still rewritten. SQLite rejects the # itself, which
+			// is a loud failure the author can see; dropping the parameter was
+			// a quiet one they could not.
+			name: "sqlite has no hash comment", driver: "sqlite",
+			sql:     "SELECT id FROM t # :name",
+			wantSQL: "SELECT id FROM t # ?", wantParams: []string{"name"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, params, err := Rewrite(tc.sql, tc.driver)
@@ -318,5 +438,74 @@ func TestRewriteHandlesDriverSpecificSyntax(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSQLiteBindsAParameterAfterABackslashLiteral runs the statement against a
+// real SQLite, because the argument is about what SQLite does and not about
+// what the scanner believes.
+//
+// It insists on both halves: SQLite accepts 'C:\' as a complete literal, which
+// is what makes the backslash data there, and the parameter that follows it is
+// bound. Before this the parameter list came back empty and the :qty was left
+// in the statement — where SQLite reads it as a named parameter of its own. So
+// Pool.Check admitted a projection that could not run, and every request
+// against it answered `missing named argument "qty"`.
+func TestSQLiteBindsAParameterAfterABackslashLiteral(t *testing.T) {
+	pool := newTestPool(t, true)
+	ctx := context.Background()
+
+	insert, err := pool.Prepare(`INSERT INTO items (id, qty) VALUES ('C:\', 7)`, time.Second, 10)
+	if err != nil {
+		t.Fatalf("Prepare() returned error: %v", err)
+	}
+	if _, err := pool.Exec(ctx, insert, nil); err != nil {
+		t.Fatalf("SQLite rejected 'C:\\' as a literal: %v", err)
+	}
+
+	stmt, err := pool.Prepare(`SELECT id FROM items WHERE id = 'C:\' AND qty = :qty`, time.Second, 10)
+	if err != nil {
+		t.Fatalf("Prepare() returned error: %v", err)
+	}
+	if len(stmt.Params) != 1 || stmt.Params[0] != "qty" {
+		t.Fatalf("prepared params = %v, want [qty]: the literal swallowed the rest of the statement", stmt.Params)
+	}
+
+	rows, err := pool.Query(ctx, stmt, map[string]any{"qty": int64(7)})
+	if err != nil {
+		t.Fatalf("Query() returned error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("Query() returned %d rows, want 1", len(rows))
+	}
+}
+
+// TestSQLiteWriteWithACommentedKeywordIsRunForItsEffect is the failure that
+// costs the most.
+//
+// SQLite ends a comment at two dashes with nothing after them, so this
+// statement does not answer with rows. Read with MySQL's rule the keyword was
+// statement text, the write was run as a query, and it committed and answered
+// nothing — which the registry turns into a 404 or a conflict for a row that is
+// now in the table.
+func TestSQLiteWriteWithACommentedKeywordIsRunForItsEffect(t *testing.T) {
+	pool := newTestPool(t, true)
+	ctx := context.Background()
+
+	const source = "INSERT INTO items (id, qty) VALUES (:id, 1) --returning id"
+	if HasReturning(source, "sqlite") {
+		t.Fatal("HasReturning read the keyword out of a comment, so the write would be run as a query")
+	}
+
+	stmt, err := pool.Prepare(source, time.Second, 10)
+	if err != nil {
+		t.Fatalf("Prepare() returned error: %v", err)
+	}
+	affected, err := pool.Exec(ctx, stmt, map[string]any{"id": "written"})
+	if err != nil {
+		t.Fatalf("Exec() returned error: %v", err)
+	}
+	if affected != 1 {
+		t.Errorf("Exec() affected %d rows, want 1", affected)
 	}
 }

@@ -31,10 +31,11 @@ func Rewrite(stmt, driver string) (string, []string, error) {
 	}
 
 	var (
-		out    strings.Builder
-		names  []string
-		index  = make(map[string]int)
-		nextID = 1
+		dialect = lexDialectFor(driver)
+		out     strings.Builder
+		names   []string
+		index   = make(map[string]int)
+		nextID  = 1
 	)
 
 	for i := 0; i < len(stmt); {
@@ -43,7 +44,7 @@ func Rewrite(stmt, driver string) (string, []string, error) {
 		// Anything that is not statement text — a literal, a quoted identifier,
 		// a comment — is copied across untouched, so nothing inside it is read
 		// as a bind parameter.
-		if end, ok := skipNonCode(stmt, i, style); ok {
+		if end, ok := skipNonCode(stmt, i, dialect); ok {
 			out.WriteString(stmt[i:end])
 			i = end
 			continue
@@ -134,6 +135,101 @@ func isNameChar(c byte) bool {
 	return isNameStart(c) || (c >= '0' && c <= '9')
 }
 
+// lexDialect is how a database reads the text of a statement: which characters
+// open a string literal or a comment, and what ends one.
+//
+// It exists because PlaceholderStyle was standing in for this, and the two are
+// not the same question. There are two placeholder styles and three lexical
+// dialects: MySQL and SQLite both spell a parameter ?, and almost everything
+// about how they read a literal differs. Keying the scanner off the placeholder
+// style therefore handed SQLite MySQL's rules — a backslash escapes inside a
+// literal, # opens a comment, -- opens one only when whitespace follows — and
+// SQLite follows the standard on all three, exactly as PostgreSQL does. So
+// 'C:\' ran the scanner past its own closing quote and every :name after it
+// stopped being rewritten, while INSERT ... --returning id was read as a
+// statement that answers with rows: run as a query it commits and returns
+// nothing, and the client is told 404 for a row that is there.
+//
+// PlaceholderStyle stays what it is. It is registry API — a driver declares it
+// and the README documents it — so the lexical rules are derived from the
+// driver name here instead, the way sessionDialectFor derives the shape of a
+// session-variable statement from it.
+type lexDialect uint8
+
+const (
+	// lexConservative is what a driver this build does not recognise gets.
+	//
+	// Every rule that makes a region something other than code is turned on at
+	// once, so this scan skips at least as much text as any named dialect below
+	// would. That is the safe direction for all three readers, because each of
+	// them is looking for something and the harm is in finding one that is not
+	// there: a table name read out of a comment is invented, and a RETURNING
+	// read out of one turns a write into a query that commits and answers with
+	// no rows, which the registry reports as a 404 or a conflict for a write
+	// that landed. Missing one only means a write is run for its effect, which
+	// is what a write is for.
+	//
+	// Rewrite never sees this value. An unregistered driver has no placeholder
+	// style either, so it is refused before the scan begins.
+	lexConservative lexDialect = iota
+	lexPostgres
+	lexMySQL
+	lexSQLite
+)
+
+// lexDialectFor reports how a driver's statement text is to be read.
+//
+// Derived from the driver name rather than declared in the registry, because
+// this is a property of the database's grammar and not something a driver
+// author has a choice about. CockroachDB is PostgreSQL's grammar as much as it
+// is PostgreSQL's wire protocol, so it reads the same.
+func lexDialectFor(driver string) lexDialect {
+	switch driver {
+	case "postgres", "cockroach":
+		return lexPostgres
+	case "mysql":
+		return lexMySQL
+	case "sqlite":
+		return lexSQLite
+	}
+	return lexConservative
+}
+
+// backslashEscapes reports whether a backslash escapes the character after it
+// inside an ordinary '...' literal.
+//
+// MySQL's default, and nobody else's. PostgreSQL has had
+// standard_conforming_strings on since 9.1 and SQLite never had anything else,
+// so in both a backslash is data and 'C:\' is a complete string. Reading it as
+// an escape there ran the scanner past the closing quote and swallowed the rest
+// of the statement, so every :name after it stopped being rewritten — which is
+// how the idiomatic LIKE '%\_%' ESCAPE '\' silently lost the :namespace that
+// scopes a query to one tenant.
+func (d lexDialect) backslashEscapes() bool {
+	return d == lexMySQL || d == lexConservative
+}
+
+// dollarQuotes reports whether $tag$...$tag$ opens a string literal. PostgreSQL
+// function bodies live in these, and a body is full of things that look like
+// bind parameters and are not.
+func (d lexDialect) dollarQuotes() bool {
+	return d == lexPostgres || d == lexConservative
+}
+
+// hashComments reports whether # opens a line comment. MySQL only: in
+// PostgreSQL # is an operator, and SQLite has no such comment at all.
+func (d lexDialect) hashComments() bool {
+	return d == lexMySQL || d == lexConservative
+}
+
+// lineCommentNeedsSpace reports whether -- opens a comment only when a space, a
+// tab, or a newline follows it. MySQL requires that, which is what makes 1--2 a
+// subtraction of a negative number there and a comment in PostgreSQL and
+// SQLite.
+func (d lexDialect) lineCommentNeedsSpace() bool {
+	return d == lexMySQL
+}
+
 // skipNonCode reports where the region starting at i ends when that region is
 // not statement text: a string literal, a quoted identifier, or a comment. It
 // reports false when the statement at i is code.
@@ -142,69 +238,37 @@ func isNameChar(c byte) bool {
 // comment as code would bind a parameter that is not there; a scanner looking
 // for a keyword and finding one inside a string literal would classify the
 // statement as something it is not.
-func skipNonCode(stmt string, i int, style PlaceholderStyle) (int, bool) {
+func skipNonCode(stmt string, i int, dialect lexDialect) (int, bool) {
 	c := stmt[i]
 
 	switch {
-	// Single-quoted string literal, with '' escaping.
-	//
-	// Whether a backslash also escapes depends on the database. MySQL treats
-	// \' that way by default. PostgreSQL does not: standard_conforming_strings
-	// has been on since 9.1, so a backslash in an ordinary literal is data and
-	// 'C:\' is a complete string. Treating it as an escape there ran the
-	// scanner past the closing quote and swallowed the rest of the statement,
-	// so every :name after it stopped being rewritten and PostgreSQL was handed
-	// a literal colon to choke on.
+	// Single-quoted string literal.
 	case c == '\'':
-		backslashEscapes := style != PlaceholderDollar
-		j := i + 1
-		for j < len(stmt) {
-			if backslashEscapes && stmt[j] == '\\' && j+1 < len(stmt) {
-				j += 2
-				continue
-			}
-			if stmt[j] == '\'' {
-				if j+1 < len(stmt) && stmt[j+1] == '\'' {
-					j += 2
-					continue
-				}
-				j++
-				break
-			}
-			j++
-		}
-		return j, true
+		return endOfString(stmt, i, dialect.backslashEscapes()), true
 
-	// PostgreSQL dollar-quoted string, $$...$$ or $tag$...$tag$. Function
-	// bodies live in these, and a body is full of things that look like bind
-	// parameters and are not.
+	// PostgreSQL dollar-quoted string, $$...$$ or $tag$...$tag$.
 	//
 	// Anything else starting with $ — a hand-written positional placeholder, an
 	// unclosed tag — is not a literal, so the text after it is statement text
 	// and is scanned as such.
-	case c == '$' && style == PlaceholderDollar:
+	case c == '$' && dialect.dollarQuotes():
 		return dollarQuote(stmt, i)
 
 	// Double-quoted identifier.
 	case c == '"':
 		return endOfDelimited(stmt, i, '"'), true
 
-	// Backtick-quoted identifier (MySQL).
+	// Backtick-quoted identifier (MySQL, and SQLite, which accepts them for
+	// compatibility with it).
 	case c == '`':
 		return endOfDelimited(stmt, i, '`'), true
 
 	// Line comment.
-	//
-	// MySQL requires whitespace after the two dashes: 1--2 is a subtraction of
-	// a negative number, not a comment. Treating it as one swallowed the rest
-	// of the line, and any :name in it stopped being rewritten. PostgreSQL has
-	// no such rule, so -- always starts a comment there.
-	case c == '-' && i+1 < len(stmt) && stmt[i+1] == '-' && startsLineComment(stmt, i, style):
+	case c == '-' && i+1 < len(stmt) && stmt[i+1] == '-' && startsLineComment(stmt, i, dialect):
 		return endOfLine(stmt, i), true
 
-	// MySQL line comment. Not a comment character in PostgreSQL, where # is
-	// only ever an operator.
-	case c == '#' && style == PlaceholderQuestion:
+	// MySQL line comment.
+	case c == '#' && dialect.hashComments():
 		return endOfLine(stmt, i), true
 
 	// Block comment.
@@ -217,6 +281,32 @@ func skipNonCode(stmt string, i int, style PlaceholderStyle) (int, bool) {
 	}
 
 	return 0, false
+}
+
+// endOfString reports where the '...' literal opened at i ends, or the end of
+// the statement when it is never closed.
+//
+// A doubled quote is an escaped one everywhere. Whether a backslash escapes as
+// well is the database's business, which is why the caller answers that rather
+// than this deciding it.
+func endOfString(stmt string, i int, backslashEscapes bool) int {
+	j := i + 1
+	for j < len(stmt) {
+		if backslashEscapes && stmt[j] == '\\' && j+1 < len(stmt) {
+			j += 2
+			continue
+		}
+		if stmt[j] == '\'' {
+			if j+1 < len(stmt) && stmt[j+1] == '\'' {
+				j += 2
+				continue
+			}
+			j++
+			break
+		}
+		j++
+	}
+	return j
 }
 
 // endOfDelimited reports where a region opened at i by delimiter and closed by
@@ -241,15 +331,10 @@ func endOfDelimited(stmt string, i int, delimiter byte) int {
 // client is told the object was not found or that something else changed it
 // first — for a write that in fact landed.
 func HasReturning(stmt, driver string) bool {
-	// An unknown driver still has literals and comments; only dollar-quoting is
-	// specific, and assuming it absent finds strictly fewer keywords.
-	style, err := placeholderStyle(driver)
-	if err != nil {
-		style = PlaceholderQuestion
-	}
+	dialect := lexDialectFor(driver)
 
 	for i := 0; i < len(stmt); {
-		if end, ok := skipNonCode(stmt, i, style); ok {
+		if end, ok := skipNonCode(stmt, i, dialect); ok {
 			i = end
 			continue
 		}
@@ -274,11 +359,11 @@ func HasReturning(stmt, driver string) bool {
 
 // startsLineComment reports whether a -- at i begins a comment.
 //
-// MySQL requires a space, tab, or newline after the dashes; PostgreSQL does
-// not. The difference matters for arithmetic: 1--2 is 1 minus negative 2 on
-// MySQL and a comment on PostgreSQL.
-func startsLineComment(stmt string, i int, style PlaceholderStyle) bool {
-	if style == PlaceholderDollar {
+// MySQL requires a space, tab, or newline after the dashes; PostgreSQL and
+// SQLite do not. The difference matters for arithmetic: 1--2 is 1 minus
+// negative 2 on MySQL and a comment on the other two.
+func startsLineComment(stmt string, i int, dialect lexDialect) bool {
+	if !dialect.lineCommentNeedsSpace() {
 		return true
 	}
 	if i+2 >= len(stmt) {

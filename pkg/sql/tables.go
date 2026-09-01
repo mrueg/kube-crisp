@@ -32,12 +32,7 @@ import (
 // Both are why the result is described as what the projection names rather than
 // as a complete schema.
 func Tables(stmt, driver string) []string {
-	// An unknown driver still has literals and comments; only dollar-quoting is
-	// specific, and assuming it absent finds strictly fewer names.
-	style, err := placeholderStyle(driver)
-	if err != nil {
-		style = PlaceholderQuestion
-	}
+	dialect := lexDialectFor(driver)
 
 	var (
 		found []string
@@ -53,7 +48,7 @@ func Tables(stmt, driver string) []string {
 	}
 
 	for i := 0; i < len(stmt); {
-		if end, ok := skipNonCode(stmt, i, style); ok {
+		if end, ok := skipNonCode(stmt, i, dialect); ok {
 			i = end
 			continue
 		}
@@ -79,7 +74,7 @@ func Tables(stmt, driver string) []string {
 		// a subquery nobody writes there, and skipping is the conservative
 		// direction: a name missed is a name not invented.
 		if fromTakingCall[strings.ToLower(keyword)] {
-			if end, ok := skipCall(stmt, j, style); ok {
+			if end, ok := skipCall(stmt, j, dialect); ok {
 				i = end
 				continue
 			}
@@ -89,13 +84,13 @@ func Tables(stmt, driver string) []string {
 		// subquery or a set-returning function instead.
 		switch {
 		case strings.EqualFold(keyword, "into"), strings.EqualFold(keyword, "update"):
-			if name, next, ok := tableRef(stmt, j, style, false); ok {
+			if name, next, ok := tableRef(stmt, j, dialect, false); ok {
 				add(name)
 				i = next
 				continue
 			}
 		case strings.EqualFold(keyword, "from"), strings.EqualFold(keyword, "join"):
-			if name, next, ok := tableRef(stmt, j, style, true); ok {
+			if name, next, ok := tableRef(stmt, j, dialect, true); ok {
 				add(name)
 				i = next
 				continue
@@ -115,7 +110,7 @@ func Tables(stmt, driver string) []string {
 // or JOIN, "generate_series(1, 10)" is a function and not a table. After
 // INSERT INTO, "orders(id, tenant)" is a table followed by its column list, so
 // the same punctuation means the opposite thing.
-func tableRef(stmt string, i int, style PlaceholderStyle, rejectCalls bool) (string, int, bool) {
+func tableRef(stmt string, i int, dialect lexDialect, rejectCalls bool) (string, int, bool) {
 	for {
 		i = skipSpace(stmt, i)
 		if i >= len(stmt) {
@@ -196,7 +191,7 @@ var fromTakingCall = map[string]bool{
 // "extract" is still read as a name rather than swallowing the rest of the
 // statement. Nesting is counted, and skipNonCode keeps a parenthesis inside a
 // string or a comment from closing it.
-func skipCall(stmt string, i int, style PlaceholderStyle) (int, bool) {
+func skipCall(stmt string, i int, dialect lexDialect) (int, bool) {
 	i = skipSpace(stmt, i)
 	if i >= len(stmt) || stmt[i] != '(' {
 		return i, false
@@ -204,7 +199,7 @@ func skipCall(stmt string, i int, style PlaceholderStyle) (int, bool) {
 
 	depth := 0
 	for i < len(stmt) {
-		if end, ok := skipNonCode(stmt, i, style); ok {
+		if end, ok := skipNonCode(stmt, i, dialect); ok {
 			i = end
 			continue
 		}

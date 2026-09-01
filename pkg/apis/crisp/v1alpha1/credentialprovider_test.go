@@ -30,7 +30,9 @@ func TestTheAuthProviderFieldAcceptsEveryRegisteredCredentialProvider(t *testing
 	crd := readCRD(t)
 	field := authProviderSchema(t, crd)
 
-	// The registry as this build holds it.
+	// The registry as this build holds it — which in this test binary is
+	// nothing, since a provider is registered by a main and there is none here.
+	// Hence the table below as well.
 	for _, name := range crispsql.RegisteredCredentialProviders() {
 		if err := field.accepts(name); err != nil {
 			t.Errorf("this build registers the %q credential provider and the CRD would reject it: %v", name, err)
@@ -41,7 +43,7 @@ func TestTheAuthProviderFieldAcceptsEveryRegisteredCredentialProvider(t *testing
 	// build holds are not the ones a custom build will add. Every name here is
 	// one a provider in this project's own documentation carries or plausibly
 	// would.
-	for _, name := range []string{"aws-rds-iam", "gcp-cloudsql-iam", "azure-entra", "vault"} {
+	for _, name := range []string{"token-file", "token-command", "aws-rds-iam", "gcp-cloudsql-iam", "azure-entra", "vault"} {
 		if err := field.accepts(name); err != nil {
 			t.Errorf("the CRD rejects %q, which is the shape a credential provider name has: %v", name, err)
 		}

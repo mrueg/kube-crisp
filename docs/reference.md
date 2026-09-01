@@ -928,13 +928,18 @@ already open keeps working for as long as it is open; only a connection actually
 for a token. Which is also why a provider should cache: connections are opened in bursts after an
 idle period, and `maxIdleConns` defaults to `maxOpenConns` precisely so that those bursts are rare.
 
-**Which providers exist is a property of the build.** Every one of them is a cloud SDK linked into
-the binary, and kube-crisp links no dependency a given build does not need — the same reason a driver
-is a registration rather than a switch — so the image published from this repository registers none.
-Naming a provider needs a binary that registers it; see [Adding a credential
-provider](../README.md#adding-a-credential-provider). A projection naming one this build does not
-have is refused when it is compiled, by name, with the providers it does have — the same place, and
-the same `Ready` condition, as a projection naming an unknown driver.
+**Which providers exist is a property of the build.** A provider that talks to a cloud is that
+cloud's SDK linked into the binary, and kube-crisp links no dependency a given build does not need —
+the same reason a driver is a registration rather than a switch — so the image published from this
+repository carries none of them. Naming one needs a binary that registers it; see [Adding a
+credential provider](../README.md#adding-a-credential-provider). A projection naming a provider this
+build does not have is refused when it is compiled, by name, with the providers it does have — the
+same place, and the same `Ready` condition, as a projection naming an unknown driver.
+
+What the published build does register is the two below, which need no SDK because they mint nothing:
+`token-file` reads a credential something else already refreshes, and `token-command` runs a command
+the operator installed and reads what it prints. The second of those runs nothing at all until an
+operator enables it.
 
 `postgres`, `cockroach` and `mysql` only. SQLite is a local file with no password and no connection,
 and the CRD refuses `auth` on it outright.
@@ -1008,6 +1013,162 @@ still shaking hands, and the result is an intermittent authentication failure un
 about the least diagnosable thing this could do. Signing is local — SigV4 over a URL, with no request
 to AWS — so the cache is not about the cost of a token; it is about not signing eight of them when a
 pool refills after an idle period.
+
+### A credential kept in a file
+
+`token-file` is the cloud-agnostic shape of the same idea, and it is registered in the published
+build. Something else mints the credential and keeps the current one in a file; kube-crisp reads that
+file when it opens a connection. In Kubernetes that something else has been written several times
+over — a projected ServiceAccount token, a Vault Agent sidecar, a cloud token refresher, a Secrets
+Store CSI driver — and every one of them delivers the same way, as a file on a mounted volume,
+rewritten before it expires.
+
+```yaml
+dataSource:
+  driver: postgres
+  secretRef: {name: orders-db, namespace: kube-crisp}
+  auth:
+    provider: token-file
+    options:
+      path: /var/run/kube-crisp/credentials/orders-db
+```
+
+**The file is read on every connection and never held on to.** That is the property the whole seam
+exists for. A provider that read it once at startup would authenticate with a credential that stopped
+being valid an hour ago and fail every new connection in a way that reads as the database going down;
+writing it into the connection string instead would rebuild the pool each time the file changed.
+Reading it per connection means whoever rewrites the file has to do nothing else — no restart, no
+rolled deployment, no pool rebuilt — and the connections already open are not disturbed either.
+
+There is deliberately no cache, which is the opposite of the advice above, for the opposite reason.
+Caching is asked of a provider that *signs* a token, because signing has a cost and sometimes a bill.
+This reads a page the kernel already has, once per new connection, and connections are opened rarely
+by construction. A cache would buy microseconds and pay for them in staleness — a credential held for
+a few seconds after the writer replaced it is a connection that fails authentication for no visible
+reason.
+
+**Which files a projection may name is the operator's decision, not the projection's.** A
+`CustomResourceProjection` is a cluster object, so whoever can create one chooses the path; an
+unconstrained path would let them have the server read any file its process can — its own
+ServiceAccount token, its serving key, a Secret mounted for something else — and hand it to a
+database as a password. That is an escalation from "may define a projection" to "may exfiltrate the
+server's identity", and no option is worth it. So a path must be absolute and must lie inside a
+directory named by `--credential-token-file-dirs`, which defaults to `/var/run/kube-crisp/credentials`
+— a path nothing else in a container image uses, so that the default answer to "which files may a
+projection name" is "the ones somebody mounted here on purpose". A refresher that writes elsewhere,
+`/vault/secrets` or a projected token under `/var/run/secrets`, is named in that flag deliberately.
+Setting it to nothing permits nothing, and every projection naming the provider is then refused with
+the flag in the message rather than reported as an unknown provider, which would send somebody to
+rebuild a binary that already has it.
+
+The containment check is made twice: lexically when the projection is compiled, and again on the
+resolved path each time the file is read, because a symlink planted inside a permitted directory
+would otherwise point wherever it liked. Resolving per read is also what makes a projected volume
+work at all — Kubernetes writes those as a symlink into a timestamped directory and rotates them by
+swapping the link, so a resolution cached once would pin the pool to a directory the kubelet has
+since deleted.
+
+The failures are worth knowing from outside. A file that does not exist **when the projection is
+compiled** is only logged, because the refresher writing it and this server start in no particular
+order, and a projection failed for that race would stay failed after the race was over. A file that
+does not exist **when a connection is opened** fails that connection, naming the path. An empty file
+is refused rather than sent as an empty password, which would otherwise authenticate as whoever the
+database lets in without one. Anything larger than 64 KiB is refused rather than truncated — a
+credential cut in half is refused by the database with nothing pointing at the cause — and so is
+anything that is not a regular file, since a FIFO would block the connection opener until somebody
+wrote to it. The trailing newline is stripped, and nothing else is: almost everything that writes a
+file writes a line, and a database refusing a token because of a byte that does not print is the
+least diagnosable failure in this path. Spaces are left alone, because unlike a line ending they can
+be part of a credential somebody chose.
+
+Everything the seam refuses applies here unchanged. Whatever is in the file is a bearer credential
+sent as typed, so an unencrypted connection is refused when the projection is compiled, exactly as it
+is for a token minted from an SDK.
+
+### A credential printed by a command, which an operator has to turn on
+
+`token-command` is the same idea for a tool that prints a credential and exits — `gcloud auth
+print-access-token`, `aws rds generate-db-auth-token`, `vault read -field=password` — where the
+alternative is a sidecar looping around that command, a shared volume, and a refresh interval to get
+wrong. It is registered in every build and **runs nothing until an operator names a directory of
+commands** with `--credential-command-dir`.
+
+```yaml
+# --credential-command-dir=/etc/kube-crisp/credential-commands
+dataSource:
+  driver: postgres
+  secretRef: {name: orders-db, namespace: kube-crisp}
+  auth:
+    provider: token-command
+    options:
+      command: orders-db-token     # one file in that directory, by its bare name
+      timeout: 10s                 # optional; a minute at the very most
+```
+
+**Running a command here is a privilege escalation, and the flag is shaped to close it.** A
+`CustomResourceProjection` is a cluster object, so whoever may create one would otherwise be able to
+run whatever they liked inside the API server pod, as the server, with its ServiceAccount token, its
+Secrets, and its place in the cluster. That is not the bargain kubeconfig's `exec` credential plugin
+makes: there the file describing what to run sits on the user's own machine and describes what that
+user already runs as themselves. Here the two are different principals, and the gap between them is
+the whole of the escalation.
+
+A boolean switch would not close it — it would only move the decision from "anybody who can write a
+projection" to "anybody who can write a projection, once". Nor would an allow-list of binaries, since
+the arguments are most of the danger: a permitted binary with attacker-chosen arguments is `/bin/sh
+-c`, or any of the ordinary tools that will read a file and print it. So the switch is a directory
+the operator filled — a ConfigMap mounted executable, or something baked into the image — and a
+projection names one file in it by its bare name, with no arguments, ever, from anywhere. What a
+projection contributes is a choice among things the operator wrote, which is the same shape as the
+provider name choosing among providers the build linked and `secretRef` choosing among Secrets the
+operator permitted.
+
+Two things follow. Point the flag at a directory somebody else fills and all of it is undone —
+`/usr/bin` holds a great many programs that print something sensitive when run with no arguments at
+all. And a command in that directory is as privileged as the server, because it runs as the server;
+it is the operator's code in every sense that matters.
+
+Left unset, which is the default, a projection naming the provider is refused **while it is being
+compiled**, by name, saying that the operator has not enabled it and naming the flag. It is
+registered rather than left out precisely so that the refusal can say that: reported as an unknown
+provider instead, it would send somebody to rebuild a binary that is already the right one. This is
+the trap `sessionDialectFor` documents at length — a capability claimed in one place and denied in
+another is denied on a path nobody watches.
+
+Nothing else about the projection is trusted either. The command name must be a bare filename, and
+the file it resolves to must still be inside the directory once its symlinks are followed, because
+unlike a credential file this one is executed. It must be a regular file and it must be executable
+when the projection compiles, since a ConfigMap mounted without a mode that permits execution is the
+likeliest way to get this wrong and "permission denied", once per connection attempt, is a bad place
+to learn it. Unlike `token-file`, the command has to exist by then: it is installed with the server
+rather than written by something racing it.
+
+There is no shell. The file is executed directly, so there is no string anywhere for a shell to find
+a metacharacter in. It inherits this server's environment, because a command talking to a cloud needs
+the same region and credential configuration this process was given and could read all of it anyway.
+It gets `10s` unless the projection asks for something else, and no more than a minute whatever it
+asks for — something has to bound it, because the context `database/sql` opens a connection with
+carries no deadline of its own, and one wedged process would otherwise hold a connection slot until
+the server restarted. A pool whose connections are all waiting on a hung command is
+indistinguishable, from outside, from a database that stopped answering.
+
+Connections opened in the same instant share one run, which is not a cache and must not become one: a
+command prints a token and says nothing about how long it is good for, so a held one is a credential
+nothing here can vouch for. What is shared is a run that is happening anyway — a pool refilling after
+an idle period opens several connections at once, each of which would otherwise fork a process and
+ask a cloud for a token identical to the others'.
+
+Standard error is quoted in the error message when the command fails, and discarded when it does not.
+A failed command has no credential to leak and every reason to be quoted, since that message is what
+reaches the projection's `Ready` condition; a successful one has already said what it had to say on
+stdout, and repeating its chatter would put the stream sitting beside a credential into the log at
+the rate connections are opened. It follows that a command which prints secrets to stderr *and*
+fails will have them in that condition, which is one more reason the commands are the operator's.
+
+**Prefer `token-file` where you can.** Nothing here is better than a credential in a file, and most
+of what people would reach for this to do is better done by writing that file. This exists for the
+tool that only prints, and it costs a fork and an exec on the connection path where `token-file`
+costs a read.
 
 ## Registration
 

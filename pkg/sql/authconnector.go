@@ -113,8 +113,8 @@ func driversWithAuthConnector() []string {
 
 // joinOr renders a list for an error message, with something to say when it is
 // empty. "this build knows " followed by nothing reads as a bug in the message
-// rather than as an answer — and empty is the ordinary case for providers,
-// since the binary this repository builds registers none.
+// rather than as an answer — and empty is a case providers really reach, since
+// a build registers only the ones it was assembled for.
 func joinOr(names []string, empty string) string {
 	if len(names) == 0 {
 		return empty

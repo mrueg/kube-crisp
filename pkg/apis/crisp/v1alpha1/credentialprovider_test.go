@@ -43,7 +43,7 @@ func TestTheAuthProviderFieldAcceptsEveryRegisteredCredentialProvider(t *testing
 	// build holds are not the ones a custom build will add. Every name here is
 	// one a provider in this project's own documentation carries or plausibly
 	// would.
-	for _, name := range []string{"token-file", "aws-rds-iam", "gcp-cloudsql-iam", "azure-entra", "vault"} {
+	for _, name := range []string{"token-file", "token-command", "aws-rds-iam", "gcp-cloudsql-iam", "azure-entra", "vault"} {
 		if err := field.accepts(name); err != nil {
 			t.Errorf("the CRD rejects %q, which is the shape a credential provider name has: %v", name, err)
 		}

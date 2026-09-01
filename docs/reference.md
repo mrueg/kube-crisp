@@ -633,6 +633,24 @@ while keeping their own behaviour.
 A watcher that reconnects with a `resourceVersion` is normally answered from an in-memory ring of
 recent changes, bounded by `watch.historySize`. Beyond it the honest answer is `410` and a relist.
 
+### Deletions that do not move the version
+
+Where the version comes from a mapped column, a deletion has nothing to raise it with: the row that
+carried the version is the one that is gone. A resync noticing a row that stopped coming back, or a
+tombstone that records only the identity columns, both remove an object and leave the version
+exactly where it was — so a client resuming from that version is indistinguishable from one that has
+already seen the removal.
+
+Such a deletion is therefore replayed to anyone resuming from that version, which means a client
+that had already seen it is handed it twice. A watch is allowed to repeat an event and every
+informer tolerates it; the alternative was a client keeping a row that no longer exists, with no
+`410` to tell it to relist. A tombstone that carries the mapped `resourceVersion` column moves the
+mark like any other change and does not go through this at all, which is one more reason to write
+one.
+
+Only removals. An `Added` or `Modified` at the current version carries a row whose own version *is*
+that version, and a client at it either listed the row or was sent it.
+
 ### What a list reports as its resourceVersion
 
 A list stamps the watch cache's version, which is the point a watch can resume from — so the usual

@@ -32,6 +32,12 @@ func FuzzRewrite(f *testing.F) {
 		`SELECT id FROM t WHERE name LIKE '%\_%' ESCAPE '\' AND tenant = :namespace`,
 		"SELECT 1--:x\n, :name AS n",
 		"SELECT id FROM t # :name",
+		// PostgreSQL nests block comments and escapes inside E'', so the same
+		// bytes are comment, string, and code in different places per driver.
+		"/* outer /* inner */ :ghost */ SELECT :id",
+		`INSERT INTO t (a, b) VALUES (E'it\'s', :b)`,
+		`SELECT date'a\' AS d, :name AS n`,
+		"SELECT 1 /*/ :ghost",
 		"UPDATE t SET a = :a WHERE v = :resourceVersion",
 		":",
 		"::",

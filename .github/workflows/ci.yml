@@ -55,6 +55,33 @@ jobs:
       - name: every benchmark is in a shard
         run: make e2e-bench-check
 
+  # The optional credential providers, each a module of its own so that its
+  # cloud SDK stays out of kube-crisp's go.mod. A nested module is invisible to
+  # ./... , so without this job they would build against a kube-crisp they are
+  # no longer compatible with and nothing would say so until somebody tried.
+  providers:
+    name: Credential providers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build, vet and test
+        run: make providers-build providers-vet providers-test
+
+      # Separately from the hygiene job, which only sees the root module.
+      - name: go mod tidy
+        run: make providers-tidy-check
+
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          working-directory: providers/aws
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

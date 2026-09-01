@@ -18,8 +18,9 @@ import (
 )
 
 type pruneOptions struct {
-	client clientFlags
-	delete bool
+	client      clientFlags
+	delete      bool
+	apiServices bool
 }
 
 // NewCommandPrune builds the `prune` subcommand.
@@ -40,6 +41,13 @@ func NewCommandPrune(out, errOut io.Writer) *cobra.Command {
 			"also a RoleBinding in any namespace, since that is how a namespaced projected kind\n" +
 			"is granted per tenant — leaving those behind would leave a reference to a role that\n" +
 			"no longer exists.\n\n" +
+			"`--apiservices` looks for the other thing a projection leaves behind: the\n" +
+			"registration that routed its group here. Those are owned by the projection and go\n" +
+			"with it, except for a group served from `--projection-dir`, which has no object\n" +
+			"whose deletion could collect it — so stopping the server without first removing\n" +
+			"the files strands one. A stranded registration is a cluster-scoped object the\n" +
+			"aggregation layer goes on dialling, and it degrades `kubectl api-resources` for\n" +
+			"the whole cluster rather than only for that group.\n\n" +
 			"Prints what it would remove. Pass --delete to remove it.",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
@@ -53,7 +61,10 @@ func NewCommandPrune(out, errOut io.Writer) *cobra.Command {
 	cmd.ValidArgsFunction = cobra.NoFileCompletions
 
 	cmd.Flags().BoolVar(&o.delete, "delete", false,
-		"Delete the orphaned roles rather than printing them.")
+		"Delete what was found rather than printing it.")
+	cmd.Flags().BoolVar(&o.apiServices, "apiservices", false,
+		"Look for stranded APIServices instead of orphaned ClusterRoles. One kind of leftover "+
+			"per run, so that what --delete would remove is never two things at once.")
 	o.client.bind(cmd)
 
 	return cmd
@@ -64,6 +75,15 @@ func (o *pruneOptions) run(ctx context.Context, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
+
+	if o.apiServices {
+		dyn, err := o.client.dynamic()
+		if err != nil {
+			return err
+		}
+		return o.pruneAPIServices(ctx, crisp, dyn, out, errOut)
+	}
+
 	kube, err := o.client.kube()
 	if err != nil {
 		return err

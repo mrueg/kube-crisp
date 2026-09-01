@@ -565,6 +565,27 @@ running server when it stops serving the group, so shutting the server down with
 the files leaves them behind. To find any that outlived their server:
 
 ```console
+$ kubectl crisp prune --apiservices
+v1alpha1.orders.example.com  (orders.example.com/v1alpha1: no projection serves this group, and it is unavailable)
+  service/kube-crisp-apiserver in kube-crisp not found
+
+1 stranded APIService(s). Pass --delete to remove them.
+```
+
+A registration is a candidate only when all three hold: it carries the
+`app.kubernetes.io/managed-by: kube-crisp` label, so nothing written by anybody else is ever
+considered; no projection in the cluster declares its group version; and the aggregation layer
+reports it unavailable. That last one is what makes this safe to run while file-backed projections
+are being served — such a projection is invisible from the cluster, so the second test is true of a
+registration that is in use, and only the aggregator can tell the two apart. A registration left
+alone for that reason is named on stderr, since one that is silently skipped looks exactly like one
+the command failed to find. A registration the aggregator has not judged yet is also left alone: it
+has not failed, and unregistering it would take down a group that was about to come up.
+
+`--delete` removes them. Without it nothing is removed, and the underlying question is still
+answerable by hand:
+
+```console
 $ kubectl get apiservices -l app.kubernetes.io/managed-by=kube-crisp
 ```
 

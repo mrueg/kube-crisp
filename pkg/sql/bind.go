@@ -284,10 +284,12 @@ func skipNonCode(stmt string, i int, dialect lexDialect) (int, bool) {
 
 	// PostgreSQL escape string, E'...'.
 	//
-	// The prefix has to be a prefix and not the tail of a word: a column called
-	// "type" followed by 'x' would otherwise have its e read as one. Nothing
-	// but a name character can precede an identifier's last letter, so that is
-	// the test.
+	// The prefix has to be a prefix and not the last letter of a word.
+	// PostgreSQL spells a typed constant date'2024-01-01', so a literal's
+	// opening quote routinely follows an identifier, and reading that
+	// identifier's e as a prefix would give the literal escapes it does not
+	// have. Nothing but a name character can precede an identifier's last
+	// letter, so that is the test.
 	case (c == 'E' || c == 'e') && dialect.escapeStrings() &&
 		i+1 < len(stmt) && stmt[i+1] == '\'' &&
 		(i == 0 || !isNameChar(stmt[i-1])):

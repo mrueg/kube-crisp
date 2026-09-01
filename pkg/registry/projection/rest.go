@@ -1226,8 +1226,10 @@ func (r *REST) listWith(
 
 	// The keyset resumes after the last row that was read, not the last one
 	// that survived filtering, or a filtered-out row would be read again on
-	// every subsequent page.
+	// every subsequent page. Only a limited request can hand back a token, so
+	// only a limited request needs the key at all.
 	var lastKey any
+	needKey := keyset && paging
 
 	// A row that cannot be mapped is skipped rather than failing the whole
 	// read: one row whose name is not a valid object name would otherwise make
@@ -1252,7 +1254,17 @@ func (r *REST) listWith(
 
 		// The keyset resumes after the last row that was read, including one
 		// that could not be mapped — otherwise every later page reads it again.
-		if keyset {
+		//
+		// Not read at all when the request cannot produce a token. The key is
+		// allowed to fail — a NULL one cannot anchor a page, and pretending
+		// otherwise would build a token that skips or repeats rows — so a row
+		// with no key has to take the read down with it while paging. Deriving
+		// it anyway and discarding it made that failure reach requests that
+		// were never going to page: one row with a NULL keyset column turned
+		// every unpaged list into a 500, and listAllNamespaces goes through
+		// here too, so the watch cache never primed and the projection could
+		// not be watched at all.
+		if needKey {
 			key, err := r.keysetValue(row, obj)
 			if err != nil {
 				return nil, errors.NewInternalError(err)

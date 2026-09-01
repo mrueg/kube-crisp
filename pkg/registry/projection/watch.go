@@ -585,6 +585,30 @@ func (c *watchCache) poll(ctx context.Context) error {
 	// would otherwise block every List stamping its resourceVersion from this
 	// cache. pollMu still holds, so events cannot interleave with another poll.
 	c.broadcast(events, targets)
+
+	// After the broadcast, and never before it. A bookmark is a promise — "you
+	// have seen everything up to this version" — and this poll has already
+	// raised the high-water mark from the rows it read, so the version a
+	// bookmark carries here is the one those rows produced.
+	//
+	// Emitted while applyLocked still held the lock, it was queued ahead of the
+	// events it was speaking for, because the broadcast happens out here with mu
+	// released. A watcher saw `BOOKMARK(@5) ADDED(order-2@5)`: told it was at
+	// version 5, and only then handed the row that made the version 5. A client
+	// that treats a bookmark as a resume point — which is the only thing a
+	// bookmark is for — reconnected at 5, was replayed what happened strictly
+	// after 5, and never learned about order-2 at all. Nothing about that is
+	// visible from the client's side: no error, no gap, just an object that
+	// never arrives.
+	//
+	// pollMu is still held, so no other poll can queue events in between, and a
+	// watcher's queue is FIFO — so the bookmark lands behind this poll's events
+	// for every watcher that was sent them. A watcher that registered during the
+	// broadcast replayed the state this version describes and is equally
+	// entitled to it.
+	c.mu.Lock()
+	c.emitBookmarksLocked()
+	c.mu.Unlock()
 	return nil
 }
 
@@ -755,7 +779,6 @@ func (c *watchCache) applyLocked(
 
 	c.items = next
 
-	c.emitBookmarksLocked()
 	if len(events) == 0 {
 		return nil, nil
 	}

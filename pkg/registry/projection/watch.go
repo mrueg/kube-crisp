@@ -957,43 +957,97 @@ func (c *watchCache) record(from, version string, events []watch.Event) {
 // replayable reports the events recorded after a version, and whether that
 // version is still within the history at all.
 //
-// A version at or after the newest recorded change is resumable with nothing to
-// replay. A version older than the oldest recorded change is not resumable:
-// something happened that the cache no longer remembers, and pretending
-// otherwise would leave the client silently missing it.
+// A version older than the oldest recorded change is not resumable: something
+// happened that the cache no longer remembers, and pretending otherwise would
+// leave the client silently missing it. A version at or after the newest
+// recorded change is resumable, and usually with nothing to replay — with the
+// exception below, which is the whole reason this is not a two-line function.
+//
+// "After a version" is not the same question as "greater than a version" on a
+// projection whose versions come from a column. A deletion has no row left to
+// raise the mark: a full resync noticing a row that stopped coming back, or a
+// tombstone carrying only the identity columns, both remove an object and leave
+// the version exactly where it was. Such an event is recorded with from and
+// version both equal to the mark it did not move, so a client resuming from
+// that mark is indistinguishable from one that has already seen it — and
+// answering "you are current" left the client holding a row that no longer
+// exists, forever, with no 410 to tell it to relist:
+//
+//	order-1@1, order-2@2, the cache at "2"; a client lists and watches at 2;
+//	it disconnects; order-1 is deleted and the mark stays "2"; it reconnects
+//	at 2, is admitted, and is told nothing.
+//
+// So a deletion recorded at a version it did not move is replayed to anyone
+// resuming from that version. A client that had already seen it is handed it
+// twice, which a watch is allowed to do and which every informer already
+// tolerates — losing it is not.
+//
+// Only deletions. An Added or Modified event at the mark carries a row whose
+// own version is that mark, and "you are at version V" on this kind of
+// projection means "you hold every row at version V or below": a client that
+// listed has the row and a client that streamed was sent it, so replaying those
+// would hand every list-then-watch the entire collection back — the priming
+// poll records the whole collection at the mark it derives from it. The one
+// case that misses is a row written at or below a mark the column already
+// passed, which is the misconfiguration applyLocked counts as a missed event
+// and logs against the mapped resourceVersion column.
 func (c *watchCache) replayable(version string) ([]recordedEvent, bool) {
 	current := c.currentVersionLocked()
-	if version == current {
-		return nil, true
-	}
 
-	// A version the cache has never reached refers to a state it cannot
-	// describe. Relisting is the only way for such a client to be correct.
-	if movesForward(current, version) {
-		return nil, false
-	}
-	if len(c.history) == 0 {
-		return nil, false
-	}
+	if version != current {
+		// A version the cache has never reached refers to a state it cannot
+		// describe. Relisting is the only way for such a client to be correct.
+		if movesForward(current, version) {
+			return nil, false
+		}
+		if len(c.history) == 0 {
+			return nil, false
+		}
 
-	// Older than the ring's earliest starting point: something happened that
-	// is no longer remembered.
-	if movesForward(version, c.history[0].from) {
-		return nil, false
-	}
-
-	for i, recorded := range c.history {
-		if movesForward(version, recorded.version) {
-			// A copy, not a window onto the ring. The caller reads this after
-			// releasing the lock, and record compacts the ring in place — so a
-			// poll landing in between overwrote the very events the caller was
-			// still holding. The client was handed events it had already seen
-			// and silently lost the one it was resuming from, with no 410 and
-			// nothing logged.
-			return slices.Clone(c.history[i:]), true
+		// Older than the ring's earliest starting point: something happened
+		// that is no longer remembered.
+		if movesForward(version, c.history[0].from) {
+			return nil, false
 		}
 	}
-	return nil, true
+
+	// Where the events that moved the version past this client begin. The ring
+	// is in version order, so everything from here on is strictly newer.
+	start := len(c.history)
+	for i, recorded := range c.history {
+		if movesForward(version, recorded.version) {
+			start = i
+			break
+		}
+	}
+
+	// A copy, not a window onto the ring. The caller reads this after releasing
+	// the lock, and record compacts the ring in place — so a poll landing in
+	// between overwrote the very events the caller was still holding. The
+	// client was handed events it had already seen and silently lost the one it
+	// was resuming from, with no 410 and nothing logged.
+	missed := stalledDeletions(c.history[:start], version)
+	if len(missed) == 0 && start == len(c.history) {
+		return nil, true
+	}
+	return append(missed, c.history[start:]...), true
+}
+
+// stalledDeletions picks out the removals recorded at a version without moving
+// it — the ones a client sitting at that version may or may not have seen. They
+// are older than everything the caller appends after them, which is the order
+// they happened in.
+func stalledDeletions(history []recordedEvent, version string) []recordedEvent {
+	var stalled []recordedEvent
+	for _, recorded := range history {
+		if recorded.event.Type != watch.Deleted {
+			continue
+		}
+		if recorded.from == version && recorded.version == version {
+			stalled = append(stalled, recorded)
+		}
+	}
+	return stalled
 }
 
 func cacheKey(obj *unstructured.Unstructured) string {

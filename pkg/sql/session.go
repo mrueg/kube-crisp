@@ -121,6 +121,54 @@ func clientDeadline(enforced bool, timeout time.Duration) time.Duration {
 	return timeout + grace
 }
 
+// sessionDialect is the shape of statement a database takes to set a variable
+// for the length of one request.
+//
+// The difference between the two is not cosmetic. set_config is given a flag
+// that scopes the setting to the transaction, so it goes away with it; MySQL
+// has no transaction-local settings, so the same idea is a variable on the
+// connection that clearSession has to put back before the connection returns
+// to a pool every projection shares.
+type sessionDialect uint8
+
+const (
+	// sessionUnsupported: this server has no way to set a variable on this
+	// database for one request.
+	sessionUnsupported sessionDialect = iota
+	sessionSetConfig
+	sessionUserVariable
+)
+
+// sessionDialectFor reports how a driver is told to set a session variable.
+//
+// This is the other half of Driver.SessionVariables, and the two could
+// disagree: the capability was declared per driver in the registry while the
+// statement was picked by a switch on the driver name down in applySession.
+// cockroach is registered with SessionVariables: true -- deliberately, since it
+// is PostgreSQL's protocol and driver_test requires the two to agree -- and was
+// never named in that switch. So a CockroachDB projection using
+// sessionVariables, which is how row-level security is driven, compiled clean,
+// reported Ready, and then failed every request with "driver %q has no session
+// variables": the capability it had just been granted, denied at the only point
+// where nobody was looking.
+//
+// SupportsSessionVariables consults this now, so the claim cannot outrun the
+// implementation. A driver that declares the capability without appearing here
+// is refused when its projection is compiled, which is where that message was
+// always meant to be read.
+func sessionDialectFor(driver string) sessionDialect {
+	switch driver {
+	// CockroachDB takes set_config with the same local flag, which this server
+	// already depends on for it: applyStatementTimeout issues exactly that call
+	// and is gated only on the capability, with no driver named at all.
+	case "postgres", "cockroach":
+		return sessionSetConfig
+	case "mysql":
+		return sessionUserVariable
+	}
+	return sessionUnsupported
+}
+
 // applySession sets the variables on one connection, inside the transaction
 // that will run the query.
 //
@@ -133,8 +181,8 @@ func (p *Pool) applySession(ctx context.Context, tx *sql.Tx, session []SessionVa
 			return err
 		}
 
-		switch p.driver {
-		case "postgres":
+		switch sessionDialectFor(p.driver) {
+		case sessionSetConfig:
 			// The third argument makes it local to the transaction, so the
 			// setting cannot outlive the query on a pooled connection.
 			if _, err := tx.ExecContext(ctx,
@@ -143,7 +191,7 @@ func (p *Pool) applySession(ctx context.Context, tx *sql.Tx, session []SessionVa
 			); err != nil {
 				return fmt.Errorf("setting session variable %q: %w", variable.Name, err)
 			}
-		case "mysql":
+		case sessionUserVariable:
 			// MySQL has no transaction-local settings, so this is a user
 			// variable on the connection — and it outlives the transaction.
 			// clearSession puts it back to NULL before the transaction ends,
@@ -166,7 +214,7 @@ func (p *Pool) applySession(ctx context.Context, tx *sql.Tx, session []SessionVa
 // clearSession puts connection-scoped variables back before the transaction
 // ends.
 //
-// Only MySQL needs it. PostgreSQL's set_config is called with the local flag,
+// Only the user-variable dialect needs it. set_config is called with the local flag,
 // so its settings are already scoped to the transaction and disappear with it.
 // MySQL user variables belong to the connection, and the connection is returned
 // to a pool shared by every projection reaching the same database — so a value
@@ -176,7 +224,7 @@ func (p *Pool) applySession(ctx context.Context, tx *sql.Tx, session []SessionVa
 // A failure here is reported, because a variable that could not be cleared is
 // exactly the condition this exists to prevent.
 func (p *Pool) clearSession(ctx context.Context, tx *sql.Tx, session []SessionVariable) error {
-	if p.driver != "mysql" {
+	if sessionDialectFor(p.driver) != sessionUserVariable {
 		return nil
 	}
 

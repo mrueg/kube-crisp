@@ -330,10 +330,10 @@ with that said plainly, rather than failing at the first query.
 
 **AWS RDS IAM** is the one this server ships with, registered in
 [`cmd/kube-crisp-apiserver`](cmd/kube-crisp-apiserver/main.go) — a projection can
-use it with the published image and no rebuild. It costs about 4 MB of binary,
-which is the price of the provider being usable rather than assemblable. A build
-wanting another writes the same one-line registration against its own `main` and
-pays for that one alone. See [AWS RDS IAM](docs/reference.md#aws-rds-iam).
+use it with the published image and no rebuild. That puts the AWS SDK in this
+server's dependencies, which is the price of the provider being usable rather
+than assemblable. A build wanting another writes the same one-line registration
+against its own `main`, and carries that SDK alone. See [AWS RDS IAM](docs/reference.md#aws-rds-iam).
 
 ## Development
 

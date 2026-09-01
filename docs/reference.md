@@ -956,6 +956,61 @@ That refusal is what makes the MySQL side work at all: an IAM token is checked w
 turns it on for a data source with `auth` — safely, because it has already established that the
 connection is encrypted.
 
+### AWS RDS IAM
+
+The one provider this repository ships, in `providers/aws`. RDS accepts, in place of a password, a
+URL signed with SigV4 by an identity holding `rds-db:connect` on the database user; it is valid for
+fifteen minutes and there is no extra service to run.
+
+It is a **Go module of its own**, and the binary published here does not contain it. Linking it pulls
+in fifteen AWS SDK modules and about 4 MB of binary that a build projecting a SQLite file can never
+reach. A build tag would not have helped: a file excluded by a tag still contributes its imports to
+the module graph, so `go.mod` and `go.sum` would carry the SDK either way and so would every project
+that depends on kube-crisp as a library. A separate module is the only shape in which the cost is
+paid by the builds that want it.
+
+Building one is a `main` function and a `go.mod` — see
+[`providers/aws/cmd/kube-crisp-apiserver`](../providers/aws/cmd/kube-crisp-apiserver/main.go), which
+is the stock server plus `rdsiam.Register()`:
+
+```go
+import rdsiam "github.com/mrueg/kube-crisp/providers/aws"
+
+if err := rdsiam.Register(); err != nil { ... }
+```
+
+On the cluster side you need an identity with `rds-db:connect` on
+`arn:aws:rds-db:<region>:<account>:dbuser:<resource-id>/<user>` — on EKS, a service account annotated
+for IRSA or Pod Identity — and a database user created with the `rds_iam` role
+(`GRANT rds_iam TO orders_app;` for PostgreSQL, `IDENTIFIED WITH AWSAuthenticationPlugin` for MySQL).
+Give the pod nothing else: the Secret still carries the connection string, and the token comes from
+the pod's own identity, so no long-lived database password exists to be leaked or rotated.
+
+The projection states as little as possible:
+
+```yaml
+dataSource:
+  driver: postgres
+  secretRef: {name: orders-db, namespace: kube-crisp}
+  auth:
+    provider: aws-rds-iam
+```
+
+The endpoint and the database user are read out of the connection string, through the drivers' own
+parsers, so they are stated once and not twice. The region is read off the endpoint —
+`<name>.<suffix>.<region>.rds.amazonaws.com` — and falls back to the pod's AWS configuration. Three
+options override any of that when the guess is wrong: `region`, `user` and `endpoint`. An option this
+provider does not understand is an error rather than a default quietly taken, because a misspelt
+`region` is a projection signing tokens for the wrong place and nothing about the failure would lead
+back to the typo.
+
+Tokens are cached for ten of their fifteen minutes. The five minutes of margin is not politeness: a
+token handed out at fourteen minutes and fifty seconds expires while the connection carrying it is
+still shaking hands, and the result is an intermittent authentication failure under load, which is
+about the least diagnosable thing this could do. Signing is local — SigV4 over a URL, with no request
+to AWS — so the cache is not about the cost of a token; it is about not signing eight of them when a
+pool refills after an idle period.
+
 ## Registration
 
 kube-crisp creates the `APIService` that delegates each projected group to it, corrects it if it

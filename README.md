@@ -330,6 +330,14 @@ empty and a projection asking for one is refused when it is compiled, with that
 said plainly. A build that wants AWS is a binary somebody assembled on purpose —
 which for a `database/sql` driver was already true.
 
+**AWS RDS IAM** ships in `providers/aws`, as a module of its own for exactly that
+reason: linking it costs fifteen AWS SDK modules and about 4 MB of binary, and a
+build tag would not have kept them out of `go.mod` — a file excluded by a tag
+still contributes its imports to the module graph.
+[`providers/aws/cmd/kube-crisp-apiserver`](providers/aws/cmd/kube-crisp-apiserver/main.go)
+is the whole of what a build with it looks like: the stock server plus one
+`Register()` call. See [AWS RDS IAM](docs/reference.md#aws-rds-iam).
+
 ## Development
 
 The e2e suite is split so it does not have to be run whole. `make e2e-up` provisions the cluster and

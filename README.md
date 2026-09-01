@@ -430,12 +430,17 @@ attaches build provenance.
   one, each replica falls back to its own counter and must run alone. With leader election on — the
   operator saying there are peers — such a projection is reported in the log and by
   `kube_crisp_projections_unversioned`, rather than failing silently and looking like a client bug.
-- **`cacheTTL` is invalidated per replica.** A write drops the entries it could have invalidated in
-  the replica that served it and in no other, the cache being in process. With more than one replica
-  — the chart deploys two — a read can be answered from an entry older than a write the same client
-  just made, for up to the TTL. Writes are unaffected, since the row a write is based on is always
-  read from the database, so a client acting on a stale read is refused with a conflict rather than
-  overwriting. A projection whose clients read back what they wrote wants one replica, or no
+- **`cacheTTL` is invalidated per replica, and a watch is what shortens that.** A write drops the
+  entries it could have invalidated in the replica that served it and in no other, the cache being
+  in process. With more than one replica — the chart deploys two — a read can be answered from an
+  entry older than a write the same client just made. How much older depends on whether anything is
+  watching the projection. A watched projection polls on every replica, follower included, and a
+  poll that comes back with changed rows drops the entries for the namespaces it saw move — so the
+  window is one poll interval rather than the TTL, without any replica having to tell another
+  anything. A projection nobody watches does not poll at all, and there the window is still the full
+  TTL. Writes are unaffected either way, since the row a write is based on is always read from the
+  database, so a client acting on a stale read is refused with a conflict rather than overwriting. A
+  projection whose clients read back what they wrote and is not watched wants one replica, or no
   `cacheTTL`. With leader election on — the operator saying there are peers — such a projection is
   reported in the log and by `kube_crisp_projections_cache_unshared`, rather than being a
   documented limitation nothing checks.

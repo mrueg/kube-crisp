@@ -541,22 +541,44 @@ sends the older `resourceVersion` and is refused with a conflict rather than ove
 row. What a stale read costs is a client seeing an old value, and being told to retry if it acts on
 one.
 
-So a projection whose clients read back what they have just written wants either one replica or no
-`cacheTTL`. Making the invalidation cluster-wide would need the replicas to tell each other, which
-is a channel this does not have.
+A watched projection is not left at the TTL, though, and it needs nothing new to escape it. Watching
+already makes every replica poll the table on its own — the leader at the projection's interval, a
+follower at `watch.followerPollInterval` — and a poll that comes back with rows has found out that
+the data moved without any replica having told it. So a poll that observes a change drops the read
+cache for the namespaces those rows are in, on whichever replica ran it. The staleness a read can
+carry on a replica that served no write falls from the whole `cacheTTL` to at most one poll
+interval, and a poll that observed nothing drops nothing: dropping on every tick regardless would
+leave the TTL meaning almost nothing and put the load back that the cache was configured to remove.
+
+It reaches exactly as far as watching does. Polling starts with the first watcher, so a projection
+nobody watches never polls and keeps the full-TTL window. Polling it anyway would turn a read cache
+into a standing query on every replica, which is the opposite of what `cacheTTL` is asked for. Nor
+is it a general answer even for a watched one: the invalidation is still each replica noticing for
+itself rather than being told, so the window is a poll interval and not zero, and making it zero
+would need the replicas to talk to each other — a channel this does not have.
+
+So a projection whose clients read back what they have just written and that nothing watches wants
+either one replica or no `cacheTTL`.
 
 Running with `--enable-leader-election` — which is the operator saying there are peers — such a
 projection is named in the log and counted by `kube_crisp_projections_cache_unshared`, the same
 treatment `kube_crisp_projections_unversioned` gives the other hazard that only exists with more
-than one replica. The gauge clears when the `cacheTTL` is removed, so an alert on it stops firing
-when the projection is fixed rather than when the process restarts.
+than one replica. The gauge counts every projection with a `cacheTTL`, watched or not, because
+whether anything is watching is a property of the clients connected at that moment rather than of
+the projection: a watch that ends puts the projection back on the full TTL, and a gauge that
+flickered with the informers attached to it would say nothing an alert could act on. It clears when
+the `cacheTTL` is removed, so an alert on it stops firing when the projection is fixed rather than
+when the process restarts.
 
 Caching is off unless asked for: it trades freshness for load, and
 `kube_crisp_cache_reads_total` is how you judge whether the trade paid off — and
 `kube_crisp_cache_evictions_total` says why when it did not: entries expiring is the cache working
 as configured, entries dropped because it was full means the key space is larger than the cache
 (a client paging is the usual cause, since every continue token is a key of its own), and entries
-dropped by a write mean the projection changes faster than the TTL it was given.
+`invalidated` mean the projection changes faster than the TTL it was given. That last reason covers
+both ways an entry is dropped for having gone stale — a write served by this replica, and a poll on
+this replica that saw a change some other replica's write made — because they say the same thing
+about the projection.
 
 Cached collections are handed out as views rather than copies — the items are
 shared and treated as immutable, the same contract the kube-apiserver's watch

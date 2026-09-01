@@ -129,6 +129,14 @@ type watchCache struct {
 	// the same projection.
 	group *pollGroup
 
+	// reads is the projection's read cache, when it has one, so that a poll
+	// which observes a change can drop it. See dropReadsOnChange for why that
+	// is worth doing and what it does not cover.
+	//
+	// Guarded by mu, because it is attached when watching starts rather than
+	// when the cache is built.
+	reads *readCache
+
 	// polled says whether this cache has ever completed a poll, and primeMu
 	// serialises the first one. Until it has, the cache knows nothing about the
 	// collection and its version means nothing — see versionFor.
@@ -466,6 +474,37 @@ func (c *watchCache) stop(id int64) {
 	}
 }
 
+// dropReadsOnChange attaches the projection's read cache, so that a poll which
+// comes back with changed rows drops what those rows made stale.
+//
+// This is what bounds `cacheTTL`'s staleness on a replica that did not serve
+// the write. The read cache lives in the process: a write drops the entries of
+// the replica that answered it and of no other, so with more than one replica a
+// read routed elsewhere can be answered from an entry that predates the write —
+// for as long as the TTL, and looking to the client exactly like not having
+// written yet. There is no channel between replicas to fix that in general.
+//
+// A watched projection does not need one. Every replica already polls the table
+// itself — the follower slower than the leader, but it polls — and a poll that
+// returns rows has learned on its own that the data moved, without anybody
+// having told it. Dropping the read cache there costs nothing extra and brings
+// the window down from the whole TTL to one poll interval on every replica.
+//
+// It is only that far. Polling starts with the first watcher, so a projection
+// nobody watches gets nothing from this and keeps the full-TTL window. Starting
+// a poller for an unwatched projection would turn a read cache into a standing
+// database load on every replica, which is the opposite of what `cacheTTL` is
+// for.
+//
+// Attached here rather than where both caches are built, because here is where
+// polling actually begins. Calling it again on every later watch stores the same
+// pointer and costs a lock.
+func (c *watchCache) dropReadsOnChange(reads *readCache) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reads = reads
+}
+
 // Close tears the cache down regardless of connected watchers.
 func (c *watchCache) Close() {
 	c.mu.Lock()
@@ -601,7 +640,26 @@ func (c *watchCache) poll(ctx context.Context) error {
 	c.mu.Lock()
 	events, targets := c.applyLocked(items, full, watermark, removed)
 	c.polled = true
+	reads := c.reads
 	c.mu.Unlock()
+
+	// The read cache goes before the broadcast, and only when this poll saw
+	// something.
+	//
+	// Before, because a client handed an event will often read the object back
+	// straight away, and answering that out of an entry this poll has just shown
+	// to be stale is the bug being fixed rather than a smaller version of it.
+	//
+	// Only when something changed, because a poll that came back with nothing
+	// has learned that the entries are still good. Dropping them on every
+	// interval regardless would leave `cacheTTL` meaning almost nothing and turn
+	// the poller into a source of exactly the load a cache exists to avoid —
+	// which is the failure KubeCrispCacheTooSmall exists to name.
+	//
+	// Outside mu on purpose. It takes the read cache's own lock, and nothing on
+	// that side ever reaches back for this one, so the two nest in one direction
+	// only.
+	reads.invalidateNamespaces(changedNamespaces(events))
 
 	// Deliberately outside mu. Every watcher is handed its own copy of every
 	// event, so a projection with many watchers does real work here — work that
@@ -850,6 +908,48 @@ func (c *watchCache) applyLocked(
 		targets = append(targets, w)
 	}
 	return events, targets
+}
+
+// changedNamespaces is the set of namespaces one poll's events touched, which
+// is the scope of what that poll could have made stale in the read cache.
+//
+// Per namespace rather than everything, following the same rule a write does: a
+// change in one tenant is not a reason to make every other tenant pay for a
+// fresh read. One poll covers every namespace of the projection in a single
+// query, so the rows it brought back are the only thing that can say which
+// tenants actually moved — and the events are exactly those rows, already
+// diffed against what the cache held.
+//
+// An object with no namespace collapses the whole set to "everything". That is
+// a cluster-scoped projection, where there are no tenants to separate, or a row
+// whose namespace column came back NULL, where there is no telling which tenant
+// it belongs to. Over-invalidating costs a query; under-invalidating serves an
+// entry this poll has already proven wrong, which is the bug and not a cheaper
+// version of it.
+func changedNamespaces(events []watch.Event) []string {
+	if len(events) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(events))
+	namespaces := make([]string, 0, len(events))
+	for _, event := range events {
+		obj, ok := event.Object.(*unstructured.Unstructured)
+		if !ok {
+			// Nothing this can read is nothing it can narrow.
+			return []string{""}
+		}
+		namespace := obj.GetNamespace()
+		if namespace == "" {
+			return []string{""}
+		}
+		if _, duplicate := seen[namespace]; duplicate {
+			continue
+		}
+		seen[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+	}
+	return namespaces
 }
 
 // emitBookmarksLocked tells watchers the current version when nothing has
@@ -1389,6 +1489,13 @@ func (r *REST) Watch(ctx context.Context, options *metainternalversion.ListOptio
 	if r.watch == nil {
 		return nil, apierrors.NewMethodNotSupported(r.groupResource(), "watch")
 	}
+
+	// Polling begins with the first watcher, and from then on a poll that sees
+	// the data move drops the read cache — which is how this replica learns
+	// about a write another replica served. Wired here rather than at
+	// construction because before this call there are no polls to hook, and it
+	// is a no-op for a projection without a cacheTTL.
+	r.watch.dropReadsOnChange(r.cache)
 
 	namespace := namespaceFrom(ctx, r.NamespaceScoped())
 

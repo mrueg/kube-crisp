@@ -236,14 +236,44 @@ func (c *readCache) evictLocked() {
 // An empty namespace means the write was not scoped to one — a cluster-scoped
 // kind, or a collection delete across all namespaces — and everything goes.
 func (c *readCache) invalidate(namespace string) {
-	if c == nil {
+	c.invalidateNamespaces([]string{namespace})
+}
+
+// invalidateNamespaces drops what changes across several namespaces could have
+// made stale, in one pass over the cache.
+//
+// It exists for the poller. A write knows the single namespace it touched, but
+// a poll reads every namespace of a projection in one query and comes back with
+// a batch of rows that may span any number of them. Calling invalidate once per
+// namespace would walk the whole cache once per changed tenant, on every poll
+// that saw anything — so the set is collected first and the cache is walked
+// once.
+//
+// An empty string anywhere in the set means everything goes, for the same
+// reason it does for a write: it names no namespace to narrow to, and a cached
+// entry that might cover the change has to be dropped rather than guessed
+// about. An empty set means there was nothing to drop and the cache stands.
+func (c *readCache) invalidateNamespaces(namespaces []string) {
+	if c == nil || len(namespaces) == 0 {
 		return
+	}
+
+	// Nil rather than empty once an unscoped change is in the set: it is the
+	// difference between "these tenants" and "all of them", and the second
+	// subsumes every version of the first.
+	scoped := make(map[string]struct{}, len(namespaces))
+	for _, namespace := range namespaces {
+		if namespace == "" {
+			scoped = nil
+			break
+		}
+		scoped[namespace] = struct{}{}
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if namespace == "" {
+	if scoped == nil {
 		dropped := len(c.entries)
 		c.entries = map[string]cacheEntry{}
 		c.evictedLocked(crispmetrics.CacheEvictionInvalidated, dropped)
@@ -252,7 +282,9 @@ func (c *readCache) invalidate(namespace string) {
 
 	var dropped int
 	for key, entry := range c.entries {
-		if entry.namespace == "" || entry.namespace == namespace {
+		// A cluster-wide read has no namespace of its own and spans them all,
+		// so it included the changed row by definition.
+		if _, hit := scoped[entry.namespace]; hit || entry.namespace == "" {
 			delete(c.entries, key)
 			dropped++
 		}

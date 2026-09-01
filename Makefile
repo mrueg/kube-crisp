@@ -156,6 +156,34 @@ GENERATED := pkg/apis pkg/generated manifests/10-crd-customresourceprojection.ya
              charts/kube-crisp/crds/customresourceprojection.yaml \
              manifests/optional/prometheusrule.yaml
 
+# The chart in this repository is not a release, and must not look like one.
+#
+# The release stamps both of Chart.yaml's numbers from the tag, so what is
+# committed here only ever reaches a `helm install ./charts/kube-crisp` from a
+# checkout. When it carried a release number it carried the *previous* one, and
+# that install silently deployed the previous server -- 0.1.0 while 0.2.0 was
+# out, then 0.2.0 while 0.3.0 was. It was fixed by hand twice and forgotten
+# twice, because nothing in a release makes this file move.
+#
+# So the rule is not "keep it current", which is the rule that failed. It is
+# "never a release number": a version nobody can mistake for one, and an
+# appVersion that resolves to the newest release rather than to a fixed old one.
+.PHONY: chart-version-check
+chart-version-check:
+	@status=0; \
+	version=$$(sed -n 's/^version: *//p' charts/kube-crisp/Chart.yaml); \
+	appVersion=$$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$$/\1/p' charts/kube-crisp/Chart.yaml); \
+	if [ "$$version" != "0.0.0-dev" ]; then \
+		echo "Chart.yaml version is $$version; it must stay 0.0.0-dev"; status=1; \
+	fi; \
+	if [ "$$appVersion" != "latest" ]; then \
+		echo "Chart.yaml appVersion is $$appVersion; it must stay latest"; status=1; \
+	fi; \
+	if [ $$status -ne 0 ]; then \
+		echo "the released chart takes its numbers from the tag; this copy is the development one"; \
+	fi; \
+	exit $$status
+
 .PHONY: codegen-check
 codegen-check:
 	@saved=$$(mktemp -d); \

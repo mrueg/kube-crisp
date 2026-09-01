@@ -187,9 +187,14 @@ That last command works as cluster-admin. Authorization is the cluster's, so eve
 ClusterRole naming the group first — `kubectl crisp rbac | kubectl apply -f -` writes it.
 
 `--version` pins a release; without it Helm takes the newest published. The chart is signed with
-cosign keylessly, the same as the image, and its `appVersion` is stamped at release time — so the
-image a default install deploys is always the one that release built. From a checkout,
-`./charts/kube-crisp` works the same and is what to use for a change that is not released yet.
+cosign keylessly, the same as the image, and both of its version numbers are stamped at release
+time — so the image a default install deploys is always the one that release built.
+
+The copy in this repository is the development one and is not a release: it is versioned
+`0.0.0-dev`, and its `appVersion` is `latest`, so `helm install ./charts/kube-crisp` from a checkout
+deploys the newest released image rather than a number frozen at whenever the file was last edited.
+Use it for a change to the chart that is not released yet, with `--set image.tag=` to pin a version
+or name an image you built.
 
 `helm show values oci://ghcr.io/mrueg/charts/kube-crisp` lists what can be turned on: admission,
 fair queueing, a `ServiceMonitor`, an egress `NetworkPolicy`, a real CA bundle.

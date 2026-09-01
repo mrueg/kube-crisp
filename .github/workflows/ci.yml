@@ -79,6 +79,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # Before the render, because a chart carrying a stale release number
+      # renders perfectly well -- which is why nothing noticed it twice.
+      - name: The committed chart is the development one
+        run: make chart-version-check
+
       - uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           # Pinned so a new Helm release cannot red-CI an unrelated pull

@@ -319,6 +319,18 @@ func (m *Mapper) buildName(row crispsql.Row) (string, error) {
 			return "", fmt.Errorf("column %q contains the name separator %q, so the name it would build is ambiguous",
 				column, m.separator)
 		}
+		// And every part has to have a value, because SplitName will not take
+		// a name with a hole in it back apart — so building one produced an
+		// object that could be listed and then never fetched, updated or
+		// deleted, each of those answering "name %q has an empty part". Only
+		// an interior part got that far: an empty one at either end leaves the
+		// name starting or ending with the separator, which the DNS-1123 rules
+		// already reject. Refusing all of them is one rule about identity
+		// rather than a rule about which column happened to be empty.
+		if value == "" {
+			return "", fmt.Errorf("column %q is empty, and every part of a composite name has to have a value",
+				column)
+		}
 		parts = append(parts, value)
 	}
 	return strings.Join(parts, m.separator), nil

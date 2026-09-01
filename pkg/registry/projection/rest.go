@@ -2332,9 +2332,10 @@ func (w *WritableREST) applyDefaults(obj *unstructured.Unstructured) {
 
 // DeleteCollection removes every object the request's selectors match.
 //
-// A projection can supply a single statement for this; without one, or when a
-// selector is in play that the statement cannot see, the matching objects are
-// deleted one at a time so the result is always exactly what was selected.
+// A projection can supply a single statement for this; without one, or when
+// the request was narrowed by something the statement cannot see — a selector,
+// or a page limit — the matching objects are deleted one at a time so the
+// result is always exactly what was selected.
 func (w *WritableREST) DeleteCollection(
 	ctx context.Context,
 	deleteValidation rest.ValidateObjectFunc,
@@ -2446,9 +2447,10 @@ func (w *WritableREST) deleteConcurrency() int {
 	return crispsql.DefaultMaxOpenConns
 }
 
-// canDeleteInBulk reports whether one statement can express this request. A
-// selector the statement never sees would delete more than was asked for, so
-// that case falls back to deleting the listed objects individually.
+// canDeleteInBulk reports whether one statement can express this request.
+// Anything that narrowed the list and the statement never sees — a selector,
+// or a page limit — would delete more than was asked for, so those cases fall
+// back to deleting the listed objects individually.
 func (w *WritableREST) canDeleteInBulk(listOptions *metainternalversion.ListOptions) bool {
 	if w.deleteCollection == nil {
 		return false
@@ -2464,6 +2466,19 @@ func (w *WritableREST) canDeleteInBulk(listOptions *metainternalversion.ListOpti
 
 	if listOptions == nil {
 		return true
+	}
+
+	// A limit is a selector by another name. The objects were listed with it
+	// applied, the response reports that page, and admission was only ever
+	// shown that page — but the bulk statement has no idea a page was asked
+	// for and removes the whole collection. `delete --all --chunk-size=N`
+	// would report N objects and empty the table, with nothing in the response
+	// to say so. A continue token is the same request seen from the middle:
+	// the rows before and after that page were never listed and never
+	// validated, so neither of them may be deleted by a statement that cannot
+	// be told where the page begins or ends.
+	if listOptions.Limit > 0 || listOptions.Continue != "" {
+		return false
 	}
 
 	if listOptions.FieldSelector != nil && !listOptions.FieldSelector.Empty() {

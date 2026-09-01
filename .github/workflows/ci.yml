@@ -83,7 +83,7 @@ jobs:
         with:
           # Pinned so a new Helm release cannot red-CI an unrelated pull
           # request, the same reason golangci-lint is pinned above.
-          version: v3.19.0
+          version: v4.2.4
 
       # Renders the chart with every combination the templates branch on. A
       # chart that only lints still fails at install time if a value it does not

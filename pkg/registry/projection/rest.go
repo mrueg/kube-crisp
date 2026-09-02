@@ -2828,8 +2828,21 @@ func (w *WritableREST) write(ctx context.Context, query *compiledQuery, obj *uns
 		return nil, touched, w.missedRows(query, obj, verb, name)
 	}
 
-	// Read back through the caches: this is the response, not a precondition.
-	result, err := w.Get(ctx, name, &metav1.GetOptions{})
+	// Read back from the primary, and not through the caches.
+	//
+	// This is the response to the write, which is a stronger claim than any
+	// other read makes: the client is being told what their own write produced.
+	// A shared read answers that from the read replica when one is configured,
+	// and a replica is behind by definition — so a create could be answered 404
+	// for the row it had just committed, and an update with the object as it
+	// was before, carrying the resourceVersion from before. A client that takes
+	// that version as the base for its next write is then in a conflict loop it
+	// cannot see the cause of, until something makes it relist.
+	//
+	// The cache is skipped for the same reason rather than as a side effect.
+	// finish() has already dropped this namespace's entries, so there is
+	// nothing here to gain from it and only a racing reader's entry to lose to.
+	result, err := w.read(ctx, name, fresh, "")
 	return result, touched, err
 }
 

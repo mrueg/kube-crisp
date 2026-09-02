@@ -276,3 +276,31 @@ func TestAReplicaThatRejectsAStatementDoesNotFallBack(t *testing.T) {
 		t.Error("a rejected statement put the replica into cooldown")
 	}
 }
+
+// TestTheAnswerToAWriteComesFromThePrimary covers the third read a write makes,
+// which is neither the base nor the statement: the object handed back as the
+// response.
+//
+// It went through Get, which is a shared read, so with a replica configured the
+// server described the write from a database the write had not reached. An
+// update answered with the row as it was before, carrying the resourceVersion
+// from before — and a client that takes that version as the base for its next
+// write is in a conflict loop with nothing to show why.
+func TestTheAnswerToAWriteComesFromThePrimary(t *testing.T) {
+	store, primary, replica := twoDatabases(t, writableSpec())
+	ctx := namespacedContext("acme")
+
+	setCustomer(t, primary, "order-1001", "primary-says")
+	setCustomer(t, replica, "order-1001", "replica-says")
+
+	updated := newOrder("order-1001", "written", 4242)
+	answer, _, err := store.Update(ctx, "order-1001",
+		rest.DefaultUpdatedObjectInfo(updated), nil, nil, false, &metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update() returned error: %v", err)
+	}
+
+	if customer := customerIn(t, answer); customer != "written" {
+		t.Errorf("the update was answered with %q, want written; the response was read from the replica", customer)
+	}
+}

@@ -805,15 +805,21 @@ dataSource:
   readSecretRef: {name: orders-db-replica, namespace: kube-crisp}
 ```
 
-What it costs is replication lag, and two things are deliberately kept on the primary because they
-cannot tolerate it. Writes, obviously. And the read a write is based on: a `resourceVersion` checked
+What it costs is replication lag, and three things are deliberately kept on the primary because they
+cannot tolerate it. Writes, obviously. The read a write is based on: a `resourceVersion` checked
 against a lagging replica is checked against a version the row may already have left behind, and the
-untouched half of a merged object would be written back from state the primary has moved past. Those
-go to the primary whatever the projection says.
+untouched half of a merged object would be written back from state the primary has moved past. And
+the write's own answer — the object handed back as the response — which is a stronger claim than any
+other read makes, since the client is being told what their own write produced. Answered from a
+replica, a create reports `404` for the row it has just committed and an update reports the object as
+it was before, carrying the `resourceVersion` from before; a client that takes that version as the
+base for its next write is then in a conflict loop with nothing to show why. All three go to the
+primary whatever the projection says.
 
 Everything else can be behind, and already is — a list is a snapshot of a moment that has passed
-either way. But a client that writes and then reads may see the row as it was before its own write,
-and no amount of cache invalidation here can fix that; it is the trade the replica exists to make.
+either way. But a client that writes and then issues a *separate* read may see the row as it was
+before its own write, and no amount of cache invalidation here can fix that; it is the trade the
+replica exists to make.
 
 Replicas are pooled like any other data source, so two projections reading the same replica share
 its connections, and a replica nobody references any more is released.

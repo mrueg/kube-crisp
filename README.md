@@ -363,7 +363,7 @@ The e2e suite is split so it does not have to be run whole. `make e2e-up` provis
 the three databases; after that:
 
 ```console
-$ make e2e-correctness              # 92 tests, a few minutes
+$ make e2e-correctness              # a few minutes
 $ make e2e-bench SHARD=reads        # one benchmark shard
 $ make bench                        # every benchmark
 $ make e2e                          # all of it

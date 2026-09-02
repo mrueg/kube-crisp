@@ -1379,6 +1379,15 @@ the statement compute it — `updated_at = clock_timestamp()` — and keep the c
 `WHERE` clause as `:resourceVersion`. A write that stores the client's version instead is not
 monotonic, and a forward-reading poll will never return the row again.
 
+It also has to be a value kube-crisp can put in order. Three shapes are: a number, an RFC3339
+timestamp, and anything of constant width — a ULID, a zero-padded counter, a timestamp at fixed
+precision. A timestamp column is the case worth naming, because `updated_at = clock_timestamp()`
+above is one and the mapper renders it with trailing zeros stripped, so `10:00:00.1Z` and
+`10:00:00.123456Z` are different lengths and do not sort as text; they are compared as instants
+rather than as strings. A version of some other variable-width shape cannot be placed against
+another, and the server says so rather than guessing: the high-water mark does not advance past it
+and a cached object is not trusted to satisfy it, so the cost is a re-read.
+
 That mistake is easy to make and silent, so it is checked rather than left to documentation:
 
 - A projection whose `create`, `update`, or `updateStatus` statement binds the version column while

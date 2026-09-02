@@ -1,6 +1,7 @@
 package projection
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"reflect"
@@ -1056,11 +1057,58 @@ func (c *watchCache) sortedItemsLocked() []*unstructured.Unstructured {
 	return items
 }
 
+// compareVersions orders two resourceVersions, reporting whether they could be
+// compared at all.
+//
+// Three formats, in order of how much they can be trusted.
+//
+// Both numeric: compare as numbers. A microsecond epoch column orders
+// numerically and not lexically, which is why this comes first.
+//
+// Both RFC3339: compare as instants. This is the case that used to be wrong and
+// is the one the reference recommends -- a timestamp column mapped to
+// resourceVersion, written as "updated_at = clock_timestamp()". The mapper
+// renders such a column with time.RFC3339Nano, which strips trailing zeros from
+// the fraction, so the strings are variable-length and do not sort:
+// "10:00:00.1Z" is lexically above "10:00:00.123456Z" and "10:00:00Z" is above
+// both. A watch on such a column stalled on the lexically-largest row and
+// re-read it forever, while logging that the column was not moving forward.
+//
+// Equal length, neither of the above: compare lexically. A fixed-width version
+// -- a ULID, a zero-padded counter, a timestamp at constant precision -- does
+// sort as text, and that is the property being relied on. Length is what says
+// so: it is exactly where a byte-wise compare stops agreeing with the order the
+// column is in.
+//
+// Anything else is not comparable, and this says so rather than guessing. The
+// callers do not all want the same answer to "cannot tell": advancing a
+// watermark must not, and admitting a watch to replay from must.
+func compareVersions(a, b string) (int, bool) {
+	if left, err := strconv.ParseInt(a, 10, 64); err == nil {
+		if right, err := strconv.ParseInt(b, 10, 64); err == nil {
+			return cmp.Compare(left, right), true
+		}
+	}
+
+	if left, err := time.Parse(time.RFC3339Nano, a); err == nil {
+		if right, err := time.Parse(time.RFC3339Nano, b); err == nil {
+			return left.Compare(right), true
+		}
+	}
+
+	if len(a) == len(b) {
+		return strings.Compare(a, b), true
+	}
+	return 0, false
+}
+
 // movesForward reports whether version is strictly newer than watermark.
-// Versions are compared as numbers when both are numeric, since a column like
-// a microsecond timestamp orders numerically but not lexically. This only feeds
-// a diagnostic counter, so an unfamiliar format degrades to a string compare
-// rather than affecting what is served.
+//
+// Not a diagnostic, whatever this used to say: it decides the high-water mark
+// an incremental poll reads forward from, and whether a cached object satisfies
+// the resourceVersion a client insisted on. Two versions it cannot compare are
+// answered false -- the watermark does not advance and the cache is not
+// trusted, so the cost is a re-read rather than a row nobody is told about.
 func movesForward(watermark, version string) bool {
 	if version == "" {
 		return false
@@ -1069,12 +1117,8 @@ func movesForward(watermark, version string) bool {
 		return true
 	}
 
-	previous, previousErr := strconv.ParseInt(watermark, 10, 64)
-	current, currentErr := strconv.ParseInt(version, 10, 64)
-	if previousErr == nil && currentErr == nil {
-		return current > previous
-	}
-	return version > watermark
+	order, ok := compareVersions(version, watermark)
+	return ok && order > 0
 }
 
 // recordedEvent is one change, the version the cache was at before it, and the
@@ -1143,7 +1187,13 @@ func (c *watchCache) replayable(version string) ([]recordedEvent, bool) {
 	if version != current {
 		// A version the cache has never reached refers to a state it cannot
 		// describe. Relisting is the only way for such a client to be correct.
-		if movesForward(current, version) {
+		//
+		// A version it cannot compare is the same answer for a stronger reason:
+		// admitting a watch means claiming everything since that point will be
+		// delivered, and there is no way to make that claim about a position
+		// that cannot be placed. Refusing costs a relist; admitting costs the
+		// client every event in between, silently.
+		if order, ok := compareVersions(version, current); !ok || order > 0 {
 			return nil, false
 		}
 		if len(c.history) == 0 {
@@ -1152,7 +1202,7 @@ func (c *watchCache) replayable(version string) ([]recordedEvent, bool) {
 
 		// Older than the ring's earliest starting point: something happened
 		// that is no longer remembered.
-		if movesForward(version, c.history[0].from) {
+		if order, ok := compareVersions(c.history[0].from, version); !ok || order > 0 {
 			return nil, false
 		}
 	}

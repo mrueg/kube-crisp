@@ -1056,7 +1056,31 @@ func (r *REST) List(ctx context.Context, options *metainternalversion.ListOption
 		return cached, nil
 	}
 
+	// The point a watch can resume from, taken before the rows are read rather
+	// than after.
+	//
+	// A list's resourceVersion is a promise that everything after it will be
+	// delivered to a watch started from it. Reading it afterwards broke that
+	// promise in the one direction that loses data: on an unprimed cache
+	// versionFor runs a poll of its own, so the rows came from the table as it
+	// was at one moment and the stamp described it at a later one. A row
+	// written in between was in neither half -- absent from the collection, and
+	// below the version the client then watched from, so no event was ever
+	// generated for it. An informer's first sync on a projection nobody else is
+	// watching simply did not have it, until a restart or a forced relist.
+	//
+	// Taken first, the stamp can only be older than the rows. That costs a
+	// watcher a duplicate event for a row it already has, which is what watch
+	// semantics are built to absorb.
+	// Inside the verb's span: priming the cache is a query this request caused
+	// and pays for, so it belongs under the same trace as the list itself.
 	ctx, done := r.startQuery(ctx, "list")
+
+	version := ""
+	if r.watch != nil {
+		version = r.watch.versionFor(ctx)
+	}
+
 	list, err := r.listWith(ctx, namespace, options, shared, session)
 	if err != nil {
 		done(0, err)
@@ -1064,24 +1088,14 @@ func (r *REST) List(ctx context.Context, options *metainternalversion.ListOption
 	}
 	done(len(list.Items), nil)
 
-	// Stamp the watch cache's version so a client that lists and then watches
-	// resumes from this point instead of replaying the collection. Only List
-	// does this: the cache calls listObjects itself while holding its own lock.
+	// Stamped before the collection is cached, not after. A hit would otherwise
+	// answer with no resourceVersion at all, leaving a client nothing to resume
+	// a watch from — so an informer would replay the whole collection on every
+	// resync, which is the opposite of what caching it was for.
 	//
-	// Before the collection is cached, not after, and for two reasons. A hit
-	// would otherwise answer with no resourceVersion at all, leaving a client
-	// nothing to resume a watch from — so an informer would replay the whole
-	// collection on every resync, which is the opposite of what caching it was
-	// for. And the version belongs to the moment the rows were read: stamping a
-	// cached page with the version it is handed out at would date stale data to
-	// now, which is a stronger claim than the cache can make.
-	// The watch cache's version when there is one, because that is the point a
-	// watch can resume from. Otherwise — watch disabled, or the cache could not
-	// be primed — the newest version among the rows just read.
-	version := ""
-	if r.watch != nil {
-		version = r.watch.versionFor(ctx)
-	}
+	// With watch disabled, or with a cache that could not be primed, the newest
+	// version among the rows just read is the best available answer and is
+	// likewise not ahead of them.
 	if version == "" {
 		version = highestVersion(list.Items)
 	}

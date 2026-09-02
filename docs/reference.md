@@ -85,6 +85,15 @@ Schemas are published to `/openapi/v3` only. The v2 document is served, because 
 layer downloads it regardless, but it carries no projected schemas: a client old enough to read
 only v2 will not be able to explain a projected kind.
 
+The schema has to be **structural**, by the same rules the kube-apiserver applies to a CRD: a root
+typed `object`, no constraint on `metadata` beyond `name` and `generateName`, and nothing describing
+a field from inside `allOf`, `anyOf`, `oneOf` or `not`. A projection whose schema is not structural
+is refused rather than served, because everything built on top of a schema — `x-kubernetes-validations`
+rules, defaulting, pruning and field management — is defined against the structural form, and a
+schema that has none turns all four off at once. Pruning is the one that loses data rather than
+checking it: a field described only inside `allOf` is not in the structural schema at all, so a write
+carrying it is stripped of that field and then answered `201`.
+
 `additionalPrinterColumns` works the same way it does for a CRD: declare the columns and kubectl
 prints them. A projection without any prints just the name.
 

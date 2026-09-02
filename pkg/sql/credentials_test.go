@@ -121,6 +121,7 @@ func init() {
 			Placeholders:  PlaceholderQuestion,
 			AuthConnector: recordingAuthConnector,
 			Encrypted:     func(string) bool { return true },
+			Verified:      func(string) bool { return true },
 		},
 		{
 			Name:          recordingPlaintextDriverName,
@@ -128,6 +129,7 @@ func init() {
 			Placeholders:  PlaceholderQuestion,
 			AuthConnector: recordingAuthConnector,
 			Encrypted:     func(string) bool { return false },
+			Verified:      func(string) bool { return false },
 		},
 		{
 			Name:         recordingNoAuthDriverName,
@@ -414,6 +416,64 @@ func TestRegisterRefusesADriverThatMintsPasswordsWithoutReportingEncryption(t *t
 	}
 	if !strings.Contains(err.Error(), "transport encryption") {
 		t.Errorf("error %q does not say what is missing", err)
+	}
+}
+
+// And whether the connection established which server it reached, which is the
+// question a bearer token actually turns on. Encryption to an impersonator
+// hands the credential over as surely as no encryption at all, and more
+// quietly.
+//
+// Asked at registration rather than left to fail every auth attempt at runtime,
+// so a driver added outside this repository says so where it is added instead
+// of refusing every projection that configures dataSource.auth with a message
+// about its connection string.
+func TestRegisterRefusesADriverThatMintsPasswordsWithoutReportingVerification(t *testing.T) {
+	err := Register(Driver{
+		Name:          "mintsWithoutVerificationOpinion",
+		SQLDriver:     "credentials-test",
+		AuthConnector: recordingAuthConnector,
+		Encrypted:     func(string) bool { return true },
+	})
+	if err == nil {
+		driversMu.Lock()
+		delete(drivers, "mintsWithoutVerificationOpinion")
+		driversMu.Unlock()
+		t.Fatal("a driver offering per-connection credentials and no opinion on verification was accepted")
+	}
+	if !strings.Contains(err.Error(), "server verification") {
+		t.Errorf("error %q does not say what is missing", err)
+	}
+}
+
+// A driver registered outside this package answers for itself, because only it
+// knows what its own connection string can say. Before this, verification was a
+// switch over the names this package ships, so such a driver could never carry
+// a minted credential however its connection string was written -- while the
+// documented way to add one is exactly this call.
+func TestADriverAddedOutsideThisPackageCanAnswerForItself(t *testing.T) {
+	const name = "thirdPartyVerifying"
+	if err := Register(Driver{
+		Name:          name,
+		SQLDriver:     "credentials-test",
+		Placeholders:  PlaceholderQuestion,
+		AuthConnector: recordingAuthConnector,
+		Encrypted:     func(dsn string) bool { return strings.Contains(dsn, "secure") },
+		Verified:      func(dsn string) bool { return strings.Contains(dsn, "verified") },
+	}); err != nil {
+		t.Fatalf("Register() returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		driversMu.Lock()
+		delete(drivers, name)
+		driversMu.Unlock()
+	})
+
+	if !serverVerified(name, "host=db secure verified") {
+		t.Error("a driver reporting a verified connection string was not believed")
+	}
+	if serverVerified(name, "host=db secure") {
+		t.Error("a driver reporting an unverified connection string was treated as verified")
 	}
 }
 

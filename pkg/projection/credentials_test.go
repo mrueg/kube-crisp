@@ -85,26 +85,33 @@ func TestThePoolKeyDoesNotMoveWhenTheTokenDoes(t *testing.T) {
 	}
 }
 
-// A data source with no auth has to hash exactly what it hashed before, or
-// every pool in every existing deployment moves on upgrade — connections
-// dropped and statement caches emptied, for a field nobody set.
-func TestAddingTheAuthFieldMovedNoExistingPoolKey(t *testing.T) {
+// The pool key is the whole digest, and this writes it out so that changing it
+// again has to be deliberate: every pool in every existing deployment is
+// rebuilt when it moves.
+//
+// It moved once, on purpose. It used to be the first four bytes, and a pool key
+// is the identity of a set of live connections carrying one database's
+// credentials — PoolCache hands back the existing pool on a match without
+// looking at the connection string again. 2^32 is a search rather than a
+// coincidence, and the value to search for was published as the datasource
+// label on every pool metric.
+func TestThePoolKeyIsTheWholeDigest(t *testing.T) {
 	const dsn = "postgres://user:pass@db.example:5432/store?sslmode=require"
 	ds := crispv1alpha1.DataSource{Driver: "postgres"}
 
-	// The key as it was computed before dataSource.auth existed: the driver, a
-	// hash mark, and the first four bytes of SHA-256 over the connection string
-	// alone. Written out rather than derived, so that a change to PoolKey has
-	// to be a deliberate one.
-	const before = "postgres#f9742ff0"
-	if got := PoolKey(ds, dsn); got != before {
-		t.Errorf("PoolKey() = %s, want %s — every pool in an existing deployment would be rebuilt", got, before)
+	const want = "postgres#f9742ff06e6dd469a38beff80c38c2526a45d6166e604e1c2b8453000c0a29f5"
+	if got := PoolKey(ds, dsn); got != want {
+		t.Errorf("PoolKey() = %s, want %s — every pool in an existing deployment would be rebuilt", got, want)
+	}
+	// The old four-byte key, so a revert to it fails here rather than quietly.
+	if got := PoolKey(ds, dsn); got == "postgres#f9742ff0" {
+		t.Error("PoolKey() is a four-byte prefix again")
 	}
 
 	// And an explicitly empty stanza is still a stanza, so it does move.
 	withAuth := ds
 	withAuth.Auth = &crispv1alpha1.DataSourceAuth{Provider: "aws-rds-iam"}
-	if PoolKey(withAuth, dsn) == before {
+	if PoolKey(withAuth, dsn) == want {
 		t.Error("a data source that mints its password shared a pool with one that does not")
 	}
 }

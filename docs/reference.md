@@ -254,6 +254,21 @@ ALTER TABLE orders FORCE ROW LEVEL SECURITY;
 CREATE POLICY orders_tenant ON orders USING (tenant = current_setting('app.tenant', true));
 ```
 
+A variable can be set from anything the request already carries: a constant with
+`Value`, the request's `RequestNamespace` or `RequestName`, or the caller's
+identity as `RequestUser`, `RequestUserUID`, `RequestUserGroups` or
+`RequestUserExtra` — the same four values a query gets as `:user`, `:userUID`,
+`:userGroups` and `:userExtra`, and in the same shapes, so the group list
+arrives as a JSON array a policy can open up:
+
+```sql
+CREATE POLICY orders_team ON orders USING (
+    owner_team IN (SELECT jsonb_array_elements_text(current_setting('app.groups', true)::jsonb)));
+```
+
+`Field` and `LabelSelector` cannot be used here: a connection is prepared before
+there is an object or a selector to read either from.
+
 The values are always bound, never interpolated, and the names are validated
 before they are used, since no driver takes a setting's name as a parameter.
 PostgreSQL scopes a setting to the transaction; MySQL has no transaction-local

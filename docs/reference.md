@@ -199,6 +199,17 @@ resource advertising `delete` that refuses it is one the collector retries indef
 delete --all` and `apply --prune` fail on a projection that never offered to be deleted; and an
 informer on a projection with `watch.disabled` would list, watch, be refused, and never sync.
 
+A `deleteCollection` statement on a namespaced projection has to bind `:namespace`. A collection
+delete is answered by one statement, so unlike a read there is no second pass to drop rows that
+turned out to belong to another tenant — the rows are gone. A statement that cannot be told which
+namespace is therefore not used at all: the collection is deleted one object at a time instead,
+which reads each row through the same filter a single delete does. That is slower, and binding
+`:namespace` is what makes it one statement again.
+
+It joins the narrowings already checked this way. A label selector needs `:labelSelector` declared
+or the collection is deleted object by object, and a `limit` or a `continue` token refuses the bulk
+path outright, since the statement has no way to be told where a page begins or ends.
+
 ## Row-level security
 
 A projection can set variables on the connection before every query, from the

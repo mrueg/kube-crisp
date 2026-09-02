@@ -429,6 +429,12 @@ func New(
 		return nil, fmt.Errorf("queries.list: keysetColumn is required when the identity is composed of several columns")
 	}
 
+	// Before any of them is bound, because a declared column is bound on every
+	// list whether or not the client selected on it. See
+	// pkg/projection/reservedbind.go.
+	if err := projection.CheckSelectableColumns(spec.Resource.SelectableFields); err != nil {
+		return nil, err
+	}
 	r.selectable = map[string]crispv1alpha1.SelectableField{}
 	for _, field := range spec.Resource.SelectableFields {
 		key := strings.TrimPrefix(field.JSONPath, ".")

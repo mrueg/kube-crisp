@@ -76,6 +76,12 @@ func NewMapper(res crispv1alpha1.ProjectedResource, mapping crispv1alpha1.Mappin
 		}
 	}
 
+	// Before the columns are read for anything else, because what they would be
+	// read as is a parameter the server fills in. See reservedbind.go.
+	if err := CheckMappedColumns(&mapping); err != nil {
+		return nil, err
+	}
+
 	namespaced := res.Scope == crispv1alpha1.NamespaceScoped
 	if namespaced && mapping.Namespace == "" {
 		return nil, fmt.Errorf("mapping.namespace is required for namespaced projections")

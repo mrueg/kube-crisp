@@ -371,6 +371,14 @@ func Validate(p *crispv1alpha1.CustomResourceProjection) error {
 		return fmt.Errorf("projection %s: %w", p.Name, err)
 	}
 
+	// Selectable columns are not part of the mapping, so NewMapper does not see
+	// them, and the apiserver refuses them where it compiles them rather than
+	// here. Refused here too, so that a projection read from a file is rejected
+	// by the same rule as one applied to a cluster.
+	if err := CheckSelectableColumns(res.SelectableFields); err != nil {
+		return fmt.Errorf("projection %s: %w", p.Name, err)
+	}
+
 	return nil
 }
 

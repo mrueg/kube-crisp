@@ -238,14 +238,14 @@ func Open(opts PoolOptions) (*Pool, error) {
 	// the same either way — the *sql.DB does not know which it came from.
 	connector, err := authConnector(driver, dsn, opts.Auth)
 	if err != nil {
-		return nil, fmt.Errorf("opening %s data source: %w", opts.Driver, err)
+		return nil, redactDSN(dsn, fmt.Errorf("opening %s data source: %w", opts.Driver, err))
 	}
 
 	var db *sql.DB
 	if connector != nil {
 		db = sql.OpenDB(connector)
 	} else if db, err = sql.Open(driver.SQLDriver, dsn); err != nil {
-		return nil, fmt.Errorf("opening %s data source: %w", opts.Driver, err)
+		return nil, redactDSN(dsn, fmt.Errorf("opening %s data source: %w", opts.Driver, err))
 	}
 
 	if opts.MaxOpenConns <= 0 {
@@ -474,7 +474,36 @@ func (p *Pool) Name() string { return p.metricLabel() }
 func (p *Pool) Driver() string { return p.driver }
 
 // Ping verifies connectivity.
-func (p *Pool) Ping(ctx context.Context) error { return p.db.PingContext(ctx) }
+func (p *Pool) Ping(ctx context.Context) error { return redactDSN(p.dsn, p.db.PingContext(ctx)) }
+
+// redactDSN takes the connection string back out of an error.
+//
+// A connection string is a credential. It is also whatever was in the Secret
+// the projection named, valid or not -- the resolver hands the value over
+// without inspecting it -- and drivers quote what they could not parse:
+// pgx answers a malformed one with "cannot parse `<the whole value>`". So an
+// error from opening or pinging a data source could carry a token, a key, or
+// any other content of that Secret, and those errors do not stay in the
+// process. They are written into the projection's DataSourceConnected
+// condition, which anyone who can read the object can read, returned to
+// ordinary clients in a 503 body, and logged.
+//
+// That turned the opt-in label's grant -- permission for a projection to *use*
+// a Secret -- into a way to *read* every key of it: name any key as dsnKey, let
+// the parse fail, and read the value back out of the status.
+//
+// Exact substring, because the leak is the value being echoed whole, and
+// anything cleverer would be a guess at what a driver considers sensitive.
+func redactDSN(dsn string, err error) error {
+	if err == nil || dsn == "" {
+		return err
+	}
+	message := err.Error()
+	if !strings.Contains(message, dsn) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(message, dsn, "[connection string redacted]"))
+}
 
 // Close releases prepared statements and the pool.
 func (p *Pool) Close() error {

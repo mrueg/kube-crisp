@@ -2640,6 +2640,29 @@ func (w *WritableREST) canDeleteInBulk(listOptions *metainternalversion.ListOpti
 		return false
 	}
 
+	// A namespaced projection whose statement cannot be told which namespace.
+	//
+	// Every other narrowing of a collection delete is checked against what the
+	// statement can see -- a label selector needs :labelSelector declared, and a
+	// limit or a continue token is refused outright -- but the namespace, which
+	// is the one narrowing that is not optional, was not. The reads defend
+	// themselves twice over: a list and a get both drop rows whose mapped
+	// namespace differs from the request's, count them and warn. A bulk delete
+	// has no second pass, because the rows are gone.
+	//
+	// So "DELETE FROM orders" compiled, passed the webhook, and let a caller
+	// holding deletecollection in one namespace empty every tenant's rows --
+	// while the response listed only the objects of their own namespace, so
+	// nothing in it said what had happened.
+	//
+	// Falling back to deleting one object at a time rather than refusing the
+	// projection: the per-object path reads each row first, through the filter
+	// that scopes it, so it is correct where this is not. It is slower, and
+	// declaring :namespace in the statement is what makes it fast again.
+	if w.NamespaceScoped() && !w.deleteCollection.declares("namespace") {
+		return false
+	}
+
 	if listOptions == nil {
 		return true
 	}

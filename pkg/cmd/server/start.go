@@ -237,6 +237,8 @@ func NewCommandStartCrispServer(ctx context.Context, defaults *CrispServerOption
 		"Namespace of the Service that fronts this server. Defaults to $POD_NAMESPACE.")
 	flags.Int32Var(&o.APIServices.Port, "apiservice-service-port", o.APIServices.Port,
 		"Service port that fronts this server.")
+	flags.StringSliceVar(&o.APIServices.AllowedGroupSuffixes, "projection-group-suffixes", o.APIServices.AllowedGroupSuffixes,
+		"API group suffixes a projection may claim, e.g. \"example.com\". A group is allowed when it equals one of these or ends in \".\" followed by one. Empty allows any group. Registering a group is cluster-wide and permanent -- an APIService routes the whole group here and the kube-apiserver never takes it back -- so set this wherever the people who write projections are not the people who decide which API groups the cluster serves.")
 	flags.BoolVar(&o.EnableAdmission, "enable-admission", o.EnableAdmission,
 		"Run the admission chain for projected writes, so ValidatingAdmissionPolicy, admission webhooks, and namespace lifecycle apply to them. Requires the extra RBAC in manifests/optional/admission-rbac.yaml, since the plugins watch webhook configurations, admission policies, and namespaces.")
 	flags.StringSliceVar(&o.DataSourceNamespaces, "datasource-namespaces", o.DataSourceNamespaces,

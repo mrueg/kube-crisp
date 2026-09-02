@@ -322,8 +322,15 @@ func TestPoolLabelCarriesNoCredentials(t *testing.T) {
 			t.Errorf("PoolLabel() = %q, which leaks %q", label, secret)
 		}
 	}
-	if PoolLabel(ds, dsn) != PoolKey(ds, dsn) {
-		t.Error("the metric label and the pool key disagree")
+	// A prefix of the key, not the key. The label wants something stable to
+	// group by; publishing the whole key would publish the value a collision
+	// has to reproduce.
+	key := PoolKey(ds, dsn)
+	if label == key {
+		t.Error("the metric label is the whole pool key")
+	}
+	if !strings.HasPrefix(key, label) {
+		t.Errorf("PoolLabel() = %q, which does not identify the pool keyed %q", label, key)
 	}
 
 	// A different connection string is a different pool, which is what makes

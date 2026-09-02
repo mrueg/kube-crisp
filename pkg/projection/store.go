@@ -591,18 +591,30 @@ func (e EnvDSNResolver) ResolveRead(ctx context.Context, ds crispv1alpha1.DataSo
 // authenticating, and sharing a pool between them would silently give both
 // whichever one opened it first.
 //
-// A data source with no auth hashes exactly what it hashed before, so no pool
-// key in an existing deployment moves.
+// The whole digest, not a prefix of it.
+//
+// This is the identity of a set of live connections carrying one database's
+// credentials, and PoolCache hands back the existing pool on a key match
+// without looking at the connection string again -- so two data sources that
+// collide here are one pool, and whichever opened it first decides which
+// database the other one reads. Four bytes is 2^32, which is a search rather
+// than a coincidence, and the inputs on the auth side are a provider name and
+// an options map a projection author writes. The key is also published: it is
+// the datasource label on every pool metric, so the value to collide with is
+// readable by anyone who can read metrics.
+//
+// Nothing needs it short. PoolLabel shortens it for the metric, where a stable
+// identifier is all that is wanted, and the map key stays whole.
+//
+// Pool keys in an existing deployment all move, which costs one rebuild of the
+// pools on the first sync after an upgrade.
 func PoolKey(ds crispv1alpha1.DataSource, dsn string) string {
-	if ds.Auth == nil {
-		digest := sha256.Sum256([]byte(dsn))
-		return ds.Driver + "#" + hex.EncodeToString(digest[:4])
-	}
-
 	digest := sha256.New()
 	_, _ = digest.Write([]byte(dsn))
-	_, _ = digest.Write([]byte(authFingerprint(*ds.Auth)))
-	return ds.Driver + "#" + hex.EncodeToString(digest.Sum(nil)[:4])
+	if ds.Auth != nil {
+		_, _ = digest.Write([]byte(authFingerprint(*ds.Auth)))
+	}
+	return ds.Driver + "#" + hex.EncodeToString(digest.Sum(nil))
 }
 
 // authFingerprint renders an auth stanza as something stable enough to hash.
@@ -627,10 +639,22 @@ func authFingerprint(auth crispv1alpha1.DataSourceAuth) string {
 	return out.String()
 }
 
-// PoolLabel names a data source in metrics. It is the pool key, which carries
-// no credentials: a hash identifies the database without naming it.
+// PoolLabel names a data source in metrics. It carries no credentials: a hash
+// identifies the database without naming it.
+//
+// A prefix of the pool key rather than the key itself. The metric wants
+// something stable and readable to group by, and a label is not a lookup -- two
+// data sources sharing a label would be reported together, which is a smudged
+// graph, where two sharing a pool key would be one set of connections.
+//
+// Deliberately not the whole key, because the key is what a collision would
+// have to reproduce and there is no reason to publish it.
 func PoolLabel(ds crispv1alpha1.DataSource, dsn string) string {
-	return PoolKey(ds, dsn)
+	key := PoolKey(ds, dsn)
+	if cut := strings.IndexByte(key, '#'); cut >= 0 && len(key) > cut+9 {
+		return key[:cut+9]
+	}
+	return key
 }
 
 // validateVersionIsDatabaseAssigned rejects a projection that polls

@@ -212,6 +212,10 @@ func Validate(p *crispv1alpha1.CustomResourceProjection) error {
 		return fmt.Errorf("projection %s: spec.resource.plural must be lowercase", p.Name)
 	}
 
+	if err := CheckAPIGroup(p.Name, res.Group); err != nil {
+		return err
+	}
+
 	if res.Scope != crispv1alpha1.NamespaceScoped && res.Scope != crispv1alpha1.ClusterScoped {
 		return fmt.Errorf("projection %s: spec.resource.scope must be Namespaced or Cluster", p.Name)
 	}

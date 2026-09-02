@@ -49,6 +49,22 @@ them, and no binding is needed at all. It is off by default on purpose: the rows
 are a production database's, and aggregating grants every existing holder of `view`, in every
 namespace, the moment the role is applied. That is a decision, not a default.
 
+### Groups a projection may not claim
+
+A generated role names the projection's group verbatim, and the documented way to use one is to pipe
+it into `kubectl apply`. So a projection declaring `rbac.authorization.k8s.io` with a plural of
+`clusterroles` would have produced a ClusterRole granting write access to the cluster's own
+ClusterRoles — and with `--aggregate`, one that reaches `view`, `edit` and `admin` without anybody
+writing a binding. Whoever may write a projection is not necessarily whoever may grant
+cluster-admin.
+
+Both the API server and `kubectl crisp rbac` refuse a projection whose group is one Kubernetes owns:
+`apps`, `batch`, `autoscaling`, `policy`, `extensions`, and anything under `k8s.io` or
+`kubernetes.io`. The list is of groups Kubernetes reserves rather than of groups a particular
+cluster happens to have installed, so `-f` on a directory of manifests gives the same answer as a
+live cluster does. A group that merely ends in somebody else's domain — `k8s.io.example.com` — is
+theirs, not Kubernetes', and is served as usual.
+
 ### Checking who can reach what
 
 ```console

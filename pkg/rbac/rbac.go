@@ -95,6 +95,11 @@ func ClusterRoles(projections []crispv1alpha1.CustomResourceProjection, opts Opt
 		if group == "" {
 			return nil, fmt.Errorf("%s: spec.resource.group is empty", projections[i].Name)
 		}
+		// Before anything is generated, because what would be generated is the
+		// grant. See reservedgroup.go.
+		if err := projection.CheckAPIGroup(projections[i].Name, group); err != nil {
+			return nil, err
+		}
 		plural := spec.Resource.Plural
 		if plural == "" {
 			return nil, fmt.Errorf("%s: spec.resource.plural is empty", projections[i].Name)

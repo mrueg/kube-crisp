@@ -747,14 +747,40 @@ func newSchemaValidator(res crispv1alpha1.ProjectedResource) (apiservervalidatio
 		return nil, nil, fmt.Errorf("compiling the projected schema: %w", err)
 	}
 
-	// A structural schema is what CEL rules and field management are defined
-	// against. A schema that is not structural still validates; it just cannot
-	// carry rules.
+	// A structural schema is what CEL rules, defaulting, pruning and field
+	// management are all defined against, so a schema that is not structural
+	// is refused rather than served.
+	//
+	// It used to be logged at V(2) and served anyway, with the structural half
+	// left nil. That turned off every one of those four at once and said so
+	// nowhere a user would look: a projection carrying x-kubernetes-validations
+	// compiled, reported Ready, and accepted every write its own rules were
+	// written to reject.
+	//
+	// Pruning is the half that loses data rather than checks. A schema
+	// describing a sub-object inside allOf is not structural, and the Structural
+	// built from it has no properties there at all — so pruneUnknownFields
+	// removes the very fields the schema describes, the write is answered 201
+	// with a warning header, and the column mapped from one of them is written
+	// empty. The kube-apiserver refuses such a schema outright for a real CRD;
+	// there is no reason for a projected kind to accept it.
 	structural, err := structuralschema.NewStructural(internal)
 	if err != nil {
-		klog.V(2).InfoS("the projected schema is not structural, so validation rules are not evaluated",
-			"resource", res.Plural+"."+res.Group, "err", err)
-		return validator, nil, nil
+		return nil, nil, fmt.Errorf(
+			"the projected schema for %s.%s is not structural, and a schema this server cannot "+
+				"treat as structural cannot be validated, defaulted or pruned against: %w",
+			res.Plural, res.Group, err)
+	}
+	// NewStructural builds the shape; this is what says the shape is legal.
+	// The two are separate in apiextensions and a CRD runs both, so running only
+	// the first accepted schemas a CRD would have rejected -- a root with no
+	// type, a root that is not an object, one restricting metadata, or the
+	// allOf case above.
+	if errs := structuralschema.ValidateStructural(
+		field.NewPath("spec", "resource", "schema"), structural); len(errs) > 0 {
+		return nil, nil, fmt.Errorf(
+			"the projected schema for %s.%s is not structural: %w",
+			res.Plural, res.Group, errs.ToAggregate())
 	}
 	return validator, structural, nil
 }

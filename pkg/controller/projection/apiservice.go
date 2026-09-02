@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -53,6 +54,39 @@ type APIServiceOptions struct {
 	// GroupPriorityMinimum and VersionPriority order this group against others.
 	GroupPriorityMinimum int32
 	VersionPriority      int32
+
+	// AllowedGroupSuffixes bounds which API groups a projection may claim. A
+	// group is allowed when it equals one of these or ends in "." followed by
+	// one. Empty allows any group, which is the default and what every existing
+	// deployment had.
+	//
+	// Registering a group is not a local act. An APIService is cluster-scoped
+	// and routes a whole group/version to this server, so a projection naming
+	// "cert-manager.io/v1" -- a group whose operator is not installed yet --
+	// takes it, and takes it for good: the kube-apiserver's own controllers
+	// only manage APIServices carrying the automanaged label, so nothing hands
+	// it back when the real operator arrives.
+	//
+	// Whoever may write a projection is not necessarily whoever decides which
+	// API groups a cluster serves. This is how an operator keeps those apart,
+	// by naming the suffixes their projections live under.
+	AllowedGroupSuffixes []string
+}
+
+// groupAllowed reports whether a projection may claim this API group.
+func (o APIServiceOptions) groupAllowed(group string) bool {
+	if len(o.AllowedGroupSuffixes) == 0 {
+		return true
+	}
+	for _, suffix := range o.AllowedGroupSuffixes {
+		if suffix == "" {
+			continue
+		}
+		if group == suffix || strings.HasSuffix(group, "."+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultAPIServiceOptions returns options pointing at the conventional
@@ -246,6 +280,16 @@ func (m *apiServiceManager) routable(ctx context.Context, name string) error {
 // ensure creates or corrects one APIService.
 func (m *apiServiceManager) ensure(ctx context.Context, name string, gv schema.GroupVersion, owners []metav1.OwnerReference) error {
 	client := m.client.Resource(APIServiceGVR)
+
+	// Before anything is created, because what would be created is the claim.
+	if !m.options.groupAllowed(gv.Group) {
+		return fmt.Errorf(
+			"API group %q is not one this server may register: it is not under any of the suffixes "+
+				"--projection-group-suffixes allows (%s). An APIService routes the whole group to this "+
+				"server and is not given back, so the group a projection claims is an operator's "+
+				"decision rather than the projection's",
+			gv.Group, strings.Join(m.options.AllowedGroupSuffixes, ", "))
+	}
 
 	existing, err := m.lookup(ctx, name)
 	switch {

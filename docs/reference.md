@@ -1181,6 +1181,24 @@ and `--apiservice-service-port`, supply `--apiservice-ca-bundle-file` if you hav
 certificate, or turn the whole thing off with `--manage-apiservices=false` — in which case
 `examples/apiservice.yaml` is the object to write per group.
 
+### Which groups a projection may claim
+
+`--projection-group-suffixes` bounds them. A group is allowed when it equals one of the listed
+suffixes or ends in `.` followed by one, so `--projection-group-suffixes=example.com` permits
+`example.com` and `store.example.com` and refuses `example.com.somewhere.else`. Unset allows any
+group, which is the default.
+
+Set it wherever the people who write projections are not the people who decide which API groups the
+cluster serves. Registering a group is neither local nor reversible: the APIService is
+cluster-scoped and routes the whole group/version to this server, and the kube-apiserver's own
+controllers only manage APIServices carrying the `kube-aggregator.kubernetes.io/automanaged` label —
+so a projection that claims `cert-manager.io/v1` before cert-manager is installed keeps it, and
+nothing hands it back when the real operator arrives.
+
+A group outside the permitted set fails that projection's registration and says so in its `Ready`
+and `Registered` conditions. Other projections are unaffected, the same way any other single
+registration failure is.
+
 ### Two projections claiming one resource
 
 `plural.group/version` identifies an API path, and only one projection can answer it. When two claim

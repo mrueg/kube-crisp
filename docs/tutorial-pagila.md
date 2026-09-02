@@ -366,8 +366,11 @@ reports what actually happened, which is why `spec.replicas` and
 
 ## 9. Watching
 
-`Rental` is the only projection here with watch enabled, because it is the only
-table that changes on its own. The others are read on request.
+`Rental` and `Store` are the two projections here with watch enabled — the eight
+others set `watch.disabled: true` and are read on request. `Rental` is the one
+worth watching, because it is the table that changes on its own; `Store` leaves
+watch on because a store appearing is a namespace appearing for every other
+kind here, and a projection that sets no `watch` block at all has it enabled.
 
 ```sh
 kubectl get rentals -n store-1 --watch

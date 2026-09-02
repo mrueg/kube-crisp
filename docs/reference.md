@@ -930,14 +930,14 @@ idle period, and `maxIdleConns` defaults to `maxOpenConns` precisely so that tho
 
 **Which providers exist is a property of the build.** A provider that talks to a cloud is that
 cloud's SDK linked into the binary, and kube-crisp links no dependency a given build does not need —
-the same reason a driver is a registration rather than a switch — so the image published from this
-repository carries none of them. Naming one needs a binary that registers it; see [Adding a
-credential provider](../README.md#adding-a-credential-provider). A projection naming a provider this
-build does not have is refused when it is compiled, by name, with the providers it does have — the
-same place, and the same `Ready` condition, as a projection naming an unknown driver.
+the same reason a driver is a registration rather than a switch. Naming one this build does not have
+is refused when the projection is compiled, by name, with the providers it does have — the same
+place, and the same `Ready` condition, as a projection naming an unknown driver. Adding another is
+[Adding a credential provider](../README.md#adding-a-credential-provider).
 
-What the published build does register is `token-file`, below, which needs no SDK because it does not
-mint anything: the token comes from whatever already refreshes it, and kube-crisp reads it.
+The image published from this repository registers two: `aws-rds-iam`, below, and `token-file`,
+which needs no SDK because it does not mint anything — the token comes from whatever already
+refreshes it, and kube-crisp reads it. Both work without a rebuild.
 
 `postgres`, `cockroach` and `mysql` only. SQLite is a local file with no password and no connection,
 and the CRD refuses `auth` on it outright.
@@ -1432,7 +1432,12 @@ mode, most often.
 |---|---|
 | `mapping.creationTimestamp` | The column providing `metadata.creationTimestamp`, which is what gives `kubectl get` an `AGE` column |
 | `mapping.fields[].omitEmpty` | Drops the field when the column is NULL rather than emitting an explicit `null` |
-| `mapping.fields[].type` | `string`, `integer`, `number` or `boolean` — how the column's value is carried into JSON |
+| `mapping.fields[].type` | `string`, `integer`, `number`, `boolean`, `timestamp` or `json` — how the column's value is carried into JSON |
+
+Two of those do more than name a JSON type. `timestamp` coerces the column to an RFC3339 string,
+which is what a `timestamp`, `timestamptz` or `date` column has to become before it is a JSON value
+at all. `json` parses the column as embedded JSON rather than carrying it as text, which is the only
+way a `jsonb` column arrives as a nested object instead of an escaped string.
 
 An object with no `creationTimestamp` shows an empty age, which is the usual
 reason a projection looks subtly wrong in `kubectl get` while being correct in

@@ -79,6 +79,8 @@ type CustomResourceProjectionSpec struct {
 	// CacheTTL, if set, caches query results for this duration. Omit for
 	// fully read-through behaviour.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	CacheTTL *metav1.Duration `json:"cacheTTL,omitempty"`
 
 	// Watch configures how WATCH requests are served.
@@ -104,6 +106,8 @@ type WatchSpec struct {
 	// is connected. Defaults to 5s. Events can therefore lag a change in the
 	// database by up to this interval.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
 
 	// Query polls incrementally. It receives :since, holding the highest
@@ -132,6 +136,8 @@ type WatchSpec struct {
 	// that stopped polling would leave its watchers seeing nothing, silently.
 	// Set it below PollInterval and it is ignored — that would be no reduction.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	FollowerPollInterval *metav1.Duration `json:"followerPollInterval,omitempty"`
 
 	// Notify subscribes to a database channel so that a change wakes the poll
@@ -202,6 +208,8 @@ type WatchSpec struct {
 	// nothing would ever notice a row disappearing. It is a duration, so the
 	// zero has to be written as a duration too — a bare 0 is rejected.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	FullResyncInterval *metav1.Duration `json:"fullResyncInterval,omitempty"`
 
 	// BookmarkInterval is how often an otherwise idle watch receives a
@@ -209,6 +217,8 @@ type WatchSpec struct {
 	// reconnects resumes from a recent point instead of replaying. Defaults to
 	// 1m; zero disables periodic bookmarks.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	BookmarkInterval *metav1.Duration `json:"bookmarkInterval,omitempty"`
 
 	// Disabled turns watch support off. The verb is still advertised, but
@@ -316,6 +326,8 @@ type DataSource struct {
 
 	// ConnMaxLifetime bounds connection reuse. Defaults to 30m.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	ConnMaxLifetime *metav1.Duration `json:"connMaxLifetime,omitempty"`
 
 	// ConnMaxIdleTime closes a connection that has been idle this long, before
@@ -325,6 +337,8 @@ type DataSource struct {
 	// a firewall has already decided to drop: those are not closed, they simply
 	// stop answering, and the request that finds one pays a timeout for it.
 	// Zero leaves connections idle until ConnMaxLifetime.
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	ConnMaxIdleTime *metav1.Duration `json:"connMaxIdleTime,omitempty"`
 
 	// PreparedStatements caches a prepared statement per query on each pooled
@@ -361,6 +375,8 @@ type DataSource struct {
 	// pool holds warm connections instead of paying connection setup on the
 	// first request after an idle period. Defaults to 30s; zero disables it.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	KeepAliveInterval *metav1.Duration `json:"keepAliveInterval,omitempty"`
 
 	// SessionVariables are set on the connection before every query this
@@ -466,12 +482,27 @@ const (
 type ProjectedResource struct {
 	// Group is the API group to serve the projected kind in. An APIService
 	// must exist delegating this group to kube-crisp-apiserver.
+	//
+	// A DNS subdomain, because that is what an API group is and what the
+	// APIService registering it is named after -- "<version>.<group>". A group
+	// that is not one produces an APIService name the kube-apiserver rejects,
+	// on every reconcile, forever, and the projection is never routable; the
+	// pattern moves that from a status condition nobody is watching to the
+	// apply that caused it.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:MaxLength=253
 	Group string `json:"group"`
 
 	// Version is the API version of the projected kind.
+	//
+	// The same shape a CustomResourceDefinition requires of one, and the other
+	// half of the APIService's name.
+	// +kubebuilder:validation:Pattern=`^v[0-9]+((alpha|beta)[0-9]+)?$`
 	Version string `json:"version"`
 
 	// Kind is the projected kind, e.g. "Order".
+	// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
+	// +kubebuilder:validation:MaxLength=63
 	Kind string `json:"kind"`
 
 	// ListKind defaults to Kind + "List".
@@ -753,6 +784,8 @@ type Query struct {
 
 	// Timeout bounds execution. Defaults to 10s.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$`
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
 	// MaxRows caps rows read from a single result set. Defaults to 5000.

@@ -889,6 +889,23 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 }
 
 // parseTimestamp accepts the layouts drivers commonly hand back for text dates.
+// ParseTimestamp reads a timestamp column's text in any of the shapes the three
+// drivers render one as, reporting whether it was one at all.
+//
+// Exported for the watch cache, which has to put two resourceVersions in order
+// and cannot do it by comparing their bytes: a timestamp version is written by
+// the database -- "updated_at = clock_timestamp()" is what the reference
+// recommends -- and neither PostgreSQL's text form nor Go's RFC3339Nano pads
+// the fraction, so the strings are variable-length and do not sort.
+//
+// One list rather than two. A format the mapper can read and the watch cache
+// cannot is a projection whose rows are served correctly and whose watch
+// quietly stops moving forward.
+func ParseTimestamp(s string) (time.Time, bool) {
+	t, err := parseTimestamp(s)
+	return t, err == nil
+}
+
 func parseTimestamp(s string) (time.Time, error) {
 	layouts := []string{
 		time.RFC3339Nano,

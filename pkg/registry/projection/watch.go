@@ -23,6 +23,7 @@ import (
 	"k8s.io/klog/v2"
 
 	crispmetrics "github.com/mrueg/kube-crisp/pkg/metrics"
+	"github.com/mrueg/kube-crisp/pkg/projection"
 )
 
 // DefaultPollInterval is how often a watched projection re-runs its query.
@@ -1065,14 +1066,15 @@ func (c *watchCache) sortedItemsLocked() []*unstructured.Unstructured {
 // Both numeric: compare as numbers. A microsecond epoch column orders
 // numerically and not lexically, which is why this comes first.
 //
-// Both RFC3339: compare as instants. This is the case that used to be wrong and
-// is the one the reference recommends -- a timestamp column mapped to
-// resourceVersion, written as "updated_at = clock_timestamp()". The mapper
-// renders such a column with time.RFC3339Nano, which strips trailing zeros from
-// the fraction, so the strings are variable-length and do not sort:
-// "10:00:00.1Z" is lexically above "10:00:00.123456Z" and "10:00:00Z" is above
-// both. A watch on such a column stalled on the lexically-largest row and
-// re-read it forever, while logging that the column was not moving forward.
+// Both timestamps: compare as instants, in any shape the mapper can read one --
+// PostgreSQL's text form for a timestamptz as much as RFC3339, since the column
+// reaches this as whatever the database rendered. This is the case that used to
+// be wrong and the one the reference recommends: a timestamp column mapped to
+// resourceVersion, written as "updated_at = clock_timestamp()". Nothing pads
+// the fraction, in either form, so the strings are variable-length and do not
+// sort -- "10:00:00.1Z" is lexically above "10:00:00.123456Z", and "10:00:00Z"
+// is above both. A watch on such a column stalled on the lexically-largest row
+// and re-read it forever, while logging that the column was not moving forward.
 //
 // Equal length, neither of the above: compare lexically. A fixed-width version
 // -- a ULID, a zero-padded counter, a timestamp at constant precision -- does
@@ -1090,8 +1092,8 @@ func compareVersions(a, b string) (int, bool) {
 		}
 	}
 
-	if left, err := time.Parse(time.RFC3339Nano, a); err == nil {
-		if right, err := time.Parse(time.RFC3339Nano, b); err == nil {
+	if left, ok := projection.ParseTimestamp(a); ok {
+		if right, ok := projection.ParseTimestamp(b); ok {
 			return left.Compare(right), true
 		}
 	}

@@ -136,8 +136,10 @@ func TestValidateRefusesAnAuthStanzaThisBuildCannotServe(t *testing.T) {
 			name:   "a provider nothing registered",
 			driver: "postgres",
 			auth:   &crispv1alpha1.DataSourceAuth{Provider: "aws-rds-iam"},
-			// The published build registers none at all, and the message has to
-			// say that rather than trailing off after "this build knows".
+			// This test binary imports no provider, so none is registered, and
+			// the message has to say that rather than trailing off after "this
+			// build knows". The published binary registers aws-rds-iam and
+			// token-file; what is being checked here is the empty case.
 			wants: []string{"aws-rds-iam", "no credential provider at all", "linked in"},
 		},
 		{

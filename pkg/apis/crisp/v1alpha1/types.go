@@ -302,10 +302,11 @@ type DataSource struct {
 	//
 	// Which providers exist is a property of the build. Every one of them means
 	// a cloud SDK linked into the binary, and kube-crisp links no dependency a
-	// given build does not need, so the image this repository publishes
-	// registers none: naming a provider needs a binary that registers it. A
-	// projection naming one this build does not have is refused when it is
-	// compiled, with the registered names in the message.
+	// given build does not need, so a provider is a registration rather than a
+	// switch. The image this repository publishes registers aws-rds-iam and
+	// token-file; anything else needs a binary that registers it. A projection
+	// naming one this build does not have is refused when it is compiled, with
+	// the registered names in the message.
 	//
 	// Omit it and nothing changes: the connection string is used exactly as it
 	// is, which is what every projection did before this field existed.

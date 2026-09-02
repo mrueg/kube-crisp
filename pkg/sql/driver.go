@@ -76,6 +76,20 @@ type Driver struct {
 	// every example in the documentation asks for TLS and nothing noticed when
 	// a connection string did not.
 	Encrypted func(dsn string) bool
+
+	// Verified reports whether a connection string asks for a TLS mode that
+	// establishes which server it reached, rather than only encrypting the way
+	// there. Required of any driver that sets AuthConnector, and consulted
+	// before a minted credential is handed over.
+	//
+	// Separate from Encrypted, and stricter, because the two answer different
+	// questions and only one of them is enough for a bearer token. A driver
+	// answers for itself because only it knows what its connection string can
+	// say: PostgreSQL spells the difference as sslmode=require against
+	// verify-full, MySQL refuses its unverified modes by name, and a driver
+	// added outside this repository has a vocabulary this package has never
+	// seen. A driver that does not answer never passes.
+	Verified func(dsn string) bool
 }
 
 var (
@@ -102,6 +116,15 @@ func Register(d Driver) error {
 		// a live credential across the network in the clear.
 		return fmt.Errorf(
 			"driver %q offers per-connection credentials but reports nothing about transport encryption", d.Name)
+	case d.AuthConnector != nil && d.Verified == nil:
+		// And whether the connection established who it reached, which is the
+		// question a bearer token actually turns on: encryption to an
+		// impersonator hands the credential over as surely as no encryption at
+		// all, and more quietly. Asked at registration rather than left to fail
+		// every auth attempt at runtime, so a driver that cannot answer says so
+		// where it is added.
+		return fmt.Errorf(
+			"driver %q offers per-connection credentials but reports nothing about server verification", d.Name)
 	}
 
 	driversMu.Lock()
@@ -177,6 +200,7 @@ func init() {
 			StatementTimeout: true,
 			Notifications:    true,
 			Encrypted:        postgresEncrypted,
+			Verified:         postgresVerified,
 			AuthConnector:    pgxAuthConnector,
 		},
 		{
@@ -196,6 +220,7 @@ func init() {
 			StatementTimeout: true,
 			Notifications:    false,
 			Encrypted:        postgresEncrypted,
+			Verified:         postgresVerified,
 			AuthConnector:    pgxAuthConnector,
 		},
 		{
@@ -204,8 +229,15 @@ func init() {
 			Placeholders:     PlaceholderQuestion,
 			SessionVariables: true,
 			Encrypted:        mysqlEncrypted,
-			PrepareDSN:       mysqlFoundRows,
-			AuthConnector:    mysqlAuthConnector,
+			// tls=true verifies the chain and the host name against the system
+			// roots, and a registered configuration name is one an operator
+			// built deliberately -- usually to carry a private CA, which is the
+			// case this must not refuse. The modes that encrypt without
+			// verifying are already refused by mysqlEncrypted by name, so for
+			// MySQL the two questions have the same answer.
+			Verified:      mysqlEncrypted,
+			PrepareDSN:    mysqlFoundRows,
+			AuthConnector: mysqlAuthConnector,
 		},
 		{
 			Name:         "sqlite",
@@ -289,31 +321,32 @@ func dsnParam(dsn, key string) string {
 // credential to whoever answers, which is a thing an eavesdropper can replay
 // for as long as it lives.
 //
-// PostgreSQL's sslmode is the reason this is not one predicate. `require`
-// encrypts and then accepts any certificate at all -- pgx sets
+// A driver that does not answer cannot be reasoned about, so it does not pass.
+// That is the same conservative direction the SQL scanner takes for an unknown
+// dialect: refuse to claim a property that has not been checked. Register
+// refuses such a driver up front when it offers credentials at all, so the
+// false here is for a driver that offers none.
+func serverVerified(driver, dsn string) bool {
+	d, ok := Lookup(driver)
+	if !ok || d.Verified == nil {
+		return false
+	}
+	return d.Verified(dsn)
+}
+
+// postgresVerified reports whether a PostgreSQL connection string asks for a
+// mode that establishes which server it reached.
+//
+// sslmode is the reason this is not the same predicate as postgresEncrypted.
+// `require` encrypts and then accepts any certificate at all -- pgx sets
 // InsecureSkipVerify for it, exactly as it does for MySQL's `skip-verify`,
 // which mysqlEncrypted already refuses by name. `verify-ca` checks the chain
 // and deliberately skips the host name, so any certificate under the same
 // authority satisfies it, which for a managed database means any instance in
 // the provider's fleet. Only `verify-full` establishes that the server is the
 // one the connection string names.
-//
-// A driver this build does not know cannot be reasoned about, so it does not
-// pass. That is the same conservative direction the SQL scanner takes for an
-// unknown dialect: refuse to claim a property that has not been checked.
-func serverVerified(driver, dsn string) bool {
-	switch driver {
-	case "postgres", "cockroach":
-		return strings.EqualFold(dsnParam(dsn, "sslmode"), "verify-full")
-	case "mysql":
-		// tls=true verifies the chain and the host name against the system
-		// roots, and a registered configuration name is one an operator built
-		// deliberately -- usually to carry a private CA, which is the case this
-		// must not refuse. The modes that encrypt without verifying are already
-		// refused by mysqlEncrypted above.
-		return mysqlEncrypted(dsn)
-	}
-	return false
+func postgresVerified(dsn string) bool {
+	return strings.EqualFold(dsnParam(dsn, "sslmode"), "verify-full")
 }
 
 // verificationHint says how to ask for a verified connection, per driver.

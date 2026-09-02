@@ -293,6 +293,16 @@ projection asking for session variables, a statement timeout, or notifications
 from a driver that does not claim them is refused rather than silently served
 without.
 
+A driver that also sets `AuthConnector` — the seam a short-lived cloud credential
+needs — has to answer two more questions, and registration refuses it if it does
+not. `Encrypted` reports whether a connection string asks for TLS, which decides
+whether to warn about a password the database already shares. `Verified` reports
+whether it asks for a mode that establishes *which* server it reached, which is
+what a minted credential turns on: a bearer token handed to an impersonator over
+an encrypted connection is gone as surely as one sent in the clear, and more
+quietly. Only the driver can answer, because only it knows what its own
+connection string can say.
+
 You are building your own binary either way — a `database/sql` driver has to be
 linked in — so the same build regenerates the CRD, whose `driver` enum lists what
 that build accepts.

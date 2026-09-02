@@ -106,6 +106,7 @@ func TestMain(m *testing.M) {
 			Placeholders:  crispsql.PlaceholderQuestion,
 			AuthConnector: authConnector,
 			Encrypted:     func(string) bool { return true },
+			Verified:      func(string) bool { return true },
 		},
 		{
 			Name:          plaintextDriver,
@@ -113,6 +114,7 @@ func TestMain(m *testing.M) {
 			Placeholders:  crispsql.PlaceholderQuestion,
 			AuthConnector: authConnector,
 			Encrypted:     func(string) bool { return false },
+			Verified:      func(string) bool { return false },
 		},
 	} {
 		if err := crispsql.Register(d); err != nil {

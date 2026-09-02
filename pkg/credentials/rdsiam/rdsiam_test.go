@@ -335,7 +335,7 @@ func TestTheProviderRegistersAndOpensAPool(t *testing.T) {
 		t.Error("registering the provider twice was accepted")
 	}
 
-	const dsn = "postgres://orders_app@" + testEndpoint + "/store?sslmode=require"
+	const dsn = "postgres://orders_app@" + testEndpoint + "/store?sslmode=verify-full"
 
 	pool, err := crispsql.Open(crispsql.PoolOptions{
 		Driver: "postgres",
@@ -349,7 +349,7 @@ func TestTheProviderRegistersAndOpensAPool(t *testing.T) {
 
 	// And the same data source without TLS is refused, because a token is a
 	// bearer credential and RDS would refuse the connection anyway.
-	plaintext := strings.Replace(dsn, "sslmode=require", "sslmode=disable", 1)
+	plaintext := strings.Replace(dsn, "sslmode=verify-full", "sslmode=disable", 1)
 	if _, err := crispsql.Open(crispsql.PoolOptions{
 		Driver: "postgres",
 		DSN:    plaintext,

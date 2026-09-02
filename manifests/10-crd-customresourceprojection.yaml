@@ -82,6 +82,7 @@ spec:
                 description: |-
                   CacheTTL, if set, caches query results for this duration. Omit for
                   fully read-through behaviour.
+                pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                 type: string
               dataSource:
                 description: DataSource identifies the SQL database backing this projection.
@@ -156,10 +157,12 @@ spec:
                       a firewall has already decided to drop: those are not closed, they simply
                       stop answering, and the request that finds one pays a timeout for it.
                       Zero leaves connections idle until ConnMaxLifetime.
+                    pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                     type: string
                   connMaxLifetime:
                     description: ConnMaxLifetime bounds connection reuse. Defaults
                       to 30m.
+                    pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                     type: string
                   driver:
                     description: |-
@@ -181,6 +184,7 @@ spec:
                       KeepAliveInterval pings idle connections on this interval so that the
                       pool holds warm connections instead of paying connection setup on the
                       first request after an idle period. Defaults to 30s; zero disables it.
+                    pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                     type: string
                   maxConcurrentQueries:
                     description: |-
@@ -723,6 +727,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -864,6 +869,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -1002,6 +1008,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -1143,6 +1150,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -1284,6 +1292,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -1424,6 +1433,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -1566,6 +1576,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -1704,6 +1715,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -1845,6 +1857,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -1926,9 +1939,20 @@ spec:
                     description: |-
                       Group is the API group to serve the projected kind in. An APIService
                       must exist delegating this group to kube-crisp-apiserver.
+
+                      A DNS subdomain, because that is what an API group is and what the
+                      APIService registering it is named after -- "<version>.<group>". A group
+                      that is not one produces an APIService name the kube-apiserver rejects,
+                      on every reconcile, forever, and the projection is never routable; the
+                      pattern moves that from a status condition nobody is watching to the
+                      apply that caused it.
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
                   kind:
                     description: Kind is the projected kind, e.g. "Order".
+                    maxLength: 63
+                    pattern: ^[A-Z][A-Za-z0-9]*$
                     type: string
                   listKind:
                     description: ListKind defaults to Kind + "List".
@@ -2044,7 +2068,12 @@ spec:
                         type: object
                     type: object
                   version:
-                    description: Version is the API version of the projected kind.
+                    description: |-
+                      Version is the API version of the projected kind.
+
+                      The same shape a CustomResourceDefinition requires of one, and the other
+                      half of the APIService's name.
+                    pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
                     type: string
                   versions:
                     description: |-
@@ -2367,6 +2396,7 @@ spec:
                       bookmark carrying the current resourceVersion, so a client that
                       reconnects resumes from a recent point instead of replaying. Defaults to
                       1m; zero disables periodic bookmarks.
+                    pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                     type: string
                   deletedQuery:
                     description: |-
@@ -2523,6 +2553,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -2545,6 +2576,7 @@ spec:
                       served from the cache of whichever replica it connected to, so a follower
                       that stopped polling would leave its watchers seeing nothing, silently.
                       Set it below PollInterval and it is ignored — that would be no reduction.
+                    pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                     type: string
                   fullResyncInterval:
                     description: |-
@@ -2554,6 +2586,7 @@ spec:
                       "0s" disables it, which is only sound with DeletedQuery: without one,
                       nothing would ever notice a row disappearing. It is a duration, so the
                       zero has to be written as a duration too — a bare 0 is rejected.
+                    pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                     type: string
                   historySize:
                     description: |-
@@ -2615,6 +2648,7 @@ spec:
                       PollInterval is how often the list query runs while at least one watcher
                       is connected. Defaults to 5s. Events can therefore lag a change in the
                       database by up to this interval.
+                    pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                     type: string
                   query:
                     description: |-
@@ -2762,6 +2796,7 @@ spec:
                         type: array
                       timeout:
                         description: Timeout bounds execution. Defaults to 10s.
+                        pattern: ^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$
                         type: string
                     type: object
                     x-kubernetes-validations:

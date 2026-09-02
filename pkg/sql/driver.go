@@ -277,3 +277,54 @@ func dsnParam(dsn, key string) string {
 	}
 	return ""
 }
+
+// serverVerified reports whether a connection string asks for a TLS mode that
+// establishes which server it reached, rather than only encrypting the way
+// there.
+//
+// Separate from Encrypted, and stricter, because the two answer different
+// questions and only one of them is enough for a bearer token. Encrypted is
+// consulted to decide whether to warn an operator carrying a password they and
+// the database already share; this is consulted before handing a minted
+// credential to whoever answers, which is a thing an eavesdropper can replay
+// for as long as it lives.
+//
+// PostgreSQL's sslmode is the reason this is not one predicate. `require`
+// encrypts and then accepts any certificate at all -- pgx sets
+// InsecureSkipVerify for it, exactly as it does for MySQL's `skip-verify`,
+// which mysqlEncrypted already refuses by name. `verify-ca` checks the chain
+// and deliberately skips the host name, so any certificate under the same
+// authority satisfies it, which for a managed database means any instance in
+// the provider's fleet. Only `verify-full` establishes that the server is the
+// one the connection string names.
+//
+// A driver this build does not know cannot be reasoned about, so it does not
+// pass. That is the same conservative direction the SQL scanner takes for an
+// unknown dialect: refuse to claim a property that has not been checked.
+func serverVerified(driver, dsn string) bool {
+	switch driver {
+	case "postgres", "cockroach":
+		return strings.EqualFold(dsnParam(dsn, "sslmode"), "verify-full")
+	case "mysql":
+		// tls=true verifies the chain and the host name against the system
+		// roots, and a registered configuration name is one an operator built
+		// deliberately -- usually to carry a private CA, which is the case this
+		// must not refuse. The modes that encrypt without verifying are already
+		// refused by mysqlEncrypted above.
+		return mysqlEncrypted(dsn)
+	}
+	return false
+}
+
+// verificationHint says how to ask for a verified connection, per driver.
+func verificationHint(driver string) string {
+	switch driver {
+	case "postgres", "cockroach":
+		return "set sslmode=verify-full, with sslrootcert naming the certificate authority " +
+			"(for RDS, the Amazon RDS certificate bundle)"
+	case "mysql":
+		return "set tls=true, or register a TLS configuration and name it"
+	default:
+		return "ask for a verified TLS connection in the connection string"
+	}
+}

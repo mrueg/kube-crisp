@@ -951,13 +951,29 @@ database. It is also sent as typed — an RDS IAM token is a signed URL checked 
 — so there is no challenge-response hiding it on the wire. Refusing costs nothing, either, because
 the cloud refuses it too: RDS requires TLS for IAM authentication and drops the connection itself. So
 this is not a policy imposed on an operator, it is the database's own rule, said while the projection
-is being compiled and with the name of the setting in it. Write `sslmode=require` for PostgreSQL or
-`tls=true` for MySQL.
+is being compiled and with the name of the setting in it.
+
+Encryption on its own is not enough, and the second check says so. A bearer token is protected from
+whoever is on the path only if the connection also establishes *which* server it reached: an
+encrypted connection to an impersonator hands the token over as surely as a plaintext one, and more
+quietly, because everything looks secured. PostgreSQL's `sslmode=require` encrypts and then accepts
+any certificate at all — the driver skips verification entirely for it, exactly as it does for
+MySQL's `skip-verify`, which is refused by name. `verify-ca` checks the chain and deliberately skips
+the host name, so any certificate from the same authority satisfies it, which for a managed database
+means any instance in the provider's fleet.
+
+So a data source with `auth` must ask for a verified connection: **`sslmode=verify-full`** for
+PostgreSQL and CockroachDB, with `sslrootcert` naming the authority — for RDS that is the Amazon RDS
+certificate bundle, which the AWS documentation publishes per region — or **`tls=true`** for MySQL,
+which verifies against the system roots, or a TLS configuration registered with the driver and named
+here, which is how a private authority is carried. `sslmode=require` is accepted for a data source
+with a stored password, where it only produces the warning above; it is refused for one that mints a
+credential.
 
 That refusal is what makes the MySQL side work at all: an IAM token is checked with the
 `mysql_clear_password` plugin, which the driver will not use unless it is told to, and kube-crisp
 turns it on for a data source with `auth` — safely, because it has already established that the
-connection is encrypted.
+connection is not only encrypted but verified.
 
 ### AWS RDS IAM
 
@@ -996,6 +1012,11 @@ dataSource:
   auth:
     provider: aws-rds-iam
 ```
+
+The Secret's connection string carries `sslmode=verify-full` and an `sslrootcert` pointing at the
+Amazon RDS certificate bundle mounted into the pod. `sslmode=require` is refused here: it encrypts
+without checking who answered, and what would be handed to whoever did is a token good for
+`rds-db:connect` as that database user.
 
 The endpoint and the database user are read out of the connection string, through the drivers' own
 parsers, so they are stated once and not twice. The region is read off the endpoint —

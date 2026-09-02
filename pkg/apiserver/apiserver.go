@@ -229,6 +229,26 @@ func (c CompletedConfig) New() (*CrispServer, error) {
 		serving := c.GenericConfig.SecureServing
 		client := c.ExtraConfig.KubeClient
 
+		// Registering the configuration means writing an object, so there has
+		// to be a cluster to write it to. --local-dsn-from-env is the way to
+		// run with no cluster at all: it answers the data source from the
+		// environment and returns before a client is ever built, so KubeClient
+		// is nil and every sibling hook here checks for that.
+		//
+		// This one did not, and the nil arrived at a method call inside the
+		// post-start hook — which the generic server turns into a crash a
+		// moment after it starts serving, with a stack trace rather than
+		// anything naming the two flags that produced it. Refused up front
+		// instead, because a webhook that admits CustomResourceProjections has
+		// nothing to do on a server that cannot see any.
+		if client == nil {
+			return nil, fmt.Errorf(
+				"--manage-projection-webhook needs a connection to the cluster to write the " +
+					"ValidatingWebhookConfiguration, and this server has none; it is running with " +
+					"--local-dsn-from-env, so pass --manage-projection-webhook=false and register " +
+					"the configuration yourself, or drop --enable-projection-webhook")
+		}
+
 		// A server on its way out must stop correcting the configuration.
 		//
 		// The certificate in it belongs to whichever pod wrote it, so a

@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -124,5 +125,40 @@ func TestWebhookConfigurationNeedsACABundle(t *testing.T) {
 	opts := webhookOptions("")
 	if err := reconcileWebhookConfiguration(context.Background(), fake.NewSimpleClientset(), opts); err == nil {
 		t.Error("a webhook configuration was registered with no CA bundle")
+	}
+}
+
+// Managing the configuration means writing an object, so there has to be a
+// cluster to write it to.
+//
+// --local-dsn-from-env is the way to run with no cluster at all, and it returns
+// before a client is ever built. Every sibling post-start hook checks for that;
+// this one did not, so the nil reached a method call inside the hook and the
+// generic server turned it into a crash a moment after the server started
+// serving — with a stack trace rather than anything naming the flags that
+// produced it.
+func TestManagingTheWebhookNeedsAClusterClient(t *testing.T) {
+	config := offlineConfig(t, testProjection())
+	config.ExtraConfig.ProjectionWebhook = webhookOptions("a-ca-bundle")
+
+	_, err := config.Complete().New()
+	if err == nil {
+		t.Fatal("a server with no cluster client accepted --manage-projection-webhook")
+	}
+	if !strings.Contains(err.Error(), "manage-projection-webhook") {
+		t.Errorf("the refusal does not name the flag to change: %v", err)
+	}
+}
+
+// And the webhook can still be served against a configuration somebody else
+// registered, which is what --manage-projection-webhook=false is for.
+func TestTheWebhookCanBeServedWithoutManagingItsConfiguration(t *testing.T) {
+	config := offlineConfig(t, testProjection())
+	opts := webhookOptions("a-ca-bundle")
+	opts.Manage = false
+	config.ExtraConfig.ProjectionWebhook = opts
+
+	if _, err := config.Complete().New(); err != nil {
+		t.Fatalf("New() returned error: %v", err)
 	}
 }

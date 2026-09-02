@@ -393,11 +393,27 @@ func New(
 			if err := crispsql.ValidateSessionVariableName(variable.Name); err != nil {
 				return nil, fmt.Errorf("dataSource.sessionVariables: %w", err)
 			}
+			// Everything the request already carries by the time a connection
+			// is prepared. Field and LabelSelector are what is left out, and
+			// the reason is that there is no object and no selector yet -- the
+			// same reason the CEL rule on the type gives, and the same two it
+			// names.
+			//
+			// The rest of the caller's identity used to be left out with them,
+			// which was not that reason: a UID, a group list and the extra map
+			// are on the request exactly as the username is, and session()
+			// below has always resolved all four. What the narrower list did
+			// was refuse, at compile, a projection the API server had already
+			// accepted -- so it applied cleanly, reported CompilationFailed,
+			// and never served. The tutorial taught the shape it refused.
 			switch variable.From {
 			case crispv1alpha1.ParameterSourceValue,
 				crispv1alpha1.ParameterSourceRequestNamespace,
 				crispv1alpha1.ParameterSourceRequestName,
-				crispv1alpha1.ParameterSourceRequestUser:
+				crispv1alpha1.ParameterSourceRequestUser,
+				crispv1alpha1.ParameterSourceRequestUserUID,
+				crispv1alpha1.ParameterSourceRequestUserGroups,
+				crispv1alpha1.ParameterSourceRequestUserExtra:
 			default:
 				return nil, fmt.Errorf("dataSource.sessionVariables[%s]: %q is not a source a session variable can use",
 					variable.Name, variable.From)

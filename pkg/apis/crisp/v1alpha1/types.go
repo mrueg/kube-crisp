@@ -828,10 +828,14 @@ type SessionVariable struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`
 	Name string `json:"name"`
 
-	// From says where the value comes from. Value, RequestNamespace,
-	// RequestName, and RequestUser are meaningful here; the rest are not,
-	// because there is no object or selector at the time the connection is
-	// prepared.
+	// From says where the value comes from. Everything the request already
+	// carries is meaningful here: Value, RequestNamespace, RequestName, and
+	// the caller's identity as RequestUser, RequestUserUID, RequestUserGroups
+	// and RequestUserExtra. Field and LabelSelector are not, because there is
+	// no object and no selector at the time the connection is prepared.
+	//
+	// Anything but Value depends on the request, and a projection using one
+	// cannot also be watched: a poll runs on a timer with no caller behind it.
 	From ParameterSource `json:"from"`
 
 	// Value supplies a constant when From is Value.

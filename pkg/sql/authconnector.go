@@ -62,6 +62,18 @@ func authConnector(d Driver, dsn string, auth *AuthOptions) (driver.Connector, e
 			encryptionHint(d.Name))
 	}
 
+	// Encrypted is not enough on its own, which is the thing this pair of checks
+	// exists to say. A bearer token is only protected from whoever is on the
+	// path if the connection also establishes that the server on the other end
+	// is the one named -- an encrypted connection to an impersonator hands the
+	// token over as surely as a plaintext one, and more quietly.
+	if !serverVerified(d.Name, dsn) {
+		return nil, fmt.Errorf(
+			"dataSource.auth obtains a short-lived credential, which is a bearer token, and this connection "+
+				"string encrypts without verifying the server it reaches: %s",
+			verificationHint(d.Name))
+	}
+
 	provider, ok := LookupCredentialProvider(auth.Provider)
 	if !ok {
 		return nil, fmt.Errorf(

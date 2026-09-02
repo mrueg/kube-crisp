@@ -19,6 +19,30 @@ rewriter.
 Mapping `namespace` to a tenant column is the idiom worth knowing: it makes ordinary namespace RBAC
 apply to database rows, and the identity parameters let a projection scope rows to the caller.
 
+Because a mapped column is bound by its own name, into the same set, a column may not be *called*
+after one of the parameters the server fills in — `:user`, `:userUID`, `:userGroups`, `:userExtra`,
+`:limit`, `:offset`, `:after`, `:since`, `:labelSelector`, `:name_not`, `:resourceVersion`, or
+anything starting `label_`. Such a projection is refused rather than served, because the column
+would take the parameter's place and the query would read the row where it asked for the server's
+value. A clause written the documented way,
+
+```sql
+WHERE id = :name AND owner = :user
+```
+
+would otherwise compare the row's owner against a string out of the object the caller submitted: it
+still reads as a guard, and is not one. `name` and `namespace` are the exceptions and stay
+available as column names, since the mapper binds both from an object the server has already forced
+to agree with the request path.
+
+`resource.selectableFields[].column` reserves `name` and `namespace` as well. A declared selectable
+column is bound on every list whether or not the client selected on it — NULL when they did not, so
+a query can carry `(:customer IS NULL OR customer = :customer)` unconditionally — so one named
+`namespace` would bind NULL over the request's own namespace every time, and a list clause written
+as `(:namespace IS NULL OR tenant = :namespace)` would stop being scoped to a tenant at all.
+
+Either way the fix is to name the column something else, or to alias it in the query.
+
 `:user` is the username, `:userUID` the half of an identity that does not get reassigned to someone
 else, and `:userGroups` and `:userExtra` arrive as JSON — an array and an object of arrays — because
 that is the one shape all three drivers can take apart. Authorization in Kubernetes is mostly by

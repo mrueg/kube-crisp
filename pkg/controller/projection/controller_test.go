@@ -904,3 +904,43 @@ func TestNoStaticDirLeavesTheGivenProjectionsAlone(t *testing.T) {
 		t.Errorf("%d paths are served, want the one that was handed in", got)
 	}
 }
+
+// TestRereadingTheDirectoryRacesTheCRDHandler is the concurrency the comment on
+// `static` used to deny.
+//
+// Re-reading the directory reassigns the slice from the workqueue worker, while
+// queueIfBorrowed ranges over it from the CustomResourceDefinition informer's
+// own goroutine to decide whether a changed CRD is one a file-backed projection
+// borrows a schema from. Both are wired together whenever there is a metadata
+// client and a --projection-dir, so any CRD event arriving during a sync met a
+// slice header being written.
+//
+// It needs -race to say anything, which is how it went unnoticed: nothing drove
+// the two paths at once.
+func TestRereadingTheDirectoryRacesTheCRDHandler(t *testing.T) {
+	dir := t.TempDir()
+	writeStaticProjection(t, dir, "bins", "bins")
+
+	f := newFixture(t, nil)
+	f.controller.staticDir = dir
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			f.controller.staticProjections()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		crd := &metav1.PartialObjectMetadata{}
+		crd.Name = "bins.warehouse.example.com"
+		for i := 0; i < 50; i++ {
+			f.controller.queueIfBorrowed(crd)
+		}
+	}()
+
+	wg.Wait()
+}

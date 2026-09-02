@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -113,7 +114,16 @@ type Controller struct {
 	// They are re-read on every sync rather than held from startup: a file
 	// changing is the same kind of event as a projection changing in the
 	// cluster, and needing a restart to pick one up made the directory the only
-	// part of the configuration that could go stale. Only sync touches these.
+	// part of the configuration that could go stale.
+	//
+	// staticMu guards the slice header, which is the only thing that changes:
+	// sync reassigns it, and the CustomResourceDefinition informer's handler
+	// ranges over it from its own goroutine to decide whether a changed CRD is
+	// one a file-backed projection borrows a schema from. The projections
+	// themselves are never edited in place -- a re-read replaces the whole
+	// slice -- so a reader holding the previous one is reading a consistent
+	// snapshot, just an older one, and the next sync is already queued.
+	staticMu  sync.RWMutex
 	static    []crispv1alpha1.CustomResourceProjection
 	staticDir string
 
@@ -384,8 +394,9 @@ func (c *Controller) queueIfBorrowed(obj any) {
 
 	// The static projections too: a file on disk borrows a schema exactly as an
 	// object in the cluster does.
-	for i := range c.static {
-		if borrowsFrom(&c.static[i], meta.Name) {
+	static := c.currentStatic()
+	for i := range static {
+		if borrowsFrom(&static[i], meta.Name) {
 			c.queue.Add(syncKey)
 			return
 		}
@@ -818,19 +829,31 @@ func (c *Controller) sync(ctx context.Context) error {
 // same reasoning that keeps a projection serving when it fails to recompile.
 func (c *Controller) staticProjections() []crispv1alpha1.CustomResourceProjection {
 	if c.staticDir == "" {
-		return c.static
+		return c.currentStatic()
 	}
 
+	// Read outside the lock: this is a directory walk and a parse, and the
+	// handler that takes the lock is on the informer's goroutine.
 	loaded, err := projection.LoadDir(c.staticDir)
 	if err != nil {
+		current := c.currentStatic()
 		utilruntime.HandleError(fmt.Errorf(
 			"re-reading %s; keeping the %d projection(s) last read from it: %w",
-			c.staticDir, len(c.static), err))
-		return c.static
+			c.staticDir, len(current), err))
+		return current
 	}
 
+	c.staticMu.Lock()
 	c.static = loaded
+	c.staticMu.Unlock()
 	return loaded
+}
+
+// currentStatic is the file-backed projections as they were last read.
+func (c *Controller) currentStatic() []crispv1alpha1.CustomResourceProjection {
+	c.staticMu.RLock()
+	defer c.staticMu.RUnlock()
+	return c.static
 }
 
 // watchStaticDir queues a sync when the projection directory changes.

@@ -227,6 +227,16 @@ func TestValidateRejects(t *testing.T) {
 		{"upper-case plural", func(p *crispv1alpha1.CustomResourceProjection) {
 			p.Spec.Resource.Plural = "Orders"
 		}, "lowercase"},
+		// A generated role names the group verbatim, so a projection claiming
+		// one Kubernetes owns is a grant on the cluster's own resources. See
+		// reservedgroup.go.
+		{"a group Kubernetes owns", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Group = "rbac.authorization.k8s.io"
+			p.Spec.Resource.Plural = "clusterroles"
+		}, "reserved for Kubernetes"},
+		{"a built-in group Kubernetes owns", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Group = "apps"
+		}, "which Kubernetes owns"},
 		{"unknown scope", func(p *crispv1alpha1.CustomResourceProjection) {
 			p.Spec.Resource.Scope = "Galactic"
 		}, "Namespaced or Cluster"},

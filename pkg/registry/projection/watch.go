@@ -66,6 +66,12 @@ const maxCachePendingEvents = 200000
 // resume instead of relisting.
 const DefaultHistorySize = 1000
 
+// maxPrimeBackoff caps how long a List waits before trying again to prime a
+// cache whose priming poll failed. The wait starts at the poll interval and
+// doubles on each failure up to this, so a table the poll can never read costs
+// one doomed read every few minutes rather than one per list. See versionFor.
+const maxPrimeBackoff = 5 * time.Minute
+
 // watchCache turns a projection into a stream of watch events by polling its
 // list query and diffing consecutive snapshots.
 //
@@ -164,6 +170,13 @@ type watchCache struct {
 	polled  bool
 	primeMu sync.Mutex
 
+	// nextPrime is the earliest a List may try to prime the cache again after
+	// an attempt failed, and primeBackoff is how long the failure after that
+	// will wait. Both guarded by mu, so that a List can find out whether to
+	// bother without touching primeMu at all.
+	nextPrime    time.Time
+	primeBackoff time.Duration
+
 	// pollMu serialises polls against each other. It is held for a whole poll,
 	// including the query, while mu is taken only to plan one and to apply its
 	// result — so a database round trip never blocks a List, a new watcher, or
@@ -222,27 +235,64 @@ func newWatchCache(interval time.Duration, resource string, group *pollGroup, li
 // watcher behind it. If it fails the caller gets "" and falls back to the rows
 // it just read, which is a worse answer than the cache's but a better one than
 // a number the watch will refuse.
+//
+// A failure is remembered, and not retried by the next list. The priming poll
+// is a full read, and the way it most often fails is a table larger than
+// maxRows — which is exactly the table a client pages through with keyset
+// paging, in many lists. Retrying on each of them made every page pay for a
+// read of maxRows rows that was always going to be refused, and queued every
+// concurrent page behind that read. Now a failed prime sets a time before which
+// no list will try again, growing from the poll interval up to maxPrimeBackoff,
+// and a list inside that window takes the row-derived version straight away.
+// Only lists: a watcher primes through Watch, which has no rows to fall back
+// on and has to be told why it cannot be served.
+//
+// A list that finds another list's priming poll in flight does not wait for it
+// either. The row-derived version it falls back to is never ahead of the rows
+// it was read from, so the worst a watch started from it can be told is to
+// relist — the same answer it gets when the prime fails outright — while
+// waiting would put a database round trip that another request is already
+// paying for in front of this one as well.
 func (c *watchCache) versionFor(ctx context.Context) string {
 	c.mu.Lock()
 	primed := c.polled
 	version := c.currentVersionLocked()
+	waiting := c.primeDeferredLocked()
 	c.mu.Unlock()
 	if primed {
 		return version
 	}
+	if waiting {
+		return ""
+	}
 
-	// Re-checked under primeMu so that concurrent first lists cost one poll
-	// rather than one each. Separate from pollMu, which poll takes itself.
-	c.primeMu.Lock()
+	// Taken without blocking: a second first-list arriving while the poll is
+	// running answers from its own rows rather than behind it. Separate from
+	// pollMu, which poll takes itself.
+	if !c.primeMu.TryLock() {
+		return ""
+	}
 	defer c.primeMu.Unlock()
 
+	// Re-checked under primeMu, because the poll that held it may have been
+	// the one that primed the cache — or the one that failed and set the wait
+	// this list now has to respect.
 	c.mu.Lock()
 	primed = c.polled
+	waiting = c.primeDeferredLocked()
 	c.mu.Unlock()
+	if waiting {
+		return ""
+	}
 	if !primed {
 		if err := c.poll(ctx); err != nil {
-			klog.V(2).InfoS("could not prime the watch cache to stamp a list",
-				"resource", c.resource, "err", err)
+			c.mu.Lock()
+			c.deferPrimeLocked()
+			until := c.nextPrime
+			c.mu.Unlock()
+			klog.V(2).InfoS("could not prime the watch cache to stamp a list; lists report the "+
+				"newest version among their own rows until the next attempt",
+				"resource", c.resource, "nextAttempt", until, "err", err)
 			return ""
 		}
 	}
@@ -250,6 +300,26 @@ func (c *watchCache) versionFor(ctx context.Context) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.currentVersionLocked()
+}
+
+// primeDeferredLocked reports whether a failed prime is still being waited out.
+func (c *watchCache) primeDeferredLocked() bool {
+	return !c.nextPrime.IsZero() && time.Now().Before(c.nextPrime)
+}
+
+// deferPrimeLocked records a failed prime: the next attempt waits twice as long
+// as the last one did, starting from the poll interval and never beyond
+// maxPrimeBackoff.
+func (c *watchCache) deferPrimeLocked() {
+	if c.primeBackoff <= 0 {
+		c.primeBackoff = c.interval
+	} else {
+		c.primeBackoff *= 2
+	}
+	if c.primeBackoff > maxPrimeBackoff {
+		c.primeBackoff = maxPrimeBackoff
+	}
+	c.nextPrime = time.Now().Add(c.primeBackoff)
 }
 
 // ResourceVersion reports the version of the most recent snapshot. Lists stamp

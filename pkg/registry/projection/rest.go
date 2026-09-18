@@ -1141,9 +1141,10 @@ func (r *REST) List(ctx context.Context, options *metainternalversion.ListOption
 	// a watch from — so an informer would replay the whole collection on every
 	// resync, which is the opposite of what caching it was for.
 	//
-	// With watch disabled, or with a cache that could not be primed, the newest
-	// version among the rows just read is the best available answer and is
-	// likewise not ahead of them.
+	// With watch disabled, or with a cache that could not be primed — or is
+	// being primed by another request, or is waiting out a prime that failed —
+	// the newest version among the rows just read is the best available answer
+	// and is likewise not ahead of them.
 	if version == "" {
 		version = highestVersion(list.Items)
 	}

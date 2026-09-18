@@ -749,6 +749,14 @@ counter — the number `1` — and the watch that followed was refused with `too
 which is an informer's first sync, on every projection with a mapped `resourceVersion`, after every
 restart.
 
+A prime that fails — a table larger than `maxRows` is the usual way — is not retried by the next
+list. The list reports the newest `resourceVersion` among the rows it returned, as a watch-disabled
+projection does, and so does every list until the next attempt, which is waited for with a backoff
+that starts at the poll interval and doubles up to five minutes. A list arriving while another list's
+priming query is still running answers the same way rather than queueing behind it. A watch is not
+spared: it has no rows to fall back to, so it runs the priming query itself and is refused with the
+error the query produced.
+
 A projection with `watch.disabled` has no cache to ask. It reports the newest `resourceVersion`
 among the rows it returned, which is a version this server has genuinely observed for that
 collection, drawn from the same mapped column a watch would have used. Two things it is not: a

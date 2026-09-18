@@ -3246,20 +3246,34 @@ func callerArgs(ctx context.Context) map[string]any {
 }
 
 // builtinArgs seeds the parameters every query may reference.
+//
+// Each of them is a present key, NULL until the request puts something there.
+// The pool refuses a parameter with no key at all rather than binding NULL for
+// it, so a name that a statement may legitimately reference has to be seeded
+// here whether or not this request has a value for it: a list without a
+// continue token still binds :after, a get still binds :labelSelector, and a
+// statement written as "(:after IS NULL OR id > :after)" keeps working on the
+// request that has no page to resume.
+//
+// The list is projection.ServerBinds, which is also what the write-bind check
+// counts as supplied — one list, so the two cannot drift apart. The selectable
+// and label binds a list fills in are seeded the same way, so a statement that
+// carries "(:label_status IS NULL OR status = :label_status)" runs on a get or a
+// watch poll exactly as it did when a missing key meant NULL.
 func (r *REST) builtinArgs(ctx context.Context, namespace string) map[string]any {
-	args := map[string]any{
-		// A cluster-wide read binds NULL, so a list query can be written as
-		// "WHERE (:namespace IS NULL OR tenant = :namespace)" and serve both
-		// namespaced and cross-namespace requests, which is what watch needs.
-		"namespace": namespaceArg(namespace),
-		"name":      nil,
-		"name_not":  nil,
-		"limit":     nil,
-		"offset":    nil,
+	args := map[string]any{}
+	for _, name := range projection.ServerBinds() {
+		args[name] = nil
 	}
+	// A cluster-wide read binds NULL, so a list query can be written as
+	// "WHERE (:namespace IS NULL OR tenant = :namespace)" and serve both
+	// namespaced and cross-namespace requests, which is what watch needs.
+	args["namespace"] = namespaceArg(namespace)
 	for name, value := range callerArgs(ctx) {
 		args[name] = value
 	}
+	r.bindSelectableFields(args, nil)
+	r.bindLabelSelector(args, nil)
 	return args
 }
 

@@ -11,6 +11,14 @@ Everything a `CustomResourceProjection` can say, and why you would say it. The
 on writes every mapped column is bound by its own name. More can be declared under
 `queries.*.parameters`, including values read out of the submitted object.
 
+Those are also the only names a write statement may use. A `create`, `update`, `updateStatus`,
+`delete` or `markDeleted` statement that names anything else — a column the mapping does not read,
+a misspelling, one of the binds only a list fills in — is refused when the projection is validated,
+and a `deleteCollection`, which runs with no object, may name only a declared parameter or one of
+the server's own. The check runs against every served version's mapping, because the statements are
+shared and the mappings are not: a version whose mapping leaves out a column the shared `update`
+sets would otherwise write `NULL` there on every write through it, whatever `conversion` says.
+
 Values are always passed as driver placeholders and never interpolated into the statement, so a
 request cannot alter the query. String literals — including backslash escapes and PostgreSQL's
 dollar-quoted `$$…$$` — quoted identifiers, comments, and the `::` cast are left untouched by the
@@ -569,9 +577,17 @@ resource:
   conversion: RoundTrip   # the default: every version maps the same columns
 ```
 
+The same columns, read the same way: a column one version reads as an integer
+field and another as a string field, or one as a field and the other as a
+label, is refused too, since a write through the second stores something
+different from what the first showed. Where the column lands in the object is
+each version's own business.
+
 `conversion: None` allows them to differ, for a version that deliberately
 exposes less. Nothing translates between them either way — the setting only
-decides whether the projection is allowed to say so.
+decides whether the projection is allowed to say so. What it does not allow is
+a write statement naming a column the version does not map; that is refused
+whatever the setting, as described under [bind parameters](#bind-parameters).
 
 ## Caching
 
@@ -1479,7 +1495,7 @@ $ kubectl get crp orders -o jsonpath='{.status.requiredSchema}' | jq
 ```
 
 `usedFor` separates the columns a row cannot become an object without — `identity` — from the ones
-that fill in metadata, labels, or fields.
+that fill in metadata, labels, annotations, or fields.
 
 `kubectl crisp schema` reads it back as a checklist, over every projection at once, and over
 manifests that have never reached a cluster:

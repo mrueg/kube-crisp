@@ -626,7 +626,8 @@ func (p *Pool) EnforceTimeoutOn(want bool) bool {
 type Row map[string]any
 
 // Query executes stmt, resolving each declared bind parameter from args.
-// A parameter with no entry in args is passed as NULL.
+// A parameter with a nil entry in args is passed as NULL; one with no entry at
+// all is refused, since a NULL nobody asked for is how a write loses a column.
 func (p *Pool) Query(ctx context.Context, stmt *Statement, args map[string]any) ([]Row, error) {
 	return p.QueryWith(ctx, nil, stmt, args)
 }
@@ -647,12 +648,17 @@ func (p *Pool) QueryWith(ctx context.Context, session []SessionVariable, stmt *S
 		return rows, err
 	}
 
+	values, err := bind(stmt, args)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, stmt.Timeout)
 	defer cancel()
 
 	ctx, span := p.startSpan(ctx, "query", stmt.SQL)
 
-	rows, err := p.queryContext(ctx, stmt, bind(stmt, args))
+	rows, err := p.queryContext(ctx, stmt, values)
 	if err != nil {
 		span.end(0, err)
 		return nil, fmt.Errorf("executing query: %w", err)
@@ -806,17 +812,17 @@ func (p *Pool) ExecWith(ctx context.Context, session []SessionVariable, stmt *St
 		return affected, err
 	}
 
+	values, err := bind(stmt, args)
+	if err != nil {
+		return 0, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, stmt.Timeout)
 	defer cancel()
 
 	ctx, span := p.startSpan(ctx, "exec", stmt.SQL)
 
-	values := bind(stmt, args)
-
-	var (
-		result sql.Result
-		err    error
-	)
+	var result sql.Result
 	if stmt.Prepared {
 		prepared, prepErr := p.stmtFor(ctx, stmt.SQL) //nolint:sqlclosecheck // cached statement, closed by the cache or by Pool.Close
 		if prepErr != nil {
@@ -898,6 +904,14 @@ func (p *Pool) QueryAllWith(ctx context.Context, session []SessionVariable, stmt
 		}
 		enforced = enforced || stmt.EnforceTimeout
 	}
+
+	// Every statement's arguments are resolved before a transaction is opened,
+	// so one that cannot be bound costs nothing on the database.
+	bound, err := bindAll(stmts, args)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, clientDeadline(enforced, timeout))
 	defer cancel()
 
@@ -922,9 +936,9 @@ func (p *Pool) QueryAllWith(ctx context.Context, session []SessionVariable, stmt
 	}
 
 	out := make([][]Row, 0, len(stmts))
-	for _, stmt := range stmts {
+	for i, stmt := range stmts {
 		read := func() ([]Row, error) {
-			rows, err := tx.QueryContext(ctx, stmt.SQL, bind(stmt, args)...)
+			rows, err := tx.QueryContext(ctx, stmt.SQL, bound[i]...)
 			if err != nil {
 				return nil, fmt.Errorf("executing query: %w", err)
 			}
@@ -973,6 +987,15 @@ func (p *Pool) transact(
 	for _, stmt := range stmts {
 		enforced = enforced || stmt.EnforceTimeout
 	}
+
+	// Resolved up front, for the same reason QueryAllWith does: a statement
+	// that names a parameter nothing supplies is refused before anything has
+	// been written, rather than after the statements before it have run.
+	bound, err := bindAll(stmts, args)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, clientDeadline(enforced, last.Timeout))
 	defer cancel()
 
@@ -1006,9 +1029,9 @@ func (p *Pool) transact(
 		return nil, 0, err
 	}
 
-	for _, stmt := range stmts[:len(stmts)-1] {
+	for i, stmt := range stmts[:len(stmts)-1] {
 		_, stmtSpan := p.startSpan(ctx, "exec", stmt.SQL)
-		result, err := tx.ExecContext(ctx, stmt.SQL, bind(stmt, args)...)
+		result, err := tx.ExecContext(ctx, stmt.SQL, bound[i]...)
 		if err != nil {
 			stmtSpan.endAffected(0, err)
 			return nil, 0, fmt.Errorf("executing statement: %w", err)
@@ -1028,7 +1051,7 @@ func (p *Pool) transact(
 	if returnsRows {
 		read := func() ([]Row, error) {
 			_, stmtSpan := p.startSpan(ctx, "query", last.SQL)
-			rows, err := tx.QueryContext(ctx, last.SQL, bind(last, args)...)
+			rows, err := tx.QueryContext(ctx, last.SQL, bound[len(bound)-1]...)
 			if err != nil {
 				stmtSpan.end(0, err)
 				return nil, fmt.Errorf("executing statement: %w", err)
@@ -1048,7 +1071,7 @@ func (p *Pool) transact(
 		affected = int64(len(out))
 	} else {
 		_, stmtSpan := p.startSpan(ctx, "exec", last.SQL)
-		result, err := tx.ExecContext(ctx, last.SQL, bind(last, args)...)
+		result, err := tx.ExecContext(ctx, last.SQL, bound[len(bound)-1]...)
 		if err != nil {
 			stmtSpan.endAffected(0, err)
 			return nil, 0, fmt.Errorf("executing statement: %w", err)
@@ -1076,12 +1099,44 @@ func (p *Pool) transact(
 
 // bind resolves a statement's declared parameters from args, in the order the
 // driver expects them.
-func bind(stmt *Statement, args map[string]any) []any {
+//
+// A parameter that args has no entry for is an error, not a NULL. It used to be
+// a NULL: a map lookup on a missing key gives the zero value, and the zero
+// value of any is nil, so a statement naming a parameter nobody supplied ran
+// with NULL in that position and nobody was told. For a read that is a clause
+// that quietly matches everything or nothing; for a write it is worse, because
+// "SET total_cents = :total_cents" with no total_cents in args overwrites the
+// column with NULL and answers 200. The compile-time check in pkg/projection is
+// what stops that from being served at all; this is the line behind it, for a
+// caller that assembled its arguments some other way.
+//
+// A key that is present with a nil value is a different thing and stays a
+// NULL: that is how a list binds :name, how an absent label is written, and
+// how a field the object does not carry is stored.
+func bind(stmt *Statement, args map[string]any) ([]any, error) {
 	values := make([]any, 0, len(stmt.Params))
 	for _, name := range stmt.Params {
-		values = append(values, args[name])
+		value, supplied := args[name]
+		if !supplied {
+			return nil, fmt.Errorf("statement names the parameter :%s, which nothing supplies", name)
+		}
+		values = append(values, value)
 	}
-	return values
+	return values, nil
+}
+
+// bindAll resolves every statement's parameters, in statement order, so a
+// transaction can refuse before it opens rather than partway through.
+func bindAll(stmts []*Statement, args map[string]any) ([][]any, error) {
+	bound := make([][]any, 0, len(stmts))
+	for _, stmt := range stmts {
+		values, err := bind(stmt, args)
+		if err != nil {
+			return nil, err
+		}
+		bound = append(bound, values)
+	}
+	return bound, nil
 }
 
 // scanJSONArray reads a result set holding a single JSON array column and

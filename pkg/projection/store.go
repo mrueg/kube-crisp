@@ -390,6 +390,16 @@ func Validate(p *crispv1alpha1.CustomResourceProjection) error {
 		return err
 	}
 
+	// After the driver check, since the parameter names are read out of each
+	// statement the way that driver would read them. Here rather than in the
+	// registry because the registry compiles one version at a time and cannot
+	// see that a statement shared by every version names a column only some of
+	// them map — and here rather than only in the apiserver so that the offline
+	// validate command refuses the same projection the server would.
+	if err := CheckWriteBinds(&p.Spec); err != nil {
+		return fmt.Errorf("projection %s: %w", p.Name, err)
+	}
+
 	return nil
 }
 

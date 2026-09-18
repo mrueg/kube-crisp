@@ -87,6 +87,12 @@ func TestValidateRejectsClientAssignedVersion(t *testing.T) {
 // is only a precondition.
 func TestValidateAcceptsDatabaseAssignedVersion(t *testing.T) {
 	p := incrementalProjection()
+	// The statement writes customer, so the mapping has to read it: a write
+	// naming a column the mapping does not supply is refused on its own. And
+	// the schema has to describe where it lands, or preserve unknown fields,
+	// or a write would prune it before the mapping ran.
+	p.Spec.Resource.Schema = preserving()
+	p.Spec.Mapping.Fields = []crispv1alpha1.FieldMapping{{Column: "customer", Path: "spec.customer"}}
 	p.Spec.Queries.Update = &crispv1alpha1.Query{
 		SQL: `UPDATE orders SET customer = :customer, updated_at = clock_timestamp()
 		      WHERE id = :name AND (:resourceVersion::text IS NULL OR updated_at = :resourceVersion)`,

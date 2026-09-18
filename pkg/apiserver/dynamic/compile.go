@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	goerrors "errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -455,13 +456,25 @@ func (c *Compiler) versions(p *crispv1alpha1.CustomResourceProjection, prepared 
 	return versions, nil
 }
 
-// checkRoundTrip refuses versions that map different columns.
+// checkRoundTrip refuses versions that map different columns, or the same
+// columns differently.
 //
 // There is no conversion between the versions of a projected kind: each reads
 // the same rows and maps them its own way. That is only safe while they cover
 // the same columns — otherwise a client writing through one version drops a
 // value another version displays, and neither of them can tell. Saying so at
 // load time beats letting a controller discover it.
+//
+// Covering the same columns is not enough on its own. The comparison used to
+// be by name, so a version that read total_cents as a string where the primary
+// read it as an integer passed, and so did one that mapped status as a label
+// where the primary mapped it as a field. Both write the column differently
+// from the version a client read it through — a string where a number was, a
+// label's NULL-for-absent where a field's value was — and a write through the
+// secondary version is then not a round trip of what the primary showed. So the
+// column's type and what it is read for are compared as well as its name.
+// Where it lands in the object is deliberately not: mapping a column to a
+// different path is the whole reason to add a version.
 func checkRoundTrip(res crispv1alpha1.ProjectedResource, base crispv1alpha1.Mapping, versions []compiledVersion) error {
 	if res.Conversion == crispv1alpha1.ConversionNone || len(versions) < 2 {
 		return nil
@@ -469,7 +482,7 @@ func checkRoundTrip(res crispv1alpha1.ProjectedResource, base crispv1alpha1.Mapp
 
 	// A version without a mapping of its own uses the projection's, which is
 	// what makes an added version cheap when only the schema differs.
-	effective := func(version compiledVersion) sets.Set[string] {
+	effective := func(version compiledVersion) map[string][]string {
 		if version.Mapping == nil {
 			return mappedColumns(&base)
 		}
@@ -477,35 +490,53 @@ func checkRoundTrip(res crispv1alpha1.ProjectedResource, base crispv1alpha1.Mapp
 	}
 
 	primary := effective(versions[0])
+	primaryNames := sets.KeySet(primary)
 	for _, version := range versions[1:] {
 		columns := effective(version)
-		if missing := primary.Difference(columns); missing.Len() > 0 {
+		names := sets.KeySet(columns)
+		if missing := primaryNames.Difference(names); missing.Len() > 0 {
 			return fmt.Errorf(
 				"version %s does not map %s, which %s does: a write through %s would drop it. Map the same columns, or set conversion: None to say the versions differ on purpose",
 				version.Name, strings.Join(sets.List(missing), ", "), versions[0].Name, version.Name)
 		}
-		if extra := columns.Difference(primary); extra.Len() > 0 {
+		if extra := names.Difference(primaryNames); extra.Len() > 0 {
 			return fmt.Errorf(
 				"version %s maps %s, which %s does not: a write through %s would drop it. Map the same columns, or set conversion: None to say the versions differ on purpose",
 				version.Name, strings.Join(sets.List(extra), ", "), versions[0].Name, versions[0].Name)
+		}
+		for _, column := range sets.List(primaryNames) {
+			want, got := primary[column], columns[column]
+			if strings.Join(want, "; ") == strings.Join(got, "; ") {
+				continue
+			}
+			return fmt.Errorf(
+				"version %s maps %s as a %s, which %s maps as a %s: a write through %s would store it differently from what %s shows. Map the column the same way, or set conversion: None to say the versions differ on purpose",
+				version.Name, column, strings.Join(got, " and a "), versions[0].Name, strings.Join(want, " and a "),
+				version.Name, versions[0].Name)
 		}
 	}
 	return nil
 }
 
-// mappedColumns is every column a version reads or writes through its mapping.
+// mappedColumns is every column a version reads or writes through its mapping,
+// with how each is read. A column mapped twice — as a label and as a field,
+// say — has both descriptions, in a fixed order, so two versions that both map
+// it twice compare equal and one that maps it once does not.
 //
 // The walk is projection.MappingColumns, which pkg/projection also uses to say
 // what a projection needs from its database. It used to be spelled out here as
 // well, and two lists of the same struct's fields agreeing only by memory is a
 // bad way to hold up a check that fails open: a column left out of this one is
-// a column the comparison below stops making, so two versions pass as covering
+// a column the comparison above stops making, so two versions pass as covering
 // the same columns while one of them does not, and a write through it drops a
 // value the other displays.
-func mappedColumns(mapping *crispv1alpha1.Mapping) sets.Set[string] {
-	columns := sets.New[string]()
-	for name := range projection.MappingColumnNames(mapping) {
-		columns.Insert(name)
+func mappedColumns(mapping *crispv1alpha1.Mapping) map[string][]string {
+	columns := map[string][]string{}
+	for _, column := range projection.MappingColumns(mapping) {
+		columns[column.Column] = append(columns[column.Column], column.Describe())
+	}
+	for _, described := range columns {
+		sort.Strings(described)
 	}
 	return columns
 }

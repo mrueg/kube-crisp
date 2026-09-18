@@ -7,10 +7,11 @@ import (
 // What a column provides, reported alongside it so a reader can tell a column
 // the projection cannot work without from one that fills in a field.
 const (
-	usedForIdentity = "identity"
-	usedForMetadata = "metadata"
-	usedForLabel    = "label"
-	usedForField    = "field"
+	usedForIdentity   = "identity"
+	usedForMetadata   = "metadata"
+	usedForLabel      = "label"
+	usedForAnnotation = "annotation"
+	usedForField      = "field"
 )
 
 // MappedColumn is one column a mapping reads, and what it is read for.
@@ -18,12 +19,30 @@ type MappedColumn struct {
 	// Column is the result column's name.
 	Column string
 
-	// UsedFor is "identity", "metadata", "label" or "field".
+	// UsedFor is "identity", "metadata", "label", "annotation" or "field".
 	UsedFor string
 
 	// Type is what the value is coerced to. Everything except a field mapping
 	// is read as a string.
 	Type crispv1alpha1.FieldType
+
+	// OmitEmpty is the field mapping's omitEmpty, and false for everything
+	// else. It is part of how a column is read, so two versions that differ on
+	// it are not reading the column the same way.
+	OmitEmpty bool
+}
+
+// Describe says how a column is read, in the words the round-trip check uses to
+// tell two versions apart: "integer field", "label", "identity".
+func (c MappedColumn) Describe() string {
+	if c.UsedFor != usedForField {
+		return c.UsedFor
+	}
+	described := string(c.Type) + " " + usedForField
+	if c.OmitEmpty {
+		described += " with omitEmpty"
+	}
+	return described
 }
 
 // MappingColumns walks a mapping and reports every column it reads, in the
@@ -82,7 +101,7 @@ func MappingColumns(mapping *crispv1alpha1.Mapping) []MappedColumn {
 		add(column, usedForLabel, crispv1alpha1.FieldTypeString)
 	}
 	for _, column := range mapping.Annotations {
-		add(column, usedForLabel, crispv1alpha1.FieldTypeString)
+		add(column, usedForAnnotation, crispv1alpha1.FieldTypeString)
 	}
 
 	for _, field := range mapping.Fields {
@@ -90,7 +109,12 @@ func MappingColumns(mapping *crispv1alpha1.Mapping) []MappedColumn {
 		if fieldType == "" {
 			fieldType = crispv1alpha1.FieldTypeString
 		}
-		add(field.Column, usedForField, fieldType)
+		if field.Column == "" {
+			continue
+		}
+		out = append(out, MappedColumn{
+			Column: field.Column, UsedFor: usedForField, Type: fieldType, OmitEmpty: field.OmitEmpty,
+		})
 	}
 
 	return out

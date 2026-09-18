@@ -131,3 +131,15 @@ func sortedNames(reserved map[string]bool) []string {
 	sort.Strings(names)
 	return names
 }
+
+// ServerBinds is every parameter the server supplies on every statement it
+// runs, whatever the verb: the identity and paging binds, and the caller's.
+//
+// Exported for the two places that have to agree about it. The registry seeds
+// its arguments from this list, so each of these is a present key — NULL where
+// the request has nothing to put there — on every statement; and CheckWriteBinds
+// counts them as supplied when it decides whether a write statement can run at
+// all. One list, so a name added here reaches both.
+func ServerBinds() []string {
+	return sortedNames(selectableReserved)
+}

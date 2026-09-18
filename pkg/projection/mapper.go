@@ -1306,6 +1306,17 @@ func (m *Mapper) Params(obj *unstructured.Unstructured) (map[string]any, error) 
 		"namespace": obj.GetNamespace(),
 	}
 
+	// Every mapped column is a key, before any of them has a value. A write
+	// statement may name any column the mapping reads — that is the rule
+	// CheckWriteBinds enforces — and the pool refuses a parameter with no key
+	// at all rather than binding NULL for it. The columns below that have
+	// nothing to bind on this object (a uid the object has not been given yet,
+	// a creation timestamp the database stamps itself) are therefore NULL here
+	// by being present, which is what they always were by being absent.
+	for _, column := range MappingColumns(&m.mapping) {
+		args[column.Column] = nil
+	}
+
 	identity, err := m.SplitName(obj.GetName())
 	if err != nil {
 		return nil, err

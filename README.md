@@ -67,7 +67,7 @@ group while the server runs, and deleting it takes the group away again. No rest
 | **Watch** | incremental polling — or `LISTEN`/`NOTIFY`, so a change wakes the watch in milliseconds rather than at the next tick — resumable from recent history, with periodic bookmarks and the `WatchList` protocol, so client-go informers work |
 | **Schema** | enforced on writes including `x-kubernetes-validations` CEL rules and ratcheting, defaults applied, unknown fields pruned or rejected, published as OpenAPI, and used by server-side apply |
 | **Versions** | several versions of a kind, each with its own schema and mapping, checked to map the same columns so a write through one does not lose what another shows |
-| **Admission** | opt-in: `ValidatingAdmissionPolicy`, admission webhooks, and namespace lifecycle apply to projected writes; and a webhook of its own that checks a projection's SQL against the database, so a broken one is refused at `kubectl apply` rather than reported afterwards |
+| **Admission** | opt-in: `ValidatingAdmissionPolicy`, `MutatingAdmissionPolicy`, admission webhooks, and namespace lifecycle apply to projected writes; and a webhook of its own that checks a projection's SQL against the database, so a broken one is refused at `kubectl apply` rather than reported afterwards |
 | **Registration** | the APIService for each projected group is created, corrected, and removed automatically |
 | **Access** | authorization is the cluster's: `kubectl crisp rbac` writes the ClusterRoles a projected group needs, granting each kind exactly the verbs its projection can serve |
 | **Lifecycle** | map columns onto `metadata.generation`, `deletionTimestamp`, `finalizers`, and `ownerReferences`, so soft deletes, `observedGeneration`, finalizer flows, and garbage collection work as clients expect |
@@ -216,7 +216,7 @@ directory is not recursive. Everything in it is a decision rather than a default
 | --- | --- | --- |
 | `networkpolicy.yaml` | Restricts traffic to and from the server | Needs your cluster's CIDRs and namespace labels |
 | `servicemonitor.yaml`, `prometheusrule.yaml` | Scrape config and alert rules | Need the Prometheus Operator's CRDs |
-| `admission-rbac.yaml` | Lets the API surface project admission configuration | Watches webhook configurations and namespaces cluster-wide |
+| `admission-rbac.yaml` | Lets the API surface project admission configuration | Watches webhook configurations, admission policies and namespaces cluster-wide |
 | `flowcontrol-rbac.yaml` | Lets it project FlowSchemas and PriorityLevelConfigurations | Writes to `flowschemas/status` |
 | `webhook-rbac.yaml` | Lets the server manage its own `ValidatingWebhookConfiguration` | Creates and updates a cluster-scoped admission object |
 

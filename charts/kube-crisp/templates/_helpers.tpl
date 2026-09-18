@@ -52,3 +52,24 @@ namespace, which is also the only namespace the Role below grants.
 {{- .Release.Namespace -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Admission plugins to disable because the cluster predates the API they watch.
+Each policy plugin watches the v1 API for its policies and refuses every write
+until that watch has synced; a cluster without the API answers the watch with
+not found, so the plugin never becomes ready and every projected write fails
+with "not yet ready to handle request". Disabling the plugin there is what
+keeps the rest of the chain usable. v1 ValidatingAdmissionPolicy arrived in
+1.30 and v1 MutatingAdmissionPolicy in 1.36. Outside a cluster, helm template
+uses Helm's own idea of the version; pass --kube-version to match the target.
+*/}}
+{{- define "kube-crisp.disabledAdmissionPlugins" -}}
+{{- $plugins := list -}}
+{{- if semverCompare "<1.30.0-0" .Capabilities.KubeVersion.Version -}}
+{{- $plugins = append $plugins "ValidatingAdmissionPolicy" -}}
+{{- end -}}
+{{- if semverCompare "<1.36.0-0" .Capabilities.KubeVersion.Version -}}
+{{- $plugins = append $plugins "MutatingAdmissionPolicy" -}}
+{{- end -}}
+{{- join "," $plugins -}}
+{{- end -}}

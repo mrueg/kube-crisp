@@ -62,8 +62,17 @@ crisp:
   leaderElection: true
 
   # Run the admission chain for projected writes, so ValidatingAdmissionPolicy,
-  # admission webhooks, and namespace lifecycle apply to them. Adds cluster-wide
-  # watches on webhook configurations, admission policies, and namespaces.
+  # MutatingAdmissionPolicy, admission webhooks, and namespace lifecycle apply
+  # to them. Adds cluster-wide watches on webhook configurations, admission
+  # policies, and namespaces.
+  #
+  # A policy plugin needs the cluster to serve the v1 API for its policies:
+  # ValidatingAdmissionPolicy from 1.30, MutatingAdmissionPolicy from 1.36. On
+  # an older cluster the chart disables that plugin with
+  # --disable-admission-plugins, since otherwise it would refuse every
+  # projected write waiting for a watch the cluster cannot answer. helm
+  # template outside a cluster needs --kube-version to make that decision for
+  # the right one.
   admission: false
 
   # Fair-queue requests by FlowSchema, so one client cannot take a projection's

@@ -156,6 +156,21 @@ making deliberately, so it lives in its own manifest:
 $ kubectl apply -f manifests/optional/admission-rbac.yaml
 ```
 
+The grant lists every plugin the server runs by default, `MutatingAdmissionPolicy` included. That
+is not optional: a policy plugin refuses every write until its watch has synced, and a watch the
+cluster forbids never does, so a grant missing one resource turns every projected create, update
+and delete into a ten-second wait ending in `not yet ready to handle request`.
+
+The same wait happens on a cluster that does not serve the API at all. `MutatingAdmissionPolicy`
+watches the v1 API, which arrived in Kubernetes 1.36; `ValidatingAdmissionPolicy` needs 1.30. The
+chart reads the cluster's version and disables the plugin the cluster cannot serve with
+`--disable-admission-plugins`, and says so in its notes — `helm template` outside a cluster needs
+`--kube-version` to decide for the right one. With the plain manifests, pass the flag yourself:
+
+```console
+$ kube-crisp-apiserver --enable-admission --disable-admission-plugins=MutatingAdmissionPolicy
+```
+
 ## Leader election
 
 Polling is the one thing a projection does with no request behind it, which makes it the only load

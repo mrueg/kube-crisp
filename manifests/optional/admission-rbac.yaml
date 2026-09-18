@@ -9,7 +9,16 @@ kind: ClusterRole
 metadata:
   name: kube-crisp:admission
 rules:
-  # The webhook plugins resolve which webhooks apply to a projected write.
+  # The webhook plugins resolve which webhooks apply to a projected write, and
+  # the policy plugins the policies. Every plugin the server runs by default is
+  # listed: a policy plugin refuses every write until its watch has synced, and
+  # a watch the cluster forbids never does. The chart's rbac.yaml carries the
+  # same rule by hand.
+  #
+  # A cluster older than 1.36 has no v1 MutatingAdmissionPolicy, and one
+  # older than 1.30 no v1 ValidatingAdmissionPolicy; either is a watch that
+  # never syncs, so run the server with --disable-admission-plugins naming
+  # the plugin there, e.g. --disable-admission-plugins=MutatingAdmissionPolicy.
   - apiGroups: ["admissionregistration.k8s.io"]
     resources:
       - validatingwebhookconfigurations

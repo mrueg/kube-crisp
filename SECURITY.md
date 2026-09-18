@@ -38,6 +38,21 @@ database with whoever owns its credentials, rather than with whoever can write a
 projection. `--datasource-namespaces` bounds where those Secrets may live, and
 defaults to the server's own namespace.
 
+**A credential provider acts with the server's own privileges, so what it may
+reach is the operator's decision.** `dataSource.auth` names a provider and hands
+it options a projection wrote, and both providers this build registers act
+locally: `token-file` reads a file, `token-command` runs a command. Left
+unconstrained, either would turn "may write a projection" into "may read the
+server's ServiceAccount token" or "may run anything in the API server pod", so
+neither is. `--credential-token-file-dirs` names the directories a credential
+file may live in and defaults to `/var/run/kube-crisp/credentials`, a path
+nothing else uses; `--credential-command-dir` is empty by default, and until it
+names a directory of executables the operator installed, `token-command` refuses
+every projection that names it. A projection then chooses among the files
+somebody deliberately put there, and supplies no arguments to any of them. Point
+either flag at a directory somebody else fills and that is the decision being
+given away.
+
 **Values are bound, never interpolated.** Request-supplied values reach the
 database as driver parameters, so nothing a client sends can change the shape of
 a statement. The one identifier that is not a parameter — a session variable's
@@ -104,6 +119,10 @@ The shipped manifests favour a working first deployment. Before production:
   is on by default and behind delegated authorization, but it is a surface
   nothing here needs, and a heap or CPU profile of this server describes the
   queries it is running.
+- Leave `--credential-command-dir` unset unless something needs it, and when it
+  is set, point it at a directory only the deployment writes. A command there
+  runs as this server, so it is the operator's code in every sense that matters,
+  and `token-file` covers most of what people reach for it to do.
 - Consider `--enable-admission` so `ValidatingAdmissionPolicy` and admission
   webhooks apply to projected writes, and `--enable-priority-and-fairness` so
   one client cannot take a projection's whole capacity. Each needs the extra

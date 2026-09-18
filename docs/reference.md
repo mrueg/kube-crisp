@@ -1570,3 +1570,10 @@ that cannot be a JSON number at all; the row is refused with an error naming
 collection. A `string` holds the whole unsigned range exactly, whatever width
 the driver picked. That is also what makes `id BIGINT UNSIGNED` usable as
 `mapping.name`, since every mapped identity field is rendered as text.
+
+The same holds when the value arrives inside JSON — a row delivered by
+`resultFormat: JSONArray`, or a column mapped as `json`. The document is decoded
+keeping every number's digits, so an id past 2^53, which is where a float64
+starts rounding and where CockroachDB's `unique_rowid()` lives, reads as the
+integer, the name or the string it is; inside an untyped `json` value an
+integer stays exact up to the int64 range and is a float64 past it.

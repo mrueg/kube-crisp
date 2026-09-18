@@ -3,12 +3,14 @@
 package sql
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -1112,7 +1114,7 @@ func scanJSONArray(rows *sql.Rows, maxBytes int) ([]Row, error) {
 	}
 
 	var decoded []map[string]any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
+	if err := DecodeJSON(raw, &decoded); err != nil {
 		return nil, fmt.Errorf("decoding JSON aggregate: %w", err)
 	}
 
@@ -1121,6 +1123,35 @@ func scanJSONArray(rows *sql.Rows, maxBytes int) ([]Row, error) {
 		out = append(out, Row(item))
 	}
 	return out, rows.Err()
+}
+
+// DecodeJSON reads JSON the database produced, keeping every number's digits.
+//
+// encoding/json turns a number into a float64 unless told otherwise, and a
+// float64 keeps fifty-three bits of integer: 9007199254740993 decodes as
+// 9007199254740992, silently. An id in that range is ordinary — CockroachDB's
+// unique_rowid() never produces a smaller one — and the mapper reads a row's
+// identity out of exactly these values, so the object was named after a row
+// that is not in the table, and a GET or UPDATE by that name bound an id
+// nothing matches. With UseNumber every number arrives as a json.Number, which
+// is its digits, and each consumer parses it at the width its field type
+// promises. This is the one place JSON from a row is decoded — the aggregate
+// here and a json column in the mapper alike — so the two cannot drift apart
+// on it.
+//
+// Trailing content is refused the way json.Unmarshal refuses it: a Decoder
+// stops at the end of the first value and would otherwise accept a column
+// holding two documents as the first of them.
+func DecodeJSON(raw []byte, into any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(into); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return fmt.Errorf("invalid character after top-level value")
+	}
+	return nil
 }
 
 // valueSize is roughly what a scanned value costs to hold.

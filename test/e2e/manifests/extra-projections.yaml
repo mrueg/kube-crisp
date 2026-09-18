@@ -150,7 +150,9 @@ spec:
           type: object
           properties:
             replicas: {type: integer, format: int64}
-            phase: {type: string}
+            # Dropped from a create and started at the default: the column
+            # behind it is NOT NULL.
+            phase: {type: string, default: pending}
     subresources:
       status: {}
       scale:

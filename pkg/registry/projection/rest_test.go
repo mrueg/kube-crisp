@@ -317,7 +317,6 @@ func newOrder(name, customer string, total int64) *unstructured.Unstructured {
 	}}
 	obj.SetName(name)
 	obj.SetNamespace("acme")
-	obj.SetResourceVersion("1")
 	return obj
 }
 

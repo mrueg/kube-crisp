@@ -132,7 +132,14 @@ of an object — it is just not a way to divide one between owners.
 Enabling `subresources.status` splits the object the same way it does for a CRD: a write to the
 main resource cannot change status, and a write to `/status` cannot change anything else. As with a
 CRD, the ignored half is dropped silently rather than rejected, so a client that sends a whole
-object to the wrong endpoint gets a success and no change.
+object to the wrong endpoint gets a success and no change. A create is held to the same line:
+whatever status the object arrives with is dropped before the schema's defaults are applied, so a
+status field with a `default` starts at the default and one without binds NULL, and the controller
+fills them in through `/status`. That is what makes the split worth having — a client allowed to
+create but not to write `/status` cannot set a field the controller owns on the way in. It also
+means a `NOT NULL` column behind a status field needs a `default` in the schema, or a create
+statement that does not bind it: the statement cannot tell a value the server dropped from one
+the client never sent.
 
 `queries.updateStatus` is optional; when status lives in the same row, the update statement serves
 both.
@@ -340,6 +347,14 @@ so a query reads `WHERE region = :region AND order_no = :order_no`. A value
 carrying the separator is refused rather than escaped, because two different
 rows would otherwise produce one name; `generateName` is refused for the same
 reason, since a random suffix does not split into the identity columns.
+
+A name is held on write to the rule every read applies — a DNS-1123 subdomain
+that can stand in a request path — and so are label values, annotation keys,
+finalizers and owner references, exactly as the kube-apiserver holds any
+object's metadata. A write that fails the rule is refused with `422` before it
+reaches the database, because the alternative is a row the API inserted and
+then cannot get, list or delete: the mapper refuses it on every read. A create
+carrying a `resourceVersion` is refused with `400`, as it is anywhere else.
 
 ## Lifecycle
 
@@ -673,6 +688,16 @@ This is not cosmetic. Controllers use the UID for owner references and to tell
 every replica and every restart agree on the same value. Without a mapped
 creation timestamp, a row deleted and recreated under the same name keeps its
 UID, which is the one case worth mapping a real identity column for.
+
+Either way the uid is the server's to assign. A create that arrives carrying
+one has it replaced — minted fresh where a column holds it, derived from the row
+otherwise — because a creator that could reuse a deleted owner's uid would have
+a new object inherit that owner's dependents, and the garbage collector would
+not be able to tell. An update may repeat the stored uid and may not change it.
+`creationTimestamp`, `generation` and `deletionTimestamp` are the row's in the
+same way: a write never binds them, and a client's copy of any of them is
+replaced before the object is validated, so it cannot reach a query parameter
+that reads the field or mislead a dry run.
 
 ## Load shedding
 

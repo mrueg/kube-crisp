@@ -256,6 +256,21 @@ func (m *Mapper) NameColumns() []string {
 // OwnerReferenceColumn reports where ownerReferences are stored, if anywhere.
 func (m *Mapper) OwnerReferenceColumn() string { return m.mapping.OwnerReferences }
 
+// UIDColumn reports where metadata.uid is stored, if anywhere. Without one the
+// uid is derived from the row on every read and nothing is written for it.
+func (m *Mapper) UIDColumn() string { return m.mapping.UID }
+
+// CreationTimestampColumn reports where metadata.creationTimestamp is read
+// from, if anywhere. A write never binds it: the database stamps the row.
+func (m *Mapper) CreationTimestampColumn() string { return m.mapping.CreationTimestamp }
+
+// GenerationColumn reports where metadata.generation is read from, if
+// anywhere. The database advances it; a write never binds it.
+func (m *Mapper) GenerationColumn() string { return m.mapping.Generation }
+
+// ManagedFieldsColumn reports where managedFields are stored, if anywhere.
+func (m *Mapper) ManagedFieldsColumn() string { return m.mapping.ManagedFields }
+
 // SplitName turns an object name back into the column values it was built
 // from, so a query can ask for the row it names.
 //

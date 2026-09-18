@@ -14,9 +14,9 @@ import (
 	crispsql "github.com/mrueg/kube-crisp/pkg/sql"
 )
 
-// newUIDStorage is the orders fixture with a uid column that the update
-// statement writes, which is the shape mapping.uid is recommended for.
-func newUIDStorage(t *testing.T) *WritableREST {
+// uidDB seeds the orders table with a uid column, which is the shape
+// mapping.uid is recommended for.
+func uidDB(t *testing.T) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "uid.db")
@@ -35,14 +35,12 @@ func newUIDStorage(t *testing.T) *WritableREST {
 		}
 	}
 	_ = db.Close()
+	return path
+}
 
-	pool, err := crispsql.Open(crispsql.PoolOptions{Driver: "sqlite", DSN: path, PreparedStatements: true})
-	if err != nil {
-		t.Fatalf("opening pool: %v", err)
-	}
-	t.Cleanup(func() { _ = pool.Close() })
-
-	spec := crispv1alpha1.CustomResourceProjectionSpec{
+// uidSpec projects uidDB, with an update statement that writes the uid column.
+func uidSpec() crispv1alpha1.CustomResourceProjectionSpec {
+	return crispv1alpha1.CustomResourceProjectionSpec{
 		DataSource: crispv1alpha1.DataSource{Driver: "sqlite"},
 		Resource: crispv1alpha1.ProjectedResource{
 			Group: "store.example.com", Version: "v1alpha1",
@@ -66,6 +64,17 @@ func newUIDStorage(t *testing.T) *WritableREST {
 			Fields: []crispv1alpha1.FieldMapping{{Column: "customer", Path: "spec.customer"}},
 		},
 	}
+}
+
+// newUIDStorage serves spec over a fresh uidDB.
+func newUIDStorage(t *testing.T, spec crispv1alpha1.CustomResourceProjectionSpec) *WritableREST {
+	t.Helper()
+
+	pool, err := crispsql.Open(crispsql.PoolOptions{Driver: "sqlite", DSN: uidDB(t), PreparedStatements: true})
+	if err != nil {
+		t.Fatalf("opening pool: %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
 
 	storages, err := New("orders", spec, pool, nil, nil)
 	if err != nil {
@@ -77,7 +86,7 @@ func newUIDStorage(t *testing.T) *WritableREST {
 // metadata.uid is what ownerReferences and the garbage collector resolve
 // against, so a client must not be able to rewrite it through an update.
 func TestUpdateCannotRewriteTheUID(t *testing.T) {
-	store := newUIDStorage(t)
+	store := newUIDStorage(t, uidSpec())
 	ctx := namespacedContext("acme")
 
 	before, err := store.Get(ctx, "order-1001", &metav1.GetOptions{})
@@ -107,7 +116,7 @@ func TestUpdateCannotRewriteTheUID(t *testing.T) {
 
 // A patch sends no uid, and that is not an assertion that it should change.
 func TestUpdateWithoutAUIDKeepsTheOneThatIsThere(t *testing.T) {
-	store := newUIDStorage(t)
+	store := newUIDStorage(t, uidSpec())
 	ctx := namespacedContext("acme")
 
 	before, err := store.Get(ctx, "order-1001", &metav1.GetOptions{})

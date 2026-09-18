@@ -32,6 +32,8 @@ import (
 	"k8s.io/apiextensions-apiserver/pkg/registry/customresource/tableconvertor"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/validate/content"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,6 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	celconfig "k8s.io/apiserver/pkg/apis/cel"
 	"k8s.io/apiserver/pkg/audit"
@@ -1832,10 +1835,24 @@ func (w *WritableREST) Create(ctx context.Context, obj runtime.Object, createVal
 		return nil, errors.NewBadRequest(
 			"metadata.generateName is not supported for a projection whose identity is composed of several columns; supply metadata.name")
 	}
+	// A version names a stored object, and there is none yet. The
+	// kube-apiserver refuses this the same way rather than guessing whether
+	// the client meant a precondition or a stale copy.
+	if incoming.GetResourceVersion() != "" {
+		return nil, errors.NewBadRequest("resourceVersion should not be set on objects to be created")
+	}
 	if err := w.pruneUnknownFields(ctx, incoming, fieldValidationOf(options)); err != nil {
 		return nil, err
 	}
+	// What the server owns is settled before the defaults are applied, so that
+	// a status field with a default starts at the default once the client's
+	// status has been dropped, rather than at nothing.
+	w.prepareForCreate(incoming)
 	w.applyDefaults(incoming)
+	dropEmptyStatus(incoming)
+	if err := w.validateMetadata(incoming); err != nil {
+		return nil, err
+	}
 	if err := w.validateAgainstSchema(ctx, incoming, nil); err != nil {
 		return nil, err
 	}
@@ -1866,10 +1883,6 @@ const generateNameAttempts = 8
 // insert performs the create, generating a name and retrying on collision when
 // the client asked for generateName rather than a fixed name.
 func (w *WritableREST) insert(ctx context.Context, incoming *unstructured.Unstructured) (runtime.Object, int64, error) {
-	if err := w.checkOwnerReferences(incoming); err != nil {
-		return nil, 0, err
-	}
-
 	if incoming.GetName() != "" {
 		return w.write(ctx, w.create, incoming, "create")
 	}
@@ -2048,6 +2061,7 @@ func (w *WritableREST) applyUpdate(
 			field.Invalid(field.NewPath("metadata", "uid"), uid, "field is immutable"),
 		})
 	}
+	w.prepareForUpdate(incoming, current)
 
 	if merge != nil {
 		merge(incoming, current)
@@ -2075,6 +2089,9 @@ func (w *WritableREST) applyUpdate(
 		return nil, false, err
 	}
 	w.applyDefaults(incoming)
+	if err := w.validateMetadata(incoming); err != nil {
+		return nil, false, err
+	}
 	if err := w.validateAgainstSchema(ctx, incoming, current); err != nil {
 		return nil, false, err
 	}
@@ -2089,9 +2106,6 @@ func (w *WritableREST) applyUpdate(
 	}
 
 	if err := w.checkFinalizers(current, incoming); err != nil {
-		return nil, false, err
-	}
-	if err := w.checkOwnerReferences(incoming); err != nil {
 		return nil, false, err
 	}
 
@@ -2118,13 +2132,141 @@ func (w *WritableREST) applyUpdate(
 	return result, false, nil
 }
 
-// checkOwnerReferences applies the rules the kube-apiserver applies to any
+// prepareForCreate settles what the server owns on a new object, as the
+// kube-apiserver does for any resource before it is validated or stored.
+//
+// A creator cannot choose its uid. ownerReferences and the garbage collector
+// resolve against it, so a client that could reuse a deleted owner's uid would
+// have a new object stand in for the old one and inherit its dependents. When
+// a column holds the uid a fresh one is minted here; without one nothing is
+// bound, and the read back derives the uid from the row as it always has.
+//
+// The timestamps and the generation belong to the row. A write never binds
+// them, so whatever the client sent could only have reached the database
+// through a parameter reading the field, and could only have misled a dry run
+// otherwise. creationTimestamp is stamped now where a column reads it back,
+// as it is on any other object; generation starts at one where a column
+// carries it, as a custom resource's does; a new object is not being deleted.
+func (w *WritableREST) prepareForCreate(obj *unstructured.Unstructured) {
+	// With the status subresource enabled a create cannot set status, exactly
+	// as it cannot for a custom resource. Status is the controller's to write
+	// through /status, and a creator with no access there must not get to
+	// fill it in on the way in. Dropped before the schema's defaults are
+	// applied, so a status field with a default starts at the default and one
+	// without binds NULL: a NOT NULL column behind a status field wants the
+	// default, since the statement cannot tell a dropped value from an absent
+	// one.
+	//
+	// Emptied rather than removed: a default is applied only to a property
+	// whose parent exists, so a status field's default needs the status object
+	// there to land in. Create drops the object again if the defaults left it
+	// empty.
+	if w.statusSubresource {
+		obj.Object["status"] = map[string]any{}
+	}
+
+	if w.mapper.UIDColumn() != "" {
+		obj.SetUID(uuid.NewUUID())
+	} else {
+		obj.SetUID("")
+	}
+	if w.mapper.CreationTimestampColumn() != "" {
+		obj.SetCreationTimestamp(metav1.Now())
+	} else {
+		obj.SetCreationTimestamp(metav1.Time{})
+	}
+	if w.mapper.GenerationColumn() != "" {
+		obj.SetGeneration(1)
+	} else {
+		obj.SetGeneration(0)
+	}
+	obj.SetDeletionTimestamp(nil)
+	obj.SetDeletionGracePeriodSeconds(nil)
+}
+
+// dropEmptyStatus removes a status object that nothing filled in, so that a
+// create under the status subresource answers, and binds, exactly as it did
+// when the client's status was simply dropped: no status at all.
+func dropEmptyStatus(obj *unstructured.Unstructured) {
+	if status, ok := obj.Object["status"].(map[string]any); ok && len(status) == 0 {
+		delete(obj.Object, "status")
+	}
+}
+
+// prepareForUpdate carries what the server owns over from the stored object,
+// as the kube-apiserver does before any update is validated. The database
+// moves the generation and the timestamps; a client's copy of them is neither
+// an assertion nor a request, and must not leak into a parameter or a dry run.
+func (w *WritableREST) prepareForUpdate(incoming, current *unstructured.Unstructured) {
+	incoming.SetGeneration(current.GetGeneration())
+	incoming.SetCreationTimestamp(current.GetCreationTimestamp())
+	if deleting := current.GetDeletionTimestamp(); !deleting.IsZero() {
+		incoming.SetDeletionTimestamp(deleting)
+	}
+	if grace := current.GetDeletionGracePeriodSeconds(); grace != nil && incoming.GetDeletionGracePeriodSeconds() == nil {
+		incoming.SetDeletionGracePeriodSeconds(grace)
+	}
+}
+
+// projectedName is the rule a projected object's name is held to on write.
+//
+// It is the rule the mapper applies when it reads a row back, and it has to
+// be: a name accepted here that the mapper then refuses is a row the API can
+// neither get nor delete. It is also what a request path can carry, which the
+// kube-apiserver checks separately and which is spelled out here for the same
+// reason.
+func projectedName(name string, prefix bool) []string {
+	errs := apivalidation.NameIsDNSSubdomain(name, prefix)
+	if prefix {
+		return append(errs, content.IsPathSegmentPrefix(name)...)
+	}
+	return append(errs, content.IsPathSegmentName(name)...)
+}
+
+// validateMetadata holds a write's metadata to the rules the kube-apiserver
+// applies to any object, before anything reaches the database.
+//
+// The alternative is finding out on the way back. The mapper refuses a row
+// whose name or label value is not one the API allows, so a write that got
+// past here with one inserted a row that every later read failed on; a
+// mistake in a client became a row an operator had to find and repair by hand.
+//
+// A generated name is minted only when the row is written, and once per
+// attempt, so a candidate stands in for it here: what the validator says about
+// one name the generator produces holds for every other.
+func (w *WritableREST) validateMetadata(obj *unstructured.Unstructured) error {
+	subject := obj.DeepCopy()
+	if subject.GetName() == "" {
+		subject.SetName(names.SimpleNameGenerator.GenerateName(subject.GetGenerateName()))
+	}
+	// Owner references are held to the projection's own rule below, which
+	// covers what the kube-apiserver checks and the duplicates it does not.
+	subject.SetOwnerReferences(nil)
+	// What has no column has nowhere to live and is dropped on write rather
+	// than judged, which is what the documentation promises of a projection
+	// that maps neither.
+	if w.finalizers == "" {
+		subject.SetFinalizers(nil)
+	}
+	if w.mapper.ManagedFieldsColumn() == "" {
+		subject.SetManagedFields(nil)
+	}
+
+	errs := apivalidation.ValidateObjectMetaAccessor(subject, w.NamespaceScoped(), projectedName, field.NewPath("metadata"))
+	errs = append(errs, w.validateOwnerReferences(obj)...)
+	if len(errs) > 0 {
+		return errors.NewInvalid(w.gvk.GroupKind(), obj.GetName(), errs)
+	}
+	return nil
+}
+
+// validateOwnerReferences applies the rules the kube-apiserver applies to any
 // object, because the garbage collector acts on what is stored here.
 //
 // A reference it cannot resolve, or two controllers disagreeing about who owns
 // an object, is how things get deleted by surprise. Refusing the write is the
 // only point at which that is cheap to prevent.
-func (w *WritableREST) checkOwnerReferences(obj *unstructured.Unstructured) error {
+func (w *WritableREST) validateOwnerReferences(obj *unstructured.Unstructured) field.ErrorList {
 	if w.mapper.OwnerReferenceColumn() == "" {
 		return nil
 	}
@@ -2173,11 +2315,7 @@ func (w *WritableREST) checkOwnerReferences(obj *unstructured.Unstructured) erro
 			controller = owner.Name
 		}
 	}
-
-	if len(errs) > 0 {
-		return errors.NewInvalid(w.gvk.GroupKind(), obj.GetName(), errs)
-	}
-	return nil
+	return errs
 }
 
 // checkFinalizers rejects the one update Kubernetes does not allow: adding a

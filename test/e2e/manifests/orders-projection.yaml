@@ -30,7 +30,10 @@ spec:
         status:
           type: object
           properties:
-            phase: {type: string}
+            # A create drops whatever status it is handed, since status is the
+            # controller's to write through /status; the column is NOT NULL,
+            # so the default is what a new row starts with.
+            phase: {type: string, default: pending}
     subresources:
       status: {}
     # A second version of the same kind. There is no conversion: a request for
@@ -52,7 +55,7 @@ spec:
             status:
               type: object
               properties:
-                phase: {type: string}
+                phase: {type: string, default: pending}
         mapping:
           name: id
           namespace: tenant

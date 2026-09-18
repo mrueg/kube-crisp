@@ -1189,7 +1189,12 @@ func TestMySQLProjection(t *testing.T) {
 		t.Errorf("created spec.colour = %q, want %q", colour, "green")
 	}
 
-	if _, err := widgets.Create(ctx, created, metav1.CreateOptions{}); !apierrors.IsAlreadyExists(err) {
+	// The object the create answered with carries a resourceVersion, and a
+	// create refuses one before it looks for the row, as the kube-apiserver
+	// does; a client re-creating an object it was handed clears it first.
+	duplicate := created.DeepCopy()
+	duplicate.SetResourceVersion("")
+	if _, err := widgets.Create(ctx, duplicate, metav1.CreateOptions{}); !apierrors.IsAlreadyExists(err) {
 		t.Errorf("duplicate create error = %v, want AlreadyExists", err)
 	}
 

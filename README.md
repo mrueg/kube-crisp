@@ -396,7 +396,9 @@ projection with no `create` query refuses `create` whatever a role says. `kubect
 no arguments reads the projections in the cluster instead. `kubectl crisp can-i` then shows who may
 do what, including the case neither gate can see alone: a verb RBAC grants and the projection cannot
 serve, which is authorized and returns 405. `kubectl crisp prune` finds the roles a deleted
-projection left behind — `--apiservices` finds the registrations one left behind instead — and
+projection left behind, counting a group as served when a projection declares it or a kube-crisp
+`APIService` still answers for it, which is how one loaded from `--projection-dir` shows up —
+`--apiservices` finds the registrations one left behind instead — and
 `kubectl crisp schema` says what a projection needs from its database,
 for handing to whatever manages the tables. `kubectl crisp status` answers the other question — why a
 projection is not answering — by joining its conditions to the `APIService` behind its group, which is

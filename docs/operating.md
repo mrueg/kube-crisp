@@ -106,13 +106,22 @@ until somebody projects that group name again and the old grant lands on the new
 
 ```console
 $ kubectl crisp prune
-kube-crisp:gone.example.com:view                      (gone.example.com: no projection serves this group)
+kube-crisp:gone.example.com:view                      (gone.example.com: nothing serves this group)
   clusterrolebinding.rbac.authorization.k8s.io/pagila-view          (bound to it)
   rolebinding.rbac.authorization.k8s.io/pagila-view -n store-1      (bound to it)
-kube-crisp:gone.example.com:edit                      (gone.example.com: no projection serves this group)
+kube-crisp:gone.example.com:edit                      (gone.example.com: nothing serves this group)
 
 2 orphaned role(s) and 2 binding(s). Pass --delete to remove them.
 ```
+
+A group counts as served when a `CustomResourceProjection` in the cluster declares it, or when an
+`APIService` carrying the `app.kubernetes.io/managed-by: kube-crisp` label routes it and the
+aggregation layer has not reported it unavailable. The second is what a projection loaded from
+`--projection-dir` looks like from the cluster: there is no object to find, but the server
+registered the group and is answering for it, and the roles generated for it with `kubectl crisp
+rbac -f` are as live as any. A registration the aggregator has not judged yet counts too, for the
+reason `--apiservices` leaves one alone — it has not failed, and a group about to come up is not one
+to strip the grants from.
 
 The bindings go with the role. Both kinds, because both are how a projected group is granted: a
 `ClusterRoleBinding` for a cluster-scoped kind, and a `RoleBinding` in each tenant's namespace
@@ -130,9 +139,10 @@ up.
 
 It selects on the `crisp.kubecrisp.io/projected-group` label the roles were generated with, so a
 role written by hand is never a candidate however exactly it matches, and one generated under
-`--name-prefix` is found anyway. If the projections cannot be listed it reports nothing rather than
-everything: an error there would leave every group looking unserved and every generated role looking
-orphaned.
+`--name-prefix` is found anyway. If the projections or the APIServices cannot be listed it reports
+nothing rather than everything: an error on either would leave groups looking unserved and generated
+roles looking orphaned, and a forbidden APIService list in particular would leave every file-backed
+group looking that way. Running it needs permission to list both.
 
 The plugin is a separate binary from the server, `kubectl-crisp`, published with each release. Put
 it on `PATH` and kubectl finds it as `kubectl crisp`. It reads projections and nothing else — no

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -46,7 +47,7 @@ func TestOrphanedRolesFindsRolesWithNoProjection(t *testing.T) {
 		generatedRole("kube-crisp:gone.example.com:edit", "gone.example.com"),
 	)
 
-	orphans, err := orphanedRoles(context.Background(), crisp, kube)
+	orphans, err := orphanedRoles(context.Background(), crisp, kube, fakeDynamic())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestOrphanedRolesIgnoresRolesItDidNotGenerate(t *testing.T) {
 	crisp := crispfake.NewSimpleClientset()
 	kube := kubefake.NewSimpleClientset(handWritten, emptyLabel)
 
-	orphans, err := orphanedRoles(context.Background(), crisp, kube)
+	orphans, err := orphanedRoles(context.Background(), crisp, kube, fakeDynamic())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,12 +100,139 @@ func TestOrphanedRolesRefusesAPartialProjectionList(t *testing.T) {
 		generatedRole("kube-crisp:pagila.example.com:view", "pagila.example.com"),
 	)
 
-	orphans, err := orphanedRoles(context.Background(), crisp, kube)
+	orphans, err := orphanedRoles(context.Background(), crisp, kube, fakeDynamic())
 	if err == nil {
 		t.Fatalf("a failed projection list returned %d orphan(s) instead of an error", len(orphans))
 	}
 	if orphans != nil {
 		t.Fatalf("orphans returned alongside an error: %+v", orphans)
+	}
+}
+
+// TestOrphanedRolesKeepsARoleForAFileBackedGroup is the case that turns a
+// tidy-up into an outage. A projection loaded from --projection-dir has no
+// object in the cluster, so by the projections alone every role generated for
+// it is orphaned and --delete takes every tenant's binding with it. The
+// APIService the server wrote is the one trace such a projection leaves, and
+// an available one settles that the group is served.
+func TestOrphanedRolesKeepsARoleForAFileBackedGroup(t *testing.T) {
+	const fileBacked = "kube-crisp:files.example.com:view"
+
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset(
+		generatedRole(fileBacked, "files.example.com"),
+		generatedRole("kube-crisp:gone.example.com:view", "gone.example.com"),
+		roleBinding("films-view", "store-1", fileBacked),
+	)
+	dyn := fakeDynamic(
+		apiService("files.example.com", "v1alpha1", true, boolPtr(true)),
+		// Registered and unavailable: the server that wrote it has stopped
+		// answering, which is the stranded case rather than a served group.
+		apiService("gone.example.com", "v1alpha1", true, boolPtr(false)),
+	)
+
+	orphans, err := orphanedRoles(context.Background(), crisp, kube, dyn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 1 || orphans[0].Name != "kube-crisp:gone.example.com:view" {
+		t.Fatalf("orphans = %+v, want only the role for the group nothing serves", orphans)
+	}
+
+	// And through the command with --delete, since the survey being right is
+	// worth little if prune reads something else.
+	var out, errOut bytes.Buffer
+	o := &pruneOptions{delete: true}
+	if err := o.prune(context.Background(), crisp, kube, dyn, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range kube.Actions() {
+		if action.GetVerb() != "delete" {
+			continue
+		}
+		if name := action.(k8stesting.DeleteAction).GetName(); name == fileBacked || name == "films-view" {
+			t.Fatalf("deleted %s, which is bound to a group a running server answers for", name)
+		}
+	}
+	if _, err := kube.RbacV1().ClusterRoles().Get(context.Background(), fileBacked, metav1.GetOptions{}); err != nil {
+		t.Fatalf("the role for the file-backed group is gone: %v", err)
+	}
+}
+
+// TestOrphanedRolesKeepsARoleForAnUnjudgedGroup: a registration the aggregation
+// layer has not reported on has not failed, and the --apiservices half leaves
+// it alone for that reason. A role for its group is left for the same one.
+func TestOrphanedRolesKeepsARoleForAnUnjudgedGroup(t *testing.T) {
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset(
+		generatedRole("kube-crisp:new.example.com:view", "new.example.com"),
+	)
+	dyn := fakeDynamic(apiService("new.example.com", "v1alpha1", true, nil))
+
+	orphans, err := orphanedRoles(context.Background(), crisp, kube, dyn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("orphans = %+v, want none: the group's registration is not judged yet", orphans)
+	}
+}
+
+// TestOrphanedRolesIgnoresARegistrationItDidNotWrite. An available APIService
+// somebody else wrote for the group says another aggregated server answers
+// it, and a role kube-crisp generated for that group grants verbs on rows
+// kube-crisp does not serve. It is as orphaned as one with no registration.
+func TestOrphanedRolesIgnoresARegistrationItDidNotWrite(t *testing.T) {
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset(
+		generatedRole("kube-crisp:someone.example.com:view", "someone.example.com"),
+	)
+	dyn := fakeDynamic(apiService("someone.example.com", "v1", false, boolPtr(true)))
+
+	orphans, err := orphanedRoles(context.Background(), crisp, kube, dyn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 1 {
+		t.Fatalf("orphans = %+v, want the role: the registration is not kube-crisp's", orphans)
+	}
+}
+
+// TestOrphanedRolesRefusesAPartialAPIServiceList is the same safety property
+// for the other list. Whoever runs prune commonly may not read APIServices,
+// and a forbidden list would leave every file-backed group looking unserved —
+// the very roles this exists to keep — so the command has to refuse and say
+// which list it could not complete.
+func TestOrphanedRolesRefusesAPartialAPIServiceList(t *testing.T) {
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset(
+		generatedRole("kube-crisp:files.example.com:view", "files.example.com"),
+		clusterBinding("films-view", "kube-crisp:files.example.com:view"),
+	)
+	dyn := fakeDynamic()
+	dyn.PrependReactor("list", "apiservices",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(apiServiceGVR.GroupResource(), "",
+				errors.New("User \"dev\" cannot list resource \"apiservices\""))
+		})
+
+	orphans, err := orphanedRoles(context.Background(), crisp, kube, dyn)
+	if err == nil {
+		t.Fatalf("a forbidden APIService list returned %d orphan(s) instead of an error", len(orphans))
+	}
+	if !apierrors.IsForbidden(err) || !strings.Contains(err.Error(), "listing APIServices") {
+		t.Fatalf("error = %q, want the forbidden list named as the reason", err)
+	}
+
+	var out, errOut bytes.Buffer
+	o := &pruneOptions{delete: true}
+	if err := o.prune(context.Background(), crisp, kube, dyn, &out, &errOut); err == nil {
+		t.Fatal("prune --delete ran on a list that did not complete")
+	}
+	for _, action := range kube.Actions() {
+		if action.GetVerb() == "delete" {
+			t.Fatalf("deleted %s after refusing", action.GetResource().Resource)
+		}
 	}
 }
 
@@ -121,7 +249,7 @@ func TestOrphanedRolesSelectsOnTheLabel(t *testing.T) {
 		return false, nil, nil
 	})
 
-	if _, err := orphanedRoles(context.Background(), crisp, kube); err != nil {
+	if _, err := orphanedRoles(context.Background(), crisp, kube, fakeDynamic()); err != nil {
 		t.Fatal(err)
 	}
 	if selector != rbac.GroupLabel {
@@ -221,7 +349,7 @@ func TestPruneDeletesBindingsBeforeRoles(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	o := &pruneOptions{delete: true}
-	if err := o.prune(context.Background(), crisp, kube, &out, &errOut); err != nil {
+	if err := o.prune(context.Background(), crisp, kube, fakeDynamic(), &out, &errOut); err != nil {
 		t.Fatal(err)
 	}
 
@@ -246,7 +374,7 @@ func TestPruneReportsBindingsWithoutDeleting(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	o := &pruneOptions{}
-	if err := o.prune(context.Background(), crisp, kube, &out, &errOut); err != nil {
+	if err := o.prune(context.Background(), crisp, kube, fakeDynamic(), &out, &errOut); err != nil {
 		t.Fatal(err)
 	}
 

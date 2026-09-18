@@ -252,22 +252,100 @@ func (r *Router) ServedPaths() []string {
 // before. Resources that fail to install cause the whole rebuild to fail, so a
 // bad projection never partially replaces a working API surface.
 func (r *Router) Rebuild(resources []Resource) error {
-	container := restful.NewContainer()
-	container.ServeMux = http.NewServeMux()
-	container.Router(restful.CurlyRouter{})
+	byGroup, byGroupVersion, err := groupStorages(resources)
+	if err != nil {
+		return err
+	}
 
 	// A scheme of this generation's own, taught about every kind it serves
 	// before any of it is reachable. Nothing writes to it after the snapshot is
 	// published, which is what keeps the serializer's reads race-free while a
 	// later rebuild teaches a different scheme about a different set of kinds.
-	newScheme := r.opts.NewScheme
-	if newScheme == nil {
-		newScheme = crispscheme.New
-	}
-	apiScheme, codecs := newScheme()
+	apiScheme, codecs := r.newScheme()
 	registerKinds(apiScheme, resources)
 
-	// group -> version -> plural -> storage
+	// The schemas are built before the surface is installed, because field
+	// management needs them: they are what tells server-side apply how lists
+	// and maps merge.
+	documents, converters := r.openAPIFor(byGroupVersion)
+
+	container, aggregatedGroups, err := r.install(byGroup, converters, apiScheme, codecs)
+	if err != nil {
+		return err
+	}
+
+	paths := make([]string, 0, len(resources))
+	for _, res := range resources {
+		paths = append(paths, res.Path())
+	}
+	sort.Strings(paths)
+
+	if r.opts.DiscoveryManager != nil {
+		sort.Slice(aggregatedGroups, func(i, j int) bool {
+			return aggregatedGroups[i].Name < aggregatedGroups[j].Name
+		})
+		r.opts.DiscoveryManager.SetGroups(aggregatedGroups)
+	}
+
+	r.current.Store(&snapshot{
+		handler:   container,
+		paths:     paths,
+		documents: documents,
+		scheme:    apiScheme,
+		codecs:    codecs,
+	})
+
+	// Schemas are published after the surface is built, so a failed rebuild
+	// never leaves clients explaining a kind that is not served.
+	r.publishOpenAPI(documents)
+	klog.V(2).InfoS("rebuilt projected API surface", "resources", len(resources), "groups", len(byGroup))
+	return nil
+}
+
+// Check reports whether the resources could be installed, without installing
+// them.
+//
+// Rebuild takes the surface whole and refuses it whole, which is right for the
+// surface — a bad projection must never partially replace a working one — and
+// wrong for the projection: it cannot say which one it refused, so the
+// controller had nothing to fail but the sync, and one projection's mistake
+// left every projection unserved. The controller asks this of each projection
+// it compiles, before the set is rebuilt, so that a resource the endpoint
+// installer will not have fails that projection alone, the way a projection
+// that will not compile does.
+//
+// It installs into a container nothing will serve and throws it away. The
+// OpenAPI documents are left out: they are most of what a rebuild costs, and
+// nothing in them can refuse an installation — a schema that cannot be
+// rendered is logged and the deduced type converter used in its place.
+func (r *Router) Check(resources []Resource) error {
+	byGroup, _, err := groupStorages(resources)
+	if err != nil {
+		return err
+	}
+	apiScheme, codecs := r.newScheme()
+	registerKinds(apiScheme, resources)
+	_, _, err = r.install(byGroup, nil, apiScheme, codecs)
+	return err
+}
+
+// newScheme starts the scheme one generation of the surface is taught.
+func (r *Router) newScheme() (*runtime.Scheme, serializer.CodecFactory) {
+	if r.opts.NewScheme != nil {
+		return r.opts.NewScheme()
+	}
+	return crispscheme.New()
+}
+
+// groupStorages arranges resources as group -> version -> plural -> storage,
+// with their subresources beside them, and by group version for the OpenAPI
+// builder. A plural two resources claim in one group version is refused here:
+// the second would silently replace the first.
+func groupStorages(resources []Resource) (
+	map[string]map[string]map[string]rest.Storage,
+	map[schema.GroupVersion][]Resource,
+	error,
+) {
 	byGroup := map[string]map[string]map[string]rest.Storage{}
 	byGroupVersion := map[schema.GroupVersion][]Resource{}
 
@@ -280,7 +358,7 @@ func (r *Router) Rebuild(resources []Resource) error {
 			byGroup[res.Group][res.Version] = map[string]rest.Storage{}
 		}
 		if _, exists := byGroup[res.Group][res.Version][res.Plural]; exists {
-			return fmt.Errorf("resource %s.%s/%s is claimed by more than one projection",
+			return nil, nil, fmt.Errorf("resource %s.%s/%s is claimed by more than one projection",
 				res.Plural, res.Group, res.Version)
 		}
 		byGroup[res.Group][res.Version][res.Plural] = res.Storage
@@ -291,16 +369,24 @@ func (r *Router) Rebuild(resources []Resource) error {
 			byGroup[res.Group][res.Version][res.Plural+"/scale"] = res.ScaleStorage
 		}
 	}
+	return byGroup, byGroupVersion, nil
+}
 
-	// The schemas are built before the surface is installed, because field
-	// management needs them: they are what tells server-side apply how lists
-	// and maps merge.
-	documents, converters := r.openAPIFor(byGroupVersion)
+// install builds the handler that serves the grouped storages, and the
+// discovery document describing it. This is the part of a rebuild that can
+// refuse a resource, which is why Check runs it and nothing else. A nil
+// converters map installs every group version with the deduced type converter.
+func (r *Router) install(
+	byGroup map[string]map[string]map[string]rest.Storage,
+	converters map[schema.GroupVersion]managedfields.TypeConverter,
+	apiScheme *runtime.Scheme,
+	codecs serializer.CodecFactory,
+) (*restful.Container, []apidiscoveryv2.APIGroupDiscovery, error) {
+	container := restful.NewContainer()
+	container.ServeMux = http.NewServeMux()
+	container.Router(restful.CurlyRouter{})
 
-	var (
-		paths            []string
-		aggregatedGroups []apidiscoveryv2.APIGroupDiscovery
-	)
+	var aggregatedGroups []apidiscoveryv2.APIGroupDiscovery
 
 	for group, versions := range byGroup {
 		var (
@@ -314,7 +400,7 @@ func (r *Router) Rebuild(resources []Resource) error {
 
 			aggregatedResources, _, err := apiGroupVersion.InstallREST(container)
 			if err != nil {
-				return fmt.Errorf("installing %s: %w", gv.String(), err)
+				return nil, nil, fmt.Errorf("installing %s: %w", gv.String(), err)
 			}
 
 			discoveryVersions = append(discoveryVersions, metav1.GroupVersionForDiscovery{
@@ -361,31 +447,7 @@ func (r *Router) Rebuild(resources []Resource) error {
 	accepted := narrowPatchTypes(container)
 	container.ServiceErrorHandler(serviceErrorHandler(codecs, accepted))
 
-	for _, res := range resources {
-		paths = append(paths, res.Path())
-	}
-	sort.Strings(paths)
-
-	if r.opts.DiscoveryManager != nil {
-		sort.Slice(aggregatedGroups, func(i, j int) bool {
-			return aggregatedGroups[i].Name < aggregatedGroups[j].Name
-		})
-		r.opts.DiscoveryManager.SetGroups(aggregatedGroups)
-	}
-
-	r.current.Store(&snapshot{
-		handler:   container,
-		paths:     paths,
-		documents: documents,
-		scheme:    apiScheme,
-		codecs:    codecs,
-	})
-
-	// Schemas are published after the surface is built, so a failed rebuild
-	// never leaves clients explaining a kind that is not served.
-	r.publishOpenAPI(documents)
-	klog.V(2).InfoS("rebuilt projected API surface", "resources", len(resources), "groups", len(byGroup))
-	return nil
+	return container, aggregatedGroups, nil
 }
 
 // openAPICacheEntry is a built document and the field-management view derived

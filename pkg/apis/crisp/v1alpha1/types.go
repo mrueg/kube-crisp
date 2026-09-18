@@ -508,18 +508,29 @@ type ProjectedResource struct {
 
 	// ListKind defaults to Kind + "List".
 	// +optional
+	// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
+	// +kubebuilder:validation:MaxLength=63
 	ListKind string `json:"listKind,omitempty"`
 
 	// Plural is the lowercase plural resource name, e.g. "orders".
+	//
+	// A path segment, so it is held to the shape of one: a slash would name a
+	// subresource rather than a resource, and the endpoint installer refuses
+	// a subresource whose parent it has not been given.
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9]*$`
+	// +kubebuilder:validation:MaxLength=63
 	Plural string `json:"plural"`
 
 	// Singular defaults to the lowercase Kind.
 	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9]*$`
+	// +kubebuilder:validation:MaxLength=63
 	Singular string `json:"singular,omitempty"`
 
 	// ShortNames are optional kubectl aliases.
 	// +optional
+	// +kubebuilder:validation:items:Pattern=`^[a-z][a-z0-9]*$`
+	// +kubebuilder:validation:items:MaxLength=63
 	ShortNames []string `json:"shortNames,omitempty"`
 
 	// Categories are optional kubectl categories, e.g. "all".
@@ -601,6 +612,12 @@ const (
 // +kubebuilder:validation:XValidation:rule="has(self.schema) != has(self.schemaFrom)",message="exactly one of schema or schemaFrom is required"
 type ProjectedVersion struct {
 	// Name is the version, for example "v1beta1".
+	//
+	// The same shape as Version, for the same reason: each served version
+	// registers an APIService of its own, named "<version>.<group>", and one
+	// named after a version outside this shape is refused by the
+	// kube-apiserver on every reconcile, forever.
+	// +kubebuilder:validation:Pattern=`^v[0-9]+((alpha|beta)[0-9]+)?$`
 	Name string `json:"name"`
 
 	// Served turns the version off without removing its definition. Defaults

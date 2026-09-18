@@ -1560,6 +1560,15 @@ $ kubectl explain customresourceprojection.spec.mapping.creationTimestamp
 
 ### Naming the resource
 
+Every name is held to the shape Kubernetes holds a CustomResourceDefinition's to, by the CRD when a
+projection is applied and by `validate` and `--projection-dir` when it is read from a file: `group`
+is a DNS subdomain, `version` and each `versions[].name` look like `v1`, `v2beta1` or `v1alpha1`,
+`kind` and `listKind` start with an upper-case letter, and `plural`, `singular` and `shortNames`
+are lowercase letters and digits starting with a letter. A name outside its shape is refused where
+it is written rather than later: a version outside the shape produces an APIService the
+kube-apiserver rejects on every reconcile, and a plural with a slash in it is a subresource the
+endpoint installer has no parent for.
+
 | Field | |
 |---|---|
 | `resource.singular` | The singular name kubectl accepts. Defaults to the lower-cased kind |

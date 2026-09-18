@@ -1957,10 +1957,17 @@ spec:
                     type: string
                   listKind:
                     description: ListKind defaults to Kind + "List".
+                    maxLength: 63
+                    pattern: ^[A-Z][A-Za-z0-9]*$
                     type: string
                   plural:
-                    description: Plural is the lowercase plural resource name, e.g.
-                      "orders".
+                    description: |-
+                      Plural is the lowercase plural resource name, e.g. "orders".
+
+                      A path segment, so it is held to the shape of one: a slash would name a
+                      subresource rather than a resource, and the endpoint installer refuses
+                      a subresource whose parent it has not been given.
+                    maxLength: 63
                     pattern: ^[a-z][a-z0-9]*$
                     type: string
                   schema:
@@ -2026,10 +2033,14 @@ spec:
                   shortNames:
                     description: ShortNames are optional kubectl aliases.
                     items:
+                      maxLength: 63
+                      pattern: ^[a-z][a-z0-9]*$
                       type: string
                     type: array
                   singular:
                     description: Singular defaults to the lowercase Kind.
+                    maxLength: 63
+                    pattern: ^[a-z][a-z0-9]*$
                     type: string
                   subresources:
                     description: Subresources enables the subresources of the projected
@@ -2343,7 +2354,14 @@ spec:
                               rather than removed'
                             rule: '!has(self.finalizers) || has(self.deletionTimestamp)'
                         name:
-                          description: Name is the version, for example "v1beta1".
+                          description: |-
+                            Name is the version, for example "v1beta1".
+
+                            The same shape as Version, for the same reason: each served version
+                            registers an APIService of its own, named "<version>.<group>", and one
+                            named after a version outside this shape is refused by the
+                            kube-apiserver on every reconcile, forever.
+                          pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
                           type: string
                         schema:
                           description: |-

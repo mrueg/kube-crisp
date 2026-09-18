@@ -132,15 +132,20 @@ func TestCRDAcceptsAValidProjection(t *testing.T) {
 // enforced only after the object was already in etcd, where they surfaced as a
 // status condition rather than as a failed apply.
 //
-// Every case here is also rejected by Validate, which is the point: the CRD is
-// meant to say the same thing earlier, not something different.
+// Every case here is also rejected by the apiserver, which is the point: the
+// CRD is meant to say the same thing earlier, not something different. Most
+// are rejected by Validate, which a projection loaded from a file meets instead
+// of the CRD; the ones marked atCompile are rejected where the projection is
+// compiled into storage, which a file-backed projection reaches too, though the
+// offline validate command does not.
 func TestCRDRejectsWhatTheApiserverWouldReject(t *testing.T) {
 	checker := newCRDChecker(t)
 
 	for _, tc := range []struct {
-		name  string
-		want  string
-		apply func(p *crispv1alpha1.CustomResourceProjection)
+		name      string
+		want      string
+		atCompile bool
+		apply     func(p *crispv1alpha1.CustomResourceProjection)
 	}{
 		{
 			name: "namespaced without a namespace column",
@@ -157,15 +162,17 @@ func TestCRDRejectsWhatTheApiserverWouldReject(t *testing.T) {
 			},
 		},
 		{
-			name: "finalizers without a deletion timestamp",
-			want: "mapping.deletionTimestamp",
+			name:      "finalizers without a deletion timestamp",
+			want:      "mapping.deletionTimestamp",
+			atCompile: true,
 			apply: func(p *crispv1alpha1.CustomResourceProjection) {
 				p.Spec.Mapping.Finalizers = "finalizers"
 			},
 		},
 		{
-			name: "finalizers without markDeleted",
-			want: "queries.markDeleted",
+			name:      "finalizers without markDeleted",
+			want:      "queries.markDeleted",
+			atCompile: true,
 			apply: func(p *crispv1alpha1.CustomResourceProjection) {
 				p.Spec.Mapping.Finalizers = "finalizers"
 				p.Spec.Mapping.DeletionTimestamp = "deleted_at"
@@ -188,8 +195,9 @@ func TestCRDRejectsWhatTheApiserverWouldReject(t *testing.T) {
 			},
 		},
 		{
-			name: "a query with both sql and statements",
-			want: "either sql or statements",
+			name:      "a query with both sql and statements",
+			want:      "either sql or statements",
+			atCompile: true,
 			apply: func(p *crispv1alpha1.CustomResourceProjection) {
 				p.Spec.Queries.Create = &crispv1alpha1.Query{
 					SQL:        "INSERT INTO orders (id) VALUES (:id)",
@@ -198,8 +206,9 @@ func TestCRDRejectsWhatTheApiserverWouldReject(t *testing.T) {
 			},
 		},
 		{
-			name: "a query with neither sql nor statements",
-			want: "either sql or statements",
+			name:      "a query with neither sql nor statements",
+			want:      "either sql or statements",
+			atCompile: true,
 			apply: func(p *crispv1alpha1.CustomResourceProjection) {
 				p.Spec.Queries.Create = &crispv1alpha1.Query{}
 			},
@@ -244,6 +253,57 @@ func TestCRDRejectsWhatTheApiserverWouldReject(t *testing.T) {
 			},
 		},
 		{
+			name: "a plural naming a subresource",
+			want: "spec.resource.plural",
+			apply: func(p *crispv1alpha1.CustomResourceProjection) {
+				p.Spec.Resource.Plural = "orders/status"
+			},
+		},
+		{
+			name: "an extra version named outside the shape of one",
+			want: "spec.resource.versions[0].name",
+			apply: func(p *crispv1alpha1.CustomResourceProjection) {
+				p.Spec.Resource.Versions = []crispv1alpha1.ProjectedVersion{
+					{Name: "V2", Schema: &apiextensionsv1.JSONSchemaProps{Type: "object"}},
+				}
+			},
+		},
+		{
+			name: "an upper case group",
+			want: "spec.resource.group",
+			apply: func(p *crispv1alpha1.CustomResourceProjection) {
+				p.Spec.Resource.Group = "Store.example.com"
+			},
+		},
+		{
+			name: "a kind starting lowercase",
+			want: "spec.resource.kind",
+			apply: func(p *crispv1alpha1.CustomResourceProjection) {
+				p.Spec.Resource.Kind = "order"
+			},
+		},
+		{
+			name: "a list kind starting lowercase",
+			want: "spec.resource.listKind",
+			apply: func(p *crispv1alpha1.CustomResourceProjection) {
+				p.Spec.Resource.ListKind = "orderList"
+			},
+		},
+		{
+			name: "an upper case singular",
+			want: "spec.resource.singular",
+			apply: func(p *crispv1alpha1.CustomResourceProjection) {
+				p.Spec.Resource.Singular = "Order"
+			},
+		},
+		{
+			name: "a short name with a slash",
+			want: "spec.resource.shortNames[1]",
+			apply: func(p *crispv1alpha1.CustomResourceProjection) {
+				p.Spec.Resource.ShortNames = []string{"ord", "ord/status"}
+			},
+		},
+		{
 			name: "both a schema and a borrowed one",
 			want: "exactly one of schema or schemaFrom",
 			apply: func(p *crispv1alpha1.CustomResourceProjection) {
@@ -284,6 +344,15 @@ func TestCRDRejectsWhatTheApiserverWouldReject(t *testing.T) {
 			}
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("complaint %q does not mention %q", got, tc.want)
+			}
+
+			// And the other way round, since a projection loaded from a file
+			// meets Validate and never the CRD.
+			if tc.atCompile {
+				return
+			}
+			if err := Validate(p); err == nil {
+				t.Error("Validate() accepted a projection the CRD refuses")
 			}
 		})
 	}

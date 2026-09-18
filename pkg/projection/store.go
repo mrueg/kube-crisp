@@ -101,7 +101,10 @@ func walkManifests(dir string, fn func(path string) error) error {
 // Parsing only, unlike LoadDir: it is for the commands that reason about a
 // projection they are not going to serve — checking one, or generating the RBAC
 // that makes it reachable — where stopping at the first projection that would
-// not compile means running the command again to find the second.
+// not compile means running the command again to find the second. The running
+// server re-reads --projection-dir through it too, for the same reason: a
+// projection that will not validate is failed by name when it is prepared, and
+// refusing the whole directory for it would hide every good file beside it.
 //
 // Subdirectories are read too, matching --projection-dir.
 func LoadPath(path string) ([]crispv1alpha1.CustomResourceProjection, error) {
@@ -208,8 +211,12 @@ func Validate(p *crispv1alpha1.CustomResourceProjection) error {
 		return fmt.Errorf("projection %s: spec.resource.kind is required", p.Name)
 	case res.Plural == "":
 		return fmt.Errorf("projection %s: spec.resource.plural is required", p.Name)
-	case res.Plural != strings.ToLower(res.Plural):
-		return fmt.Errorf("projection %s: spec.resource.plural must be lowercase", p.Name)
+	}
+
+	// The CRD's patterns, applied here because a projection read from a file
+	// never meets the CRD.
+	if err := checkResourceNames(p.Name, res); err != nil {
+		return err
 	}
 
 	if err := CheckAPIGroup(p.Name, res.Group); err != nil {

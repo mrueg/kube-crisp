@@ -233,6 +233,37 @@ func TestValidateRejects(t *testing.T) {
 		{"upper-case plural", func(p *crispv1alpha1.CustomResourceProjection) {
 			p.Spec.Resource.Plural = "Orders"
 		}, "lowercase"},
+		// The names below are the CRD's patterns, which a projection read
+		// from a file never meets. Each of these used to get through: the
+		// plural was refused by the endpoint installer, which took every
+		// other projection down with it, and the version produced an
+		// APIService the kube-apiserver rejects forever.
+		{"a plural naming a subresource", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Plural = "orders/status"
+		}, "spec.resource.plural"},
+		{"a version name the kube-apiserver refuses", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Versions = []crispv1alpha1.ProjectedVersion{
+				{Name: "V2", Schema: &apiextensionsv1.JSONSchemaProps{Type: "object"}},
+			}
+		}, "spec.resource.versions[0].name"},
+		{"a version that is not one", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Version = "latest"
+		}, "spec.resource.version"},
+		{"an upper-case group", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Group = "Store.example.com"
+		}, "spec.resource.group"},
+		{"a kind starting lowercase", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Kind = "order"
+		}, "spec.resource.kind"},
+		{"a list kind starting lowercase", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.ListKind = "orderList"
+		}, "spec.resource.listKind"},
+		{"an upper-case singular", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Singular = "Order"
+		}, "spec.resource.singular"},
+		{"a short name with a slash", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.ShortNames = []string{"ord", "ord/status"}
+		}, "spec.resource.shortNames[1]"},
 		// A generated role names the group verbatim, so a projection claiming
 		// one Kubernetes owns is a grant on the cluster's own resources. See
 		// reservedgroup.go.

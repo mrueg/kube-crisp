@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/dynamic"
 
 	crispclient "github.com/mrueg/kube-crisp/pkg/generated/clientset/versioned"
@@ -42,19 +44,28 @@ type apiServiceSurvey struct {
 	// unjudged are labelled, unclaimed, and carry no verdict from the
 	// aggregation layer yet.
 	unjudged []string
+	// served are the API groups something answers for: every group a
+	// projection in the cluster declares, and the group of every registration
+	// this server owns that the aggregation layer has not reported
+	// unavailable. The second is how a group served from --projection-dir
+	// shows up at all, and it is what the RBAC half reads before it calls a
+	// role orphaned.
+	served sets.Set[string]
 }
 
 // surveyAPIServices sorts the registrations this server owns into the three
-// cases.
+// cases, and records which groups are served along the way.
 //
-// Takes its clients rather than building them, the reason prune does: what a
-// --delete does with them is the half worth testing.
+// Both halves of prune start from the same question, which groups something
+// still answers for, and this is the one place that answers it. Takes its
+// clients rather than building them, the reason prune does: what a --delete
+// does with them is the half worth testing.
 func surveyAPIServices(
 	ctx context.Context,
 	crisp crispclient.Interface,
 	dyn dynamic.Interface,
 ) (apiServiceSurvey, error) {
-	var survey apiServiceSurvey
+	survey := apiServiceSurvey{served: sets.New[string]()}
 
 	projections, err := crisp.CrispV1alpha1().CustomResourceProjections().
 		List(ctx, metav1.ListOptions{})
@@ -64,6 +75,7 @@ func surveyAPIServices(
 
 	claimed := map[string]string{}
 	for i := range projections.Items {
+		survey.served.Insert(projections.Items[i].Spec.Resource.Group)
 		for _, gv := range groupVersions(&projections.Items[i]) {
 			claimed[gv] = projections.Items[i].Name
 		}
@@ -84,11 +96,21 @@ func surveyAPIServices(
 			// this server wrote, whatever its label says.
 			continue
 		}
+
+		// A registration counts its group as served unless the aggregation
+		// layer has said it is unavailable. One it has not judged yet has not
+		// failed, and a group about to come up is served for the purpose of
+		// deciding what to remove.
+		available, _, message := apiServiceAvailability(object)
+		if available == nil || *available {
+			group, _, _ := strings.Cut(groupVersion, "/")
+			survey.served.Insert(group)
+		}
+
 		if _, stillClaimed := claimed[groupVersion]; stillClaimed {
 			continue
 		}
 
-		available, _, message := apiServiceAvailability(object)
 		switch {
 		case available == nil:
 			survey.unjudged = append(survey.unjudged, object.GetName())

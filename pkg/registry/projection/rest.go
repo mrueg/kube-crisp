@@ -1991,8 +1991,21 @@ func (w *WritableREST) applyUpdate(
 	// Optimistic concurrency. An empty resourceVersion means the client is not
 	// asserting anything, which matches how the kube-apiserver treats writes
 	// without a precondition.
+	//
+	// A stored object with no version of its own has nothing to assert
+	// against, and then the check is skipped rather than failed. That is every
+	// row of a projection that maps no resourceVersion — but the watch cache
+	// stamps its own counter onto each event it delivers, so a watcher can
+	// resume from it, and a client that writes back the object a watch handed
+	// it sends that counter. An informer-backed controller does exactly this.
+	// Compared against the empty stored version it was a conflict, and since
+	// no re-read changes either side, the same conflict on every retry: the
+	// controller livelocked. The counter is a position in one replica's watch
+	// stream, not a version the row has, so a write cannot be conditioned on
+	// it; the write proceeds unconditionally, as on any resource without
+	// optimistic concurrency.
 	requested := incoming.GetResourceVersion()
-	if requested != "" && requested != current.GetResourceVersion() {
+	if stored := current.GetResourceVersion(); requested != "" && stored != "" && requested != stored {
 		return nil, false, errors.NewConflict(w.groupResource(), name, fmt.Errorf("%s", registry.OptimisticLockErrorMsg))
 	}
 
@@ -2021,9 +2034,10 @@ func (w *WritableREST) applyUpdate(
 	// too: statusOnly rebuilds the object from the stored one, so whatever
 	// version came in has already been replaced by this point either way.
 	//
-	// They agree whenever the client asserted anything — the comparison above
-	// has just required it. What differs is the case where it asserted nothing,
-	// which is most patches: kubectl's merge patch sends no resourceVersion, so
+	// They agree whenever the client asserted anything against a stored
+	// version — the comparison above has just required it. What differs is the
+	// case where it asserted nothing, which is most patches: kubectl's merge
+	// patch sends no resourceVersion, so
 	// binding the client's value left :resourceVersion NULL and the guard in
 	// the statement passed unconditionally. The read-then-write window stayed
 	// open and concurrent patches silently reverted one another.
@@ -2402,7 +2416,12 @@ func checkDeletePreconditions(existing runtime.Object, options *metav1.DeleteOpt
 		return errors.NewConflict(gr, name,
 			fmt.Errorf("the UID in the precondition (%s) does not match the UID in record (%s)", *uid, obj.GetUID()))
 	}
-	if rv := options.Preconditions.ResourceVersion; rv != nil && *rv != obj.GetResourceVersion() {
+	// Only against a version the record has. A projection that maps no
+	// resourceVersion stores none, and the one a client can hold is the watch
+	// cache's counter off an event — not something the row can be compared
+	// with — so the precondition is treated as absent rather than as stale,
+	// exactly as applyUpdate treats the same value on a write.
+	if rv := options.Preconditions.ResourceVersion; rv != nil && obj.GetResourceVersion() != "" && *rv != obj.GetResourceVersion() {
 		return errors.NewConflict(gr, name,
 			fmt.Errorf("the resourceVersion in the precondition (%s) does not match the resourceVersion in record (%s)", *rv, obj.GetResourceVersion()))
 	}

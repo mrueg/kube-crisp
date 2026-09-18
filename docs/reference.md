@@ -454,6 +454,11 @@ Writes are checked against `metadata.resourceVersion` when the client supplies o
 with a conflict when it is stale — the same contract as any other Kubernetes resource. An empty
 resourceVersion means the client is not asserting anything, and the write proceeds.
 
+A projection that maps no `resourceVersion` has nothing to check against: its rows carry no version,
+and the one a watch stamps onto its events is the cache's own counter, not something the row has. A
+write or a delete precondition that sends that counter back is treated as asserting nothing rather
+than as stale, so a controller that updates the object its informer holds is not refused forever.
+
 The check is a read followed by a write, so it closes the window rather than eliminating it. That
 read always goes to the database — it is never answered from `cacheTTL` or joined to a query already
 in flight — because a conflict check against a cached object is a check against a version the row

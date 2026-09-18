@@ -1577,6 +1577,17 @@ An object with no `creationTimestamp` shows an empty age, which is the usual
 reason a projection looks subtly wrong in `kubectl get` while being correct in
 `-o yaml`.
 
+Every `mapping.fields[].path` has to be a path the version's schema describes — a declared
+property, a key under `additionalProperties`, or anything below an object marked
+`x-kubernetes-preserve-unknown-fields: true` — and a projection mapping a column anywhere else is
+refused, by the server, by `validate` and at admission. Reads are never pruned, so such a field
+would show up in every `kubectl get`; writes are, so a `kubectl edit` of an unrelated field would
+drop it before the mapping ran, bind `NULL` for the column, and erase the value. A bare
+`schema: {type: object}` describes nothing and keeps nothing, which is why a projection that maps
+fields cannot start from one. A `json` column is held to the same rule one level down: a leaf the
+schema describes as an object with no properties is pruned to `{}`, so it has to say what the
+object holds or preserve unknown fields.
+
 ### Choosing a field type for a numeric column
 
 `number` is a float64, because that is what JSON has. PostgreSQL `NUMERIC` and

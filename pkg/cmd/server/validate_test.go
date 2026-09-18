@@ -64,6 +64,27 @@ func TestValidateRejectsWhatTheServerWouldReject(t *testing.T) {
 	}
 }
 
+// TestValidateRefusesAMappedPathTheSchemaLacks: the mistake that erases a
+// column on every read-modify-write, caught where the file is written. The
+// schema a first draft carries is the bare `type: object` above, which keeps
+// nothing on a write.
+func TestValidateRefusesAMappedPathTheSchemaLacks(t *testing.T) {
+	broken := strings.Replace(validProjection,
+		"mapping: {name: id, namespace: tenant}",
+		"mapping: {name: id, namespace: tenant, fields: [{column: notes, path: spec.notes}]}", 1)
+	path := write(t, "unmapped.yaml", broken)
+
+	var out, errOut bytes.Buffer
+	if err := runValidate([]string{path}, &out, &errOut); err == nil {
+		t.Fatal("a mapped path the schema does not describe was accepted")
+	}
+	for _, want := range []string{"spec.notes", `"notes"`, "version v1alpha1"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("the failure does not mention %s:\n%s", want, errOut.String())
+		}
+	}
+}
+
 // TestValidateSeparatesUnreadableFromInvalid. Both fail, and they are different
 // failures: one is a file that is not a projection, the other is a projection
 // that is wrong. Counting them together produced "1 of 0 projection(s)

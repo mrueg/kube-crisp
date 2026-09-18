@@ -383,6 +383,13 @@ func Validate(p *crispv1alpha1.CustomResourceProjection) error {
 		return fmt.Errorf("projection %s: %w", p.Name, err)
 	}
 
+	// After the mappings, whose paths this reads. Only the schemas a projection
+	// declares are at hand here; a borrowed one is checked by the compile, once
+	// it has been resolved.
+	if err := CheckMappedPaths(p, nil); err != nil {
+		return err
+	}
+
 	return nil
 }
 

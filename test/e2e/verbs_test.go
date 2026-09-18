@@ -330,7 +330,9 @@ func restartAPIServer(t *testing.T) {
 //
 // Asks for a table that does not exist, which is the webhook's whole purpose
 // and something only it can object to, through a server-side dry run that
-// reaches admission and writes nothing.
+// reaches admission and writes nothing. The refusal does not name the table —
+// the webhook no longer repeats the database — so what is matched is the
+// webhook's own sentence.
 func awaitWebhookInForce(t *testing.T) {
 	t.Helper()
 
@@ -355,7 +357,8 @@ func awaitWebhookInForce(t *testing.T) {
 			Param("dryRun", "All").
 			Body(probe).
 			Do(ctx).Error()
-		if err != nil && strings.Contains(err.Error(), "no_such_table_for_the_probe") {
+		if err != nil && strings.Contains(err.Error(), "admission webhook") &&
+			strings.Contains(err.Error(), webhookRefusal) {
 			return
 		}
 		if time.Now().After(deadline) {

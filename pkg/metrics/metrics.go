@@ -66,6 +66,12 @@ const (
 	// not an admission review. Distinct from denied, because a request the
 	// webhook could not read says nothing about the projection in it.
 	AdmissionError = "error"
+	// AdmissionRefused is a request from a caller the webhook would not answer:
+	// anonymous, or not allowed to write projections. Apart from denied because
+	// it is not about any projection, and apart from error because a count
+	// here is the kube-apiserver calling without credentials — which, with a
+	// failure policy of Ignore, otherwise looks like the webhook working.
+	AdmissionRefused = "refused"
 )
 
 // Reasons a pooled connection was closed rather than returned to the pool.

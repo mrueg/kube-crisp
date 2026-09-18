@@ -1,0 +1,18 @@
+# The identity the e2e kube-apiserver presents to the projection webhook — a
+# static token from hack/e2e-admission/tokens.csv — bound to the role the
+# webhook's caller needs. Without this the kube-apiserver is authenticated but
+# not allowed, the webhook answers 403, and because its failure policy is
+# Ignore every projection is accepted: the failure the e2e suite exists to
+# catch, presented as a passing apply.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-crisp:projection-webhook-caller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-crisp:projection-webhook-caller
+subjects:
+  - kind: User
+    name: kube-crisp-projection-webhook-caller
+    apiGroup: rbac.authorization.k8s.io

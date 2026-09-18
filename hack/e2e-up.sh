@@ -25,12 +25,55 @@ fi
 
 if ! kind get clusters 2>/dev/null | grep -qx "${CLUSTER}"; then
   echo "==> creating kind cluster ${CLUSTER}"
-  kind create cluster --name "${CLUSTER}" --wait 180s
+  # The kube-apiserver is given credentials for the projection webhook, which
+  # answers only a caller it can name. hack/e2e-admission holds the
+  # AdmissionConfiguration, the kubeconfig it points at, and the static token
+  # file the kube-apiserver authenticates that token with; the directory is
+  # mounted into the node and from there into the kube-apiserver's static pod.
+  # Without this the kube-apiserver calls the webhook anonymously, is refused,
+  # and — the failure policy being Ignore — accepts every projection, which
+  # the suite would report as the webhook not working.
+  kind create cluster --name "${CLUSTER}" --wait 180s --config - <<KIND
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: ${REPO_ROOT}/hack/e2e-admission
+        containerPath: /etc/kubernetes/kube-crisp-admission
+        readOnly: true
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            - name: admission-control-config-file
+              value: /etc/kubernetes/kube-crisp-admission/admission.yaml
+            - name: token-auth-file
+              value: /etc/kubernetes/kube-crisp-admission/tokens.csv
+          extraVolumes:
+            - name: kube-crisp-admission
+              hostPath: /etc/kubernetes/kube-crisp-admission
+              mountPath: /etc/kubernetes/kube-crisp-admission
+              readOnly: true
+              pathType: Directory
+KIND
 fi
 
 # A dedicated kubeconfig keeps the developer's default context untouched.
 kind get kubeconfig --name "${CLUSTER}" > "${KUBECONFIG_PATH}"
 export KUBECONFIG="${KUBECONFIG_PATH}"
+
+# A cluster created before the kube-apiserver was given webhook credentials
+# cannot be given them now — they are flags on a static pod kubeadm wrote at
+# creation — and the symptom would be the webhook wait below timing out with
+# nothing in this server's log but refusals of an anonymous caller.
+if ! kubectl -n kube-system get pods -l component=kube-apiserver \
+    -o jsonpath='{.items[*].spec.containers[*].command}' | grep -q admission-control-config-file; then
+  echo "!! kind cluster ${CLUSTER} was created without credentials for the projection webhook;" >&2
+  echo "   run hack/e2e-down.sh and try again" >&2
+  exit 1
+fi
 
 echo "==> loading image into the cluster"
 kind load docker-image "${IMAGE}" --name "${CLUSTER}"
@@ -41,6 +84,7 @@ kubectl apply -f manifests/10-crd-customresourceprojection.yaml
 kubectl apply -f manifests/20-rbac.yaml
 kubectl apply -f manifests/optional/admission-rbac.yaml
 kubectl apply -f manifests/optional/webhook-rbac.yaml
+kubectl apply -f test/e2e/manifests/webhook-caller.yaml
 kubectl apply -f manifests/40-service.yaml
 kubectl apply -f test/e2e/manifests/postgres.yaml
 kubectl apply -f test/e2e/manifests/mysql.yaml

@@ -1,0 +1,17 @@
+# What the e2e kube-apiserver is started with as --admission-control-config-file.
+#
+# The projection webhook answers only a caller it can name, and the
+# kube-apiserver presents no credentials to a webhook unless told to: this is
+# where it is told. The kubeconfig names a user per webhook host, and the host
+# for a webhook reached through a Service is <service>.<namespace>.svc.
+#
+# Mounted into the kind node by hack/e2e-up.sh, and from there into the
+# kube-apiserver's static pod, so the paths here are the pod's.
+apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+  - name: ValidatingAdmissionWebhook
+    configuration:
+      apiVersion: apiserver.config.k8s.io/v1
+      kind: WebhookAdmissionConfiguration
+      kubeConfigFile: /etc/kubernetes/kube-crisp-admission/webhook.kubeconfig

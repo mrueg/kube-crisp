@@ -312,6 +312,84 @@ func TestPoolsAreSharedAcrossProjections(t *testing.T) {
 	}
 }
 
+// TestCheckLeavesNoPoolBehind. A projection being checked is not installed,
+// and its data source is whatever the request says it is, so a check that
+// cached what it opened let whoever could reach the webhook open one pool
+// against the real database per distinct key — a different auth option each
+// time is a different key — until the next sync released them.
+func TestCheckLeavesNoPoolBehind(t *testing.T) {
+	ctx := context.Background()
+	compiler := newTestCompiler(t)
+	// Every Secret name is a database of its own, as it would be in a cluster,
+	// and so a pool key of its own; the unnamed one is the database the table
+	// is in.
+	compiler.Resolver = bySecret{real: compiler.Resolver.(fixedResolver).dsn, dir: t.TempDir()}
+
+	valid := testProjection()
+	if err := compiler.Check(ctx, valid); err != nil {
+		t.Fatalf("Check() rejected a valid projection: %v", err)
+	}
+
+	broken := testProjection()
+	broken.Spec.Queries.List.SQL = "SELECT id, tenant FROM no_such_table WHERE tenant = :namespace"
+	if err := compiler.Check(ctx, broken); err == nil {
+		t.Fatal("Check() accepted a projection whose table does not exist")
+	}
+
+	for _, secret := range []string{"probe-1", "probe-2", "probe-3"} {
+		p := testProjection()
+		p.Spec.DataSource.SecretRef.Name = secret
+		if err := compiler.Check(ctx, p); err == nil {
+			t.Fatalf("Check() accepted a projection against %s, an empty database", secret)
+		}
+	}
+
+	if got := compiler.Pools.Len(); got != 0 {
+		t.Errorf("%d pools cached after checking projections nothing serves, want none", got)
+	}
+}
+
+// bySecret answers a database per Secret name, so that projections naming
+// different Secrets get different pool keys the way they would in a cluster.
+type bySecret struct {
+	real string
+	dir  string
+}
+
+func (r bySecret) Resolve(_ context.Context, ds crispv1alpha1.DataSource) (string, error) {
+	if ds.SecretRef.Name == "" {
+		return r.real, nil
+	}
+	return filepath.Join(r.dir, ds.SecretRef.Name+".db"), nil
+}
+
+// TestCheckSharesAnInstalledProjectionsPool is the other half: a check against
+// a database an installed projection already reaches uses that pool rather than
+// opening a second one — and leaves it open, since it is not the check's.
+func TestCheckSharesAnInstalledProjectionsPool(t *testing.T) {
+	ctx := context.Background()
+	compiler := newTestCompiler(t)
+
+	if _, err := compiler.Compile(ctx, testProjection()); err != nil {
+		t.Fatalf("Compile() returned error: %v", err)
+	}
+	prepared, err := compiler.Prepare(ctx, testProjection())
+	if err != nil {
+		t.Fatalf("Prepare() returned error: %v", err)
+	}
+
+	if err := compiler.Check(ctx, testProjection()); err != nil {
+		t.Fatalf("Check() rejected the installed projection: %v", err)
+	}
+
+	if got := compiler.Pools.Len(); got != 1 {
+		t.Errorf("%d pools after checking an installed projection, want the one it serves through", got)
+	}
+	if err := prepared.Pool.Ping(ctx); err != nil {
+		t.Errorf("the installed projection's pool was closed by the check: %v", err)
+	}
+}
+
 func TestSingularAndListKindDefaults(t *testing.T) {
 	res := crispv1alpha1.ProjectedResource{Kind: "Order"}
 	if got, want := Singular(res), "order"; got != want {

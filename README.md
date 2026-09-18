@@ -218,7 +218,7 @@ directory is not recursive. Everything in it is a decision rather than a default
 | `servicemonitor.yaml`, `prometheusrule.yaml` | Scrape config and alert rules | Need the Prometheus Operator's CRDs |
 | `admission-rbac.yaml` | Lets the API surface project admission configuration | Watches webhook configurations, admission policies and namespaces cluster-wide |
 | `flowcontrol-rbac.yaml` | Lets it project FlowSchemas and PriorityLevelConfigurations | Writes to `flowschemas/status` |
-| `webhook-rbac.yaml` | Lets the server manage its own `ValidatingWebhookConfiguration` | Creates and updates a cluster-scoped admission object |
+| `webhook-rbac.yaml` | Lets the server manage its own `ValidatingWebhookConfiguration`, and carries the role the kube-apiserver's identity needs to call the webhook | Creates and updates a cluster-scoped admission object; the caller role is yours to bind |
 
 The last three used to sit in the main directory as `60-`, `70-` and `80-`, which meant the base
 install granted them — while the documentation described each as a grant to make deliberately.

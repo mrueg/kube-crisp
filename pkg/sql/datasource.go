@@ -1256,6 +1256,36 @@ func (c *PoolCache) Get(key string, open func() (*Pool, error)) (*Pool, error) {
 	return p, nil
 }
 
+// Borrow returns the pool for key when one is cached, and otherwise a pool that
+// is the caller's alone: opened via open, never cached, and closed by release.
+// Release is safe to call either way; for a cached pool it does nothing, since
+// the projections serving through it are not the caller's to disconnect.
+//
+// This is what the admission check prepares against. Get would cache whatever
+// it opened until the next sync's RetainOnly, and the check's input is chosen
+// by whoever applies a projection — a different auth option or connection
+// string each time is a different key, so every check that went through Get
+// left one more pool open against the real database. A key that no installed
+// projection uses is not in the cache, and a pool the check opens for it is
+// gone when the check is.
+func (c *PoolCache) Borrow(key string, open func() (*Pool, error)) (*Pool, func(), error) {
+	c.mu.Lock()
+	cached, ok := c.pools[key]
+	c.mu.Unlock()
+	if ok {
+		return cached, func() {}, nil
+	}
+
+	// Opened outside the lock: it is nobody else's, so nothing else can be
+	// waiting on it, and a driver that connects on open must not hold every
+	// other lookup while it does.
+	private, err := open()
+	if err != nil {
+		return nil, nil, err
+	}
+	return private, func() { _ = private.Close() }, nil
+}
+
 // EvictIf closes and removes the pool for key, but only if it is still the pool
 // the caller was using.
 //

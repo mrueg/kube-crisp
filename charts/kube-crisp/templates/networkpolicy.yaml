@@ -26,6 +26,13 @@ spec:
     # runs on a control plane node's host network and cannot be selected by pod
     # or namespace labels. The port is therefore reachable from the cluster, and
     # delegated authentication rather than the network decides who is served.
+    #
+    # The projection admission webhook is served on this same port, so this
+    # rule cannot tell a kube-apiserver calling it apart from anything else
+    # in the cluster POSTing an AdmissionReview. What protects the endpoint is
+    # that it authenticates and authorizes its caller like every other path;
+    # --projection-webhook-allow-anonymous is what would make this rule the
+    # only thing between a workload and the databases projections opt in.
     - ports:
         - port: https
           protocol: TCP

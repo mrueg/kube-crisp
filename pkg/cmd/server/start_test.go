@@ -18,6 +18,7 @@ import (
 
 	"github.com/mrueg/kube-crisp/pkg/apiserver"
 	"github.com/mrueg/kube-crisp/pkg/projection"
+	"github.com/mrueg/kube-crisp/pkg/webhook"
 )
 
 func TestDefaultsSuitAnAggregatedServer(t *testing.T) {
@@ -51,6 +52,46 @@ func TestDefaultsSuitAnAggregatedServer(t *testing.T) {
 			t.Errorf("%s is not in AlwaysAllowPaths (%s)", path, allowed)
 		}
 	}
+	// The webhook is not: it prepares statements against a database on the
+	// caller's say-so, so the caller has to be somebody.
+	if strings.Contains(allowed, webhook.Path) {
+		t.Errorf("%s is in AlwaysAllowPaths (%s); the projection webhook is served to anyone", webhook.Path, allowed)
+	}
+	if o.ProjectionWebhook.AllowAnonymous {
+		t.Error("the projection webhook answers anonymous callers by default")
+	}
+}
+
+// TestWebhookAnonymityIsExplicit: the path is allowed to everyone only when
+// the flag says so, and only when the webhook is served at all.
+func TestWebhookAnonymityIsExplicit(t *testing.T) {
+	for name, tc := range map[string]struct {
+		enabled, anonymous, want bool
+	}{
+		"served, authenticated":  {enabled: true, anonymous: false, want: false},
+		"served, anonymous":      {enabled: true, anonymous: true, want: true},
+		"not served, anonymous":  {enabled: false, anonymous: true, want: false},
+		"not served, no opinion": {enabled: false, anonymous: false, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := NewCrispServerOptions(os.Stdout, os.Stderr)
+			o.ProjectionWebhook.Enabled = tc.enabled
+			o.ProjectionWebhook.AllowAnonymous = tc.anonymous
+			o.applyWebhookAnonymity()
+
+			allowed := strings.Join(o.RecommendedOptions.Authorization.AlwaysAllowPaths, ",")
+			if got := strings.Contains(allowed, webhook.Path); got != tc.want {
+				t.Errorf("%s in AlwaysAllowPaths = %v, want %v (%s)", webhook.Path, got, tc.want, allowed)
+			}
+		})
+	}
+
+	// A server with no authorization at all has nothing to add the path to,
+	// and must not fall over saying so.
+	o := NewCrispServerOptions(os.Stdout, os.Stderr)
+	o.RecommendedOptions.Authorization = nil
+	o.ProjectionWebhook.Enabled, o.ProjectionWebhook.AllowAnonymous = true, true
+	o.applyWebhookAnonymity()
 }
 
 // TestAdmissionIsOffUnlessAskedFor checks the default all the way through to

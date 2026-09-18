@@ -109,6 +109,15 @@ The shipped manifests favour a working first deployment. Before production:
   one client cannot take a projection's whole capacity. Each needs the extra
   RBAC in `manifests/optional/admission-rbac.yaml` and
   `manifests/optional/flowcontrol-rbac.yaml`.
+- With `--enable-projection-webhook`, give the kube-apiserver credentials for
+  the webhook through its `AdmissionConfiguration` kubeconfig, bound to the
+  caller role in `manifests/optional/webhook-rbac.yaml`, and leave
+  `--projection-webhook-allow-anonymous` unset. The webhook prepares the
+  statements in a request against the database behind the Secret it names;
+  served without an identity it is a way for anything that can reach the
+  Service to learn which tables, columns and Secrets exist. Its responses
+  never carry the database's error for that reason — the server log does.
+  `docs/operating.md` has the kubeconfig.
 
 ## Out of scope
 

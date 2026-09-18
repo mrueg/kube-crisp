@@ -40,6 +40,13 @@ spec:
         - port: https
           protocol: TCP
 
+    # The projection admission webhook is served on this same port, so this
+    # rule cannot tell a kube-apiserver calling it apart from anything else in
+    # the cluster POSTing an AdmissionReview. What protects the endpoint is
+    # that it authenticates and authorizes its caller like every other path;
+    # --projection-webhook-allow-anonymous is what would make this rule the
+    # only thing between a workload and the databases projections opt in.
+    #
     # Narrow it to the nodes the control plane runs on if you know their range,
     # the same trade the egress rule below offers. Everything on this port is
     # authenticated either way — this only decides who gets to be refused.

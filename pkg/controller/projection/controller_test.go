@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -78,6 +79,13 @@ func newTestDB(t *testing.T) string {
 	return path
 }
 
+// kindFor names the kind a fixture projection serves at plural. Every
+// projection in a group must present its own kind, the way it must its own
+// plural, so two fixtures sharing a group cannot share one.
+func kindFor(plural string) string {
+	return strings.ToUpper(plural[:1]) + strings.TrimSuffix(plural[1:], "s")
+}
+
 // projectionObject builds a CustomResourceProjection as it would arrive from
 // the API.
 func projectionObject(name, plural string) *crispv1alpha1.CustomResourceProjection {
@@ -91,7 +99,7 @@ func projectionObject(name, plural string) *crispv1alpha1.CustomResourceProjecti
 			Resource: crispv1alpha1.ProjectedResource{
 				Group:   "warehouse.example.com",
 				Version: "v1alpha1",
-				Kind:    "Bin",
+				Kind:    kindFor(plural),
 				Plural:  plural,
 				Scope:   crispv1alpha1.NamespaceScoped,
 				Schema:  &apiextensionsv1.JSONSchemaProps{Type: "object"},
@@ -822,7 +830,7 @@ spec:
   resource:
     group: warehouse.example.com
     version: v1alpha1
-    kind: Bin
+    kind: %s
     plural: %s
     scope: Namespaced
     schema:
@@ -833,7 +841,7 @@ spec:
   mapping:
     name: id
     namespace: tenant
-`, name, plural)
+`, name, kindFor(plural), plural)
 
 	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(manifest), 0o600); err != nil {
 		t.Fatalf("writing %s: %v", name, err)

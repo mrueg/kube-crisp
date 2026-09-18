@@ -380,6 +380,29 @@ var (
 		[]string{"resource"},
 	)
 
+	// WatchResyncFailing is 1 while a projection's last full resync failed and
+	// its watchers are being carried by incremental polls alone.
+	//
+	// WatchPollErrors counts the failures but cannot say which kind of poll
+	// failed. A resync that fails every time it is retried, with the
+	// incremental polls in between succeeding, therefore looks from the
+	// counters like an occasional error on a healthy watch — and it is not.
+	// The resync is the only thing that notices a deletion on a projection
+	// without a deletedQuery, and the only thing that recovers a row committed
+	// out of stamp order on any projection; for as long as this is 1, neither
+	// is happening. The usual cause is a table that has outgrown maxRows, or
+	// the statement's timeout, on the list or watch query.
+	WatchResyncFailing = metrics.NewGaugeVec(
+		&metrics.GaugeOpts{
+			Namespace:      "kube_crisp",
+			Subsystem:      "watch",
+			Name:           "resync_failing",
+			Help:           "1 while the last full resync of a projected resource failed and incremental polls are carrying its watchers.",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"resource"},
+	)
+
 	// WatchNotifications counts change notifications the database pushed.
 	//
 	// It is what says whether a projection configured for them is actually
@@ -690,6 +713,7 @@ func init() {
 		Watchers,
 		WatchEvents,
 		WatchPolls,
+		WatchResyncFailing,
 		WatchNotifications,
 		ProjectionsUnguardedUpdate,
 		ProjectionsUnversioned,

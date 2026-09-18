@@ -49,7 +49,11 @@ spec:
             # The projection webhook, so a projection whose SQL the database
             # cannot run is refused at apply time rather than reported in its
             # status afterwards. Registers its own configuration using this
-            # server's self-signed certificate as the CA bundle.
+            # server's self-signed certificate as the CA bundle. Answered only
+            # for an authenticated, authorized caller: hack/e2e-up.sh starts
+            # the kube-apiserver with credentials for it, so the suite runs the
+            # path a production cluster does rather than
+            # --projection-webhook-allow-anonymous.
             - --enable-projection-webhook
             # One replica here, so it simply wins — what this exercises is the
             # wiring: the flag, the Lease RBAC, and the metric that says which

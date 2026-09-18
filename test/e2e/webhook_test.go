@@ -20,6 +20,65 @@ var webhookGVR = schema.GroupVersionResource{
 	Resource: "validatingwebhookconfigurations",
 }
 
+// webhookRefusal is what the webhook says about every projection its database
+// would not prepare, whatever the database said. The detail is in the server
+// log, because in the response it described the database to whoever asked.
+const webhookRefusal = "could not be prepared against its data source"
+
+// TestProjectionWebhookRefusesAnAnonymousCaller: the endpoint prepares the
+// statements in a request against the database behind the Secret it names, so
+// it answers only a caller it can name. The kube-apiserver here has credentials
+// for it; anything else that reaches the Service does not, and gets no answer.
+//
+// Reached through the kube-apiserver's service proxy, which forwards the
+// request without the caller's credentials — the same anonymous call any
+// workload in the cluster could make directly.
+func TestProjectionWebhookRefusesAnAnonymousCaller(t *testing.T) {
+	ctx := context.Background()
+
+	review := []byte(`{
+	  "apiVersion": "admission.k8s.io/v1",
+	  "kind": "AdmissionReview",
+	  "request": {
+	    "uid": "e2e-anonymous-probe",
+	    "operation": "CREATE",
+	    "name": "e2e-anonymous-probe",
+	    "object": {
+	      "apiVersion": "crisp.kubecrisp.io/v1alpha1",
+	      "kind": "CustomResourceProjection",
+	      "metadata": {"name": "e2e-anonymous-probe"},
+	      "spec": {
+	        "dataSource": {"driver": "postgres", "secretRef": {"name": "orders-db", "namespace": "kube-crisp"}},
+	        "resource": {"group": "store.example.com", "version": "v1alpha1", "kind": "AnonymousProbe",
+	                     "plural": "anonymousprobes", "scope": "Namespaced", "schema": {"type": "object"}},
+	        "queries": {"list": {"sql": "SELECT id, tenant FROM no_such_table_for_the_probe WHERE tenant = :namespace"}},
+	        "mapping": {"name": "id", "namespace": "tenant"}
+	      }
+	    }
+	  }
+	}`)
+
+	var status int
+	body, err := discoveryClient.RESTClient().Post().
+		AbsPath("/api/v1/namespaces/kube-crisp/services/https:kube-crisp-apiserver:443/proxy/admission/customresourceprojections").
+		SetHeader("Content-Type", "application/json").
+		Body(review).
+		Do(ctx).
+		StatusCode(&status).
+		Raw()
+	if err == nil {
+		t.Fatalf("an anonymous AdmissionReview was answered (status %d): %s", status, body)
+	}
+	if status != 401 && status != 403 {
+		t.Errorf("status = %d, want 401 or 403: %v", status, err)
+	}
+	for _, leaked := range []string{`"allowed"`, "no_such_table_for_the_probe", "SQLSTATE"} {
+		if strings.Contains(string(body), leaked) || strings.Contains(err.Error(), leaked) {
+			t.Errorf("the refusal carries %q; an anonymous caller learned something about the database", leaked)
+		}
+	}
+}
+
 // TestProjectionWebhookRejectsSQLTheDatabaseCannotRun covers the whole point of
 // the webhook: the mistake is reported where it was made.
 //
@@ -47,13 +106,19 @@ func TestProjectionWebhookRejectsSQLTheDatabaseCannotRun(t *testing.T) {
 			"webhook is not registered, or it could not be reached and failed open")
 	}
 
-	// The database's own words, so the author does not have to go and find out
-	// which column.
+	// Refused by the webhook, and refused without repeating the database. The
+	// column name and the driver's error go to the server log: sent back, they
+	// told whoever could reach the Service which tables and columns every
+	// opted-in database has.
 	message := err.Error()
-	for _, want := range []string{"queries.list", "no_such_column"} {
+	for _, want := range []string{"admission webhook", webhookRefusal} {
 		if !strings.Contains(message, want) {
-			t.Errorf("the rejection does not mention %q, so it does not say what to fix: %s",
-				want, message)
+			t.Errorf("the rejection does not carry %q, so it is not the webhook's: %s", want, message)
+		}
+	}
+	for _, leaked := range []string{"no_such_column", "SQLSTATE", "queries.list"} {
+		if strings.Contains(message, leaked) {
+			t.Errorf("the rejection repeats %q from the database's error: %s", leaked, message)
 		}
 	}
 
@@ -140,8 +205,8 @@ func TestProjectionWebhookChecksUpdatesToo(t *testing.T) {
 	if _, err := projections.Update(ctx, broken, metav1.UpdateOptions{}); err == nil {
 		t.Fatal("an update to SQL the database cannot run was accepted; the webhook rule covers " +
 			"UPDATE, so either it is not reaching this server or it failed open")
-	} else if !strings.Contains(err.Error(), "no_such_column") {
-		t.Errorf("the refusal does not carry the database's own error: %v", err)
+	} else if !strings.Contains(err.Error(), webhookRefusal) {
+		t.Errorf("the refusal is not the webhook's: %v", err)
 	}
 
 	// And the stored projection is the one that works, not a half-applied edit.

@@ -196,9 +196,15 @@ func (c CompletedConfig) New() (*CrispServer, error) {
 	genericServer.Handler.NonGoRestfulMux.HandlePrefix("/apis/", router)
 
 	if c.ExtraConfig.ProjectionWebhook.Enabled {
-		genericServer.Handler.NonGoRestfulMux.Handle(webhook.Path,
-			&webhook.Handler{Checker: compiler})
-		klog.InfoS("serving the projection admission webhook", "path", webhook.Path)
+		// The server's own authorizer, so the caller is judged the way a
+		// request to write a projection through the kube-apiserver would be.
+		genericServer.Handler.NonGoRestfulMux.Handle(webhook.Path, &webhook.Handler{
+			Checker:        compiler,
+			Authorizer:     genericServer.Authorizer,
+			AllowAnonymous: c.ExtraConfig.ProjectionWebhook.AllowAnonymous,
+		})
+		klog.InfoS("serving the projection admission webhook", "path", webhook.Path,
+			"allowAnonymous", c.ExtraConfig.ProjectionWebhook.AllowAnonymous)
 	}
 
 	s := &CrispServer{

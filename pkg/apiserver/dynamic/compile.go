@@ -80,11 +80,21 @@ type Prepared struct {
 // cache, an empty read cache, and every watcher relisting — which is the right
 // answer when a projection changed and the wrong one when it did not.
 func (c *Compiler) Prepare(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) (*Prepared, error) {
+	return c.prepare(ctx, p, c.Pools.Get)
+}
+
+// poolGetter hands out the pool for a key, opening one via open when it has
+// none. PoolCache.Get is the one the compile path uses; the admission check
+// uses one that does not leave what it opened behind.
+type poolGetter func(key string, open func() (*crispsql.Pool, error)) (*crispsql.Pool, error)
+
+// prepare is Prepare with the pool lookup chosen by the caller.
+func (c *Compiler) prepare(ctx context.Context, p *crispv1alpha1.CustomResourceProjection, get poolGetter) (*Prepared, error) {
 	if err := projection.Validate(p); err != nil {
 		return nil, err
 	}
 
-	pool, poolKey, err := c.pool(ctx, p.Spec.DataSource)
+	pool, poolKey, err := c.pool(ctx, p.Spec.DataSource, get)
 	if err != nil {
 		return nil, fmt.Errorf("connecting data source: %w", err)
 	}
@@ -99,7 +109,7 @@ func (c *Compiler) Prepare(ctx context.Context, p *crispv1alpha1.CustomResourceP
 		return nil, fmt.Errorf("resolving the read replica: %w", err)
 	}
 	if hasReplica {
-		readPool, readKey, err := c.poolFor(p.Spec.DataSource, readDSN)
+		readPool, readKey, err := c.poolFor(p.Spec.DataSource, readDSN, get)
 		if err != nil {
 			return nil, fmt.Errorf("connecting the read replica: %w", err)
 		}
@@ -224,8 +234,30 @@ func (c *Compiler) Check(ctx context.Context, p *crispv1alpha1.CustomResourcePro
 
 // check is one attempt at Check, reporting which pools it used so the caller can
 // drop exactly those and no others if they turn out to have been closed.
+//
+// The pools are borrowed rather than fetched. A projection being checked is
+// not installed, and its data source is whatever the request says it is, so
+// caching what the check opens would let whoever can reach the webhook fill the
+// cache with pools against the real database, one per distinct key, until the
+// next sync's RetainOnly. A pool an installed projection already uses is shared
+// as before; one opened for the check alone is closed when the check returns.
 func (c *Compiler) check(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) (*Prepared, error) {
-	prepared, err := c.Prepare(ctx, p)
+	var releases []func()
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	borrow := func(key string, open func() (*crispsql.Pool, error)) (*crispsql.Pool, error) {
+		pool, release, err := c.Pools.Borrow(key, open)
+		if err != nil {
+			return nil, err
+		}
+		releases = append(releases, release)
+		return pool, nil
+	}
+
+	prepared, err := c.prepare(ctx, p, borrow)
 	if err != nil {
 		return nil, err
 	}
@@ -528,21 +560,21 @@ func (c *Compiler) borrow(ctx context.Context, ref crispv1alpha1.CRDReference) (
 // The connection string is resolved before the lookup rather than inside it, so
 // that a rotated credential produces a different key and therefore a new pool.
 // Resolving costs one Secret read per projection per sync.
-func (c *Compiler) pool(ctx context.Context, ds crispv1alpha1.DataSource) (*crispsql.Pool, string, error) {
+func (c *Compiler) pool(ctx context.Context, ds crispv1alpha1.DataSource, get poolGetter) (*crispsql.Pool, string, error) {
 	dsn, err := c.Resolver.Resolve(ctx, ds)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolving data source: %w", err)
 	}
-	return c.poolFor(ds, dsn)
+	return c.poolFor(ds, dsn, get)
 }
 
 // poolFor returns the shared pool for one already-resolved connection string.
 // The primary and a read replica differ only in that, so they open the same way
 // and are keyed the same way — two projections pointed at one replica share its
 // pool exactly as they would share a primary.
-func (c *Compiler) poolFor(ds crispv1alpha1.DataSource, dsn string) (*crispsql.Pool, string, error) {
+func (c *Compiler) poolFor(ds crispv1alpha1.DataSource, dsn string, get poolGetter) (*crispsql.Pool, string, error) {
 	key := projection.PoolKey(ds, dsn)
-	pool, err := c.Pools.Get(key, func() (*crispsql.Pool, error) {
+	pool, err := get(key, func() (*crispsql.Pool, error) {
 		opts := crispsql.PoolOptions{
 			Name:   projection.PoolLabel(ds, dsn),
 			Driver: ds.Driver,

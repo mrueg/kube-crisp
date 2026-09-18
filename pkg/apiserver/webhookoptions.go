@@ -15,6 +15,14 @@ type ProjectionWebhookOptions struct {
 	// Name of the ValidatingWebhookConfiguration.
 	Name string
 
+	// AllowAnonymous answers the check for callers that present no
+	// credentials, and for any caller without asking whether it may write
+	// projections. Off, the kube-apiserver has to be given credentials for
+	// this webhook through its AdmissionConfiguration; on, anything that can
+	// reach the Service can have statements prepared against an opted-in
+	// database.
+	AllowAnonymous bool
+
 	// ServiceName and ServiceNamespace locate the Service that fronts this
 	// server, which is what the kube-apiserver calls.
 	ServiceName      string

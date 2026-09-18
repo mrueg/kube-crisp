@@ -1533,6 +1533,12 @@ func TestSecretMustOptIn(t *testing.T) {
 	// rather than reported afterwards in a status the author has to know to go
 	// and read.
 	//
+	// The refusal does not say which: a Secret that is missing, one that is
+	// not labelled, and one without the key are refused in the same words,
+	// because three different sentences enumerated Secrets to whoever could
+	// reach the webhook. The label that would fix it is named in the server
+	// log.
+	//
 	// The status condition is still the backstop: the webhook fails open by
 	// design, so a projection created while this server is down is rejected the
 	// old way instead, at compile time and without ever being served.
@@ -1540,8 +1546,11 @@ func TestSecretMustOptIn(t *testing.T) {
 	if err == nil {
 		t.Fatal("a projection over a Secret that has not opted in was accepted")
 	}
-	if !strings.Contains(err.Error(), "allow-projection") {
-		t.Errorf("the refusal does not name the label that would fix it: %v", err)
+	if !strings.Contains(err.Error(), webhookRefusal) {
+		t.Errorf("the refusal is not the webhook's: %v", err)
+	}
+	if strings.Contains(err.Error(), "allow-projection") || strings.Contains(err.Error(), "unmarked-db") {
+		t.Errorf("the refusal says which Secret and why, which enumerates Secrets to whoever asks: %v", err)
 	}
 
 	// And nothing was stored, so there is no projection in the cluster that the

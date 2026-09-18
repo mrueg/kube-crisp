@@ -196,14 +196,98 @@ landed — is refused when it is applied, rather than accepted and then reported
 ```console
 $ kubectl apply -f orders-projection.yaml
 The request is invalid: admission webhook "projections.crisp.kubecrisp.io" denied the request:
-queries.list: the database cannot run this statement: ERROR: column "customer_name" does not exist
-(SQLSTATE 42703)
+the projection's statements could not be prepared against its data source; the reason is in the
+kube-crisp server log
 ```
 
 `--enable-projection-webhook` turns it on. It asks the database to *prepare* every statement, which
 parses it and resolves every name against the catalogue without touching a row, so the answer is the
 database's own and costs it nothing. The same check runs at compile time regardless; the webhook
 only moves it to where the mistake was made.
+
+The refusal names the query and the database's error in the server log, not in the response. A
+projection that is malformed in itself — a missing group, a mapping that names no column, a plural
+that is not lowercase — is refused with the same message `kube-crisp validate` gives for the file,
+because that describes the request and nothing else. Anything that took a Secret, a
+`CustomResourceDefinition` or the database to find out is reported as above: the database's error
+says which tables and columns exist, and the difference between a Secret that is missing, one that
+is not labelled and one without the key enumerates Secrets, and a webhook response goes to whoever
+made the request. The log line is `refusing a projection at admission`, with the projection's name,
+the user who applied it, and the error in full.
+
+### Who may call it
+
+The webhook is served on the same port and behind the same authentication as everything else, and
+it answers only a caller that is somebody: an identity the cluster vouches for — a client certificate
+from the cluster's client CA, or a token `TokenReview` accepts — that may `post` the webhook's path
+and `create` or `update` `customresourceprojections`. It has to, because the request is the
+caller's: an `AdmissionReview` names a Secret and a statement, and answering it prepares that
+statement against the database behind that Secret. Served to anyone who could reach the Service, as
+it once was, it read the catalogue of every opted-in database one statement at a time, for a
+workload with no Kubernetes identity at all.
+
+The kube-apiserver presents no credentials to a webhook unless told to. Its
+`--admission-control-config-file` names a kubeconfig, and the kubeconfig names a user per webhook
+host. For a webhook reached through a Service that host is `<service>.<namespace>.svc`, with
+`:<port>` appended when the Service port is not 443:
+
+```yaml
+# The file --admission-control-config-file points at.
+apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+  - name: ValidatingAdmissionWebhook
+    configuration:
+      apiVersion: apiserver.config.k8s.io/v1
+      kind: WebhookAdmissionConfiguration
+      kubeConfigFile: /etc/kubernetes/admission-webhooks.kubeconfig
+```
+
+```yaml
+# /etc/kubernetes/admission-webhooks.kubeconfig, on every control plane node.
+apiVersion: v1
+kind: Config
+users:
+  - name: kube-crisp-apiserver.kube-crisp.svc
+    user:
+      token: <token>
+```
+
+The simplest identity to give it is a ServiceAccount with a long-lived token, bound to the caller
+role in `manifests/optional/webhook-rbac.yaml`:
+
+```console
+$ kubectl -n kube-crisp create serviceaccount projection-webhook-caller
+$ kubectl -n kube-crisp apply -f - <<'EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: projection-webhook-caller
+  annotations:
+    kubernetes.io/service-account.name: projection-webhook-caller
+type: kubernetes.io/service-account-token
+EOF
+$ kubectl create clusterrolebinding kube-crisp:projection-webhook-caller \
+    --clusterrole=kube-crisp:projection-webhook-caller \
+    --serviceaccount=kube-crisp:projection-webhook-caller
+$ kubectl -n kube-crisp get secret projection-webhook-caller -o jsonpath='{.data.token}' | base64 -d
+```
+
+A client certificate signed by the cluster's client CA works the same way, with `client-certificate`
+and `client-key` in place of `token`; the identity is then the certificate's subject, and a
+certificate in `system:masters` passes without any binding. Delegated authentication verifies both
+against the cluster, so nothing about this server's own configuration changes.
+
+A kube-apiserver given nothing is refused with a 401, and because the failure policy is `Ignore` it
+then skips the check rather than reporting it — the projection is accepted, and the compile finds the
+problem later. Two things show it: the server logs one warning the first time it happens, and
+`kube_crisp_admission_reviews_total{result="refused"}` counts every time.
+
+`--projection-webhook-allow-anonymous` restores the previous behaviour for a cluster whose
+kube-apiserver cannot be given a kubeconfig yet. It serves the check to anything that can reach the
+Service, with no identity checked, and the `NetworkPolicy` cannot help: the webhook shares the
+serving port with the API, so its ingress rule cannot tell the two callers apart. What the flag
+trades away is exactly the oracle above. Prefer the kubeconfig.
 
 The server registers the `ValidatingWebhookConfiguration` itself, which is what
 `--manage-projection-webhook` (on by default) does, and needs the RBAC in

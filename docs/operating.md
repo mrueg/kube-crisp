@@ -410,6 +410,7 @@ Published on the apiserver's own `/metrics`, alongside the standard apiserver re
 | `kube_crisp_watch_database_replays_total` | Watchers resumed from the database rather than being asked to relist — what a rolling restart no longer costs |
 | `kube_crisp_watch_missed_events_total` | Changes only a full resync found — a resourceVersion that is not monotonic |
 | `kube_crisp_watch_poll_errors_total` | Polls that failed or were shed — a watch that has quietly stopped advancing |
+| `kube_crisp_watch_resync_failing` | 1 while the last full resync failed and incremental polls are carrying the watchers — deletions are not being noticed until it completes |
 | `kube_crisp_query_rows_unmappable_total` | Rows skipped because they could not be turned into objects |
 | `kube_crisp_cache_reads_total` | Read cache hits and misses, when `cacheTTL` is set |
 | `kube_crisp_cache_entries` | What the cache holds; sitting at its bound means it is evicting entries a request was about to ask for |

@@ -1323,6 +1323,14 @@ default `maxRows` of 5,000 fails every resync, and its watchers stop seeing dele
 collection is also held in memory by the watch cache, once per projection rather than once per
 version.
 
+The same goes for the query's `timeout`. A full resync runs under the statement's own timeout, the
+same one a list does, rather than under the poll interval — so `pollInterval: 1s` over a table that
+takes ten seconds to read is fine as long as the statement is allowed ten seconds. A resync that
+fails, for either reason, does not take the watch down with it: the polls in between stay
+incremental, so creates and updates keep arriving, and the resync is retried at a doubling interval
+capped at `fullResyncInterval`. For as long as that lasts, `kube_crisp_watch_resync_failing` is 1
+and deletions are not being noticed.
+
 An idle watch receives a bookmark every `watch.bookmarkInterval` (1m by default) carrying the
 current resourceVersion, so a client that reconnects resumes from a recent point instead of
 replaying.

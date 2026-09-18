@@ -95,6 +95,25 @@ type watchCache struct {
 	lastFullResync     time.Time
 	highestVersion     string
 
+	// resyncRetryAt is when a full resync that failed may be tried again, and
+	// resyncBackoff is how long the last failure deferred it by.
+	//
+	// A failed resync leaves lastFullResync where it was, because nothing was
+	// resynced. On its own that made the resync due again on the very next
+	// tick, and the next, and every one after it: a full read that could not
+	// complete — a table that has outgrown maxRows, or the time it takes to
+	// read and map it — was retried on every poll interval, each attempt
+	// failing the same way, and no poll in between was ever incremental. The
+	// watchers saw nothing move for as long as the table stayed that size,
+	// with only the error counter climbing to say so.
+	//
+	// These two make a failure defer the next attempt instead, doubling up to
+	// the resync interval, so the ticks in between poll incrementally and the
+	// watchers keep seeing what they can. Both are reset by a resync that
+	// completes.
+	resyncRetryAt time.Time
+	resyncBackoff time.Duration
+
 	// bookmarkInterval bounds how stale a watcher's idea of the current
 	// version becomes while nothing changes. Zero disables bookmarks.
 	bookmarkInterval time.Duration
@@ -517,6 +536,9 @@ func (c *watchCache) Close() {
 		delete(c.watchers, id)
 	}
 	crispmetrics.Watchers.WithLabelValues(c.resource).Set(0)
+	// A projection that is gone is not failing to resync, and a gauge left at
+	// 1 would say so forever.
+	crispmetrics.WatchResyncFailing.WithLabelValues(c.resource).Set(0)
 	c.group.remove(c)
 }
 
@@ -594,11 +616,16 @@ func (c *watchCache) poll(ctx context.Context) error {
 	// Captured before the poll advances it, so the diff below can tell what an
 	// incremental read would have been able to return.
 	watermark := c.highestVersion
+	// The periodic resync is due when the interval has passed since the last
+	// one completed — and not before a failed attempt's deferral has run out,
+	// which is what keeps a resync that cannot complete from taking every tick.
+	resync := c.incremental != nil && c.highestVersion != "" &&
+		c.fullResyncInterval > 0 &&
+		time.Since(c.lastFullResync) >= c.fullResyncInterval &&
+		!time.Now().Before(c.resyncRetryAt)
 	// The first poll is always full: an incremental read has no version to
 	// start from, and the cache has to know what is already there.
-	full := c.incremental == nil ||
-		c.highestVersion == "" ||
-		(c.fullResyncInterval > 0 && time.Since(c.lastFullResync) >= c.fullResyncInterval)
+	full := c.incremental == nil || c.highestVersion == "" || resync
 	since := c.highestVersion
 	timeout := c.interval + DefaultPollInterval
 	c.mu.Unlock()
@@ -609,8 +636,24 @@ func (c *watchCache) poll(ctx context.Context) error {
 	}
 	crispmetrics.WatchPolls.WithLabelValues(c.resource, mode).Inc()
 
-	queryCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// An incremental poll is given the poll interval and a little more: it
+	// reads what changed since the last one, and a read of that which takes
+	// longer than the interval it serves is a poll worth failing rather than
+	// letting the ticks pile up behind it.
+	//
+	// A full read is not held to that. It reads the whole table, and how long
+	// that takes has nothing to do with how often the projection wants to
+	// notice a change — pollInterval: 1s over a table that takes ten seconds
+	// to read and map is a perfectly good configuration, and the resync was
+	// the only path that could not survive it. The statement's own timeout is
+	// what bounds it, the same one the list statement runs under, and the
+	// projection's author sets that with the table in mind.
+	queryCtx := ctx
+	if !full {
+		var cancel context.CancelFunc
+		queryCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
 	var (
 		items []unstructured.Unstructured
@@ -625,6 +668,9 @@ func (c *watchCache) poll(ctx context.Context) error {
 		items, err = c.incremental(queryCtx, since)
 	}
 	if err != nil {
+		if resync {
+			c.resyncFailed(err)
+		}
 		return err
 	}
 
@@ -635,6 +681,9 @@ func (c *watchCache) poll(ctx context.Context) error {
 	var removed []cacheIdentity
 	if c.deleted != nil && (!full || c.lightweight) {
 		if removed, err = c.deleted(queryCtx, since); err != nil {
+			if resync {
+				c.resyncFailed(err)
+			}
 			return err
 		}
 	}
@@ -695,6 +744,39 @@ func (c *watchCache) poll(ctx context.Context) error {
 	return nil
 }
 
+// resyncFailed records that a periodic full resync did not complete, and
+// defers the next attempt.
+//
+// lastFullResync is deliberately left alone: nothing was resynced, and moving
+// it would claim otherwise. What moves is when the next attempt may run, by
+// the poll interval the first time and twice the previous deferral after
+// that, up to the resync interval — so a table that has become too large to
+// read in one go is retried at a rate that stays useful without turning every
+// tick into the same failure. The ticks in between poll incrementally.
+//
+// The failure itself is already counted in the poll-error counter by the poll
+// group, which cannot tell a resync from any other poll. This is the one place
+// that can, so this is where the degraded state is made visible: the gauge
+// stays at 1 until a resync completes, and the log line says when the next
+// one will be tried.
+func (c *watchCache) resyncFailed(err error) {
+	c.mu.Lock()
+	backoff := c.resyncBackoff * 2
+	if backoff < c.interval {
+		backoff = c.interval
+	}
+	if limit := max(c.fullResyncInterval, c.interval); backoff > limit {
+		backoff = limit
+	}
+	c.resyncBackoff = backoff
+	c.resyncRetryAt = time.Now().Add(backoff)
+	c.mu.Unlock()
+
+	crispmetrics.WatchResyncFailing.WithLabelValues(c.resource).Set(1)
+	klog.InfoS("a full resync failed; watchers are served by incremental polls until it is retried",
+		"resource", c.resource, "retryIn", backoff, "err", err)
+}
+
 // applyLocked folds one poll's rows into the cache and broadcasts what changed.
 //
 // full says whether items describe the whole collection or only the rows that
@@ -735,6 +817,11 @@ func (c *watchCache) applyLocked(
 	}
 	if full && c.incremental != nil {
 		c.lastFullResync = time.Now()
+		// A resync that completed is what a deferral was waiting for, so the
+		// next one is on the ordinary schedule again.
+		c.resyncRetryAt = time.Time{}
+		c.resyncBackoff = 0
+		crispmetrics.WatchResyncFailing.WithLabelValues(c.resource).Set(0)
 	}
 
 	var events []watch.Event

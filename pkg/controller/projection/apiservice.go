@@ -209,7 +209,12 @@ func (m *apiServiceManager) reconcile(
 	unregistered := map[schema.GroupVersion]error{}
 	for name, gv := range wanted {
 		if err := m.ensure(ctx, name, gv, owners[gv]); err != nil {
-			unregistered[gv] = fmt.Errorf("ensuring APIService %s: %w", name, err)
+			// A conflict already names the APIService; wrapping it would name
+			// it twice.
+			if !errors.Is(err, errGroupServedElsewhere) {
+				err = fmt.Errorf("ensuring APIService %s: %w", name, err)
+			}
+			unregistered[gv] = err
 			continue
 		}
 		if err := m.routable(ctx, name); err != nil {
@@ -231,6 +236,55 @@ func (m *apiServiceManager) reconcile(
 // make every newly created projection flap.
 var errRegistrationPending = errors.New("registration pending")
 
+// errGroupServedElsewhere marks a group version that cannot be registered
+// because an APIService for it already exists and sends requests somewhere
+// other than here.
+//
+// It is not pending and it is not the aggregator's verdict: that APIService is
+// usually Available, because whatever it routes to is answering. The common
+// case is a CustomResourceDefinition in the same group, whose APIService the
+// kube-apiserver manages itself and which is available for as long as the
+// kube-apiserver is. Reading that condition as this projection's would report
+// a healthy registration for an API no request ever reaches.
+var errGroupServedElsewhere = errors.New("the group version is already served elsewhere")
+
+// routesHere reports whether an existing APIService sends the group version to
+// this server.
+//
+// One this controller wrote does by construction. One somebody else wrote
+// against the same Service does too: that is what examples/apiservice.yaml
+// produces, and a registration made by hand before management was turned on
+// is still a registration. Anything else routes the group version away from
+// here, whatever its Available condition says.
+func (m *apiServiceManager) routesHere(existing *unstructured.Unstructured) bool {
+	if existing.GetLabels()[managedByLabel] == managedByValue {
+		return true
+	}
+	name, _, _ := unstructured.NestedString(existing.Object, "spec", "service", "name")
+	namespace, _, _ := unstructured.NestedString(existing.Object, "spec", "service", "namespace")
+	return name != "" && name == m.options.ServiceName && namespace == m.options.ServiceNamespace
+}
+
+// servedElsewhere describes an APIService for a wanted group version that this
+// server neither manages nor is routed by, and says what to do about it.
+func servedElsewhere(name string, existing *unstructured.Unstructured) error {
+	target := "the kube-apiserver itself, which is what a CustomResourceDefinition in the group looks like"
+	if service, _, _ := unstructured.NestedString(existing.Object, "spec", "service", "name"); service != "" {
+		namespace, _, _ := unstructured.NestedString(existing.Object, "spec", "service", "namespace")
+		target = fmt.Sprintf("Service %s/%s", namespace, service)
+	}
+	owner := "is not managed by kube-crisp"
+	if by := existing.GetLabels()[managedByLabel]; by != "" {
+		owner = fmt.Sprintf("is managed by %q rather than by kube-crisp", by)
+	}
+	return fmt.Errorf(
+		"%w: APIService %s %s and routes the group version to %s, so no request for the projection "+
+			"arrives here. Give the projection another group, or remove that APIService (and the "+
+			"CustomResourceDefinition behind it, if that is what serves the group) so that kube-crisp "+
+			"can register it",
+		errGroupServedElsewhere, name, owner, target)
+}
+
 // routable reports whether the aggregation layer is actually sending requests
 // for this group version here.
 //
@@ -246,6 +300,12 @@ func (m *apiServiceManager) routable(ctx context.Context, name string) error {
 			return fmt.Errorf("APIService %s does not exist", name)
 		}
 		return fmt.Errorf("reading APIService %s: %w", name, err)
+	}
+
+	// Available says that whatever the APIService points at is answering. That
+	// is only this server's registration if the APIService points here.
+	if !m.routesHere(existing) {
+		return servedElsewhere(name, existing)
 	}
 
 	conditions, found, err := unstructured.NestedSlice(existing.Object, "status", "conditions")
@@ -308,8 +368,14 @@ func (m *apiServiceManager) ensure(ctx context.Context, name string, gv schema.G
 	}
 
 	// An APIService someone else manages is never adopted: taking it over could
-	// redirect an unrelated API to this server.
+	// redirect an unrelated API to this server. Left alone is not the same as
+	// registered, though. Unless it happens to route here anyway, the group
+	// version belongs to whatever it does route to, and the projection has to
+	// say so rather than report the other API's health as its own.
 	if existing.GetLabels()[managedByLabel] != managedByValue {
+		if !m.routesHere(existing) {
+			return servedElsewhere(name, existing)
+		}
 		klog.V(2).InfoS("leaving an APIService alone because it is not managed by kube-crisp",
 			"apiService", name)
 		return nil

@@ -27,6 +27,10 @@ func claiming(group, plural string) crispv1alpha1.CustomResourceProjection {
 //
 // Whoever can write a projection is not necessarily whoever can grant
 // cluster-admin. This is the check that keeps those two apart.
+//
+// kube-crisp's own group is on the list for the same reason: a role for
+// customresourceprojections.crisp.kubecrisp.io is a grant on the objects that
+// decide what every other generated role grants.
 func TestARoleIsNeverGeneratedForAGroupKubernetesOwns(t *testing.T) {
 	for _, group := range []string{
 		"rbac.authorization.k8s.io",
@@ -42,10 +46,11 @@ func TestARoleIsNeverGeneratedForAGroupKubernetesOwns(t *testing.T) {
 		"k8s.io",
 		"kubernetes.io",
 		"anything.kubernetes.io",
+		crispv1alpha1.GroupName,
 	} {
 		t.Run(group, func(t *testing.T) {
 			_, err := rbac.ClusterRoles(
-				[]crispv1alpha1.CustomResourceProjection{claiming(group, "clusterroles")},
+				[]crispv1alpha1.CustomResourceProjection{claiming(group, "customresourceprojections")},
 				rbac.Options{})
 			if err == nil {
 				t.Fatalf("a role was generated granting %s", group)

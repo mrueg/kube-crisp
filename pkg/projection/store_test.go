@@ -243,6 +243,14 @@ func TestValidateRejects(t *testing.T) {
 		{"a built-in group Kubernetes owns", func(p *crispv1alpha1.CustomResourceProjection) {
 			p.Spec.Resource.Group = "apps"
 		}, "which Kubernetes owns"},
+		// The group that holds projections is served by the kube-apiserver
+		// from this server's own CRD. A projection there would register a
+		// version of it here, and a role for it would grant access to
+		// projections themselves.
+		{"the server's own group", func(p *crispv1alpha1.CustomResourceProjection) {
+			p.Spec.Resource.Group = crispv1alpha1.GroupName
+			p.Spec.Resource.Plural = "customresourceprojections"
+		}, "kube-crisp's own group"},
 		{"unknown scope", func(p *crispv1alpha1.CustomResourceProjection) {
 			p.Spec.Resource.Scope = "Galactic"
 		}, "Namespaced or Cluster"},

@@ -65,6 +65,11 @@ cluster happens to have installed, so `-f` on a directory of manifests gives the
 live cluster does. A group that merely ends in somebody else's domain — `k8s.io.example.com` — is
 theirs, not Kubernetes', and is served as usual.
 
+kube-crisp's own group, `crisp.kubecrisp.io`, is refused for the same reason. A role for
+`customresourceprojections` there is a grant on the objects that decide what every other generated
+role grants, and a projection in that group would register a version of it against a server that
+does not serve it.
+
 ### Checking who can reach what
 
 ```console
@@ -367,7 +372,11 @@ for the projected resource never arrives here at all. `Registered` false with
 reason `NotRouted` carries the aggregator's own message — a Service with no
 endpoints, a CA bundle that no longer matches, a certificate that does not name
 the Service — and takes `Ready` with it, because nothing can reach the
-projection. `Registered` `Unknown` with reason `Pending` means the registration
+projection. `Registered` false with reason `GroupAlreadyServed` means the
+`APIService` for the group version exists and is somebody else's — a
+CustomResourceDefinition in the same group is the usual case — so requests go
+there rather than here, whatever that `APIService`'s own `Available` says; the
+message names it. `Registered` `Unknown` with reason `Pending` means the registration
 exists and nothing has dialled it yet, which is the ordinary state for the first
 second of a projection's life and the permanent state in a cluster with no
 aggregation layer; `Ready` stands on its own in that case.
@@ -563,9 +572,9 @@ shows its query breakdown in the log without a collector deployed at all.
 ## Events
 
 A projection records an Event when its state changes: `Serving`, `CompilationFailed`,
-`ServingPreviousConfiguration`, `NotRouted`. Conditions say what the state is now, which is what a
-controller reconciling against it needs; an Event says that it changed and when, which is what
-`kubectl describe` shows and what anything watching for failures reacts to.
+`ServingPreviousConfiguration`, `NotRouted`, `GroupAlreadyServed`. Conditions say what the state
+is now, which is what a controller reconciling against it needs; an Event says that it changed and
+when, which is what `kubectl describe` shows and what anything watching for failures reacts to.
 
 ```console
 $ kubectl describe crp orders | tail -4

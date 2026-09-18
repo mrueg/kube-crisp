@@ -3,6 +3,8 @@ package projection
 import (
 	"fmt"
 	"strings"
+
+	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
 )
 
 // The API groups a projection may not claim.
@@ -49,6 +51,19 @@ var reservedSuffixes = []string{"k8s.io", "kubernetes.io"}
 // cannot be created, and where roles are generated, because that path also runs
 // over files the server never saw.
 func CheckAPIGroup(projection, group string) error {
+	// The server's own group is served by the kube-apiserver, from the
+	// CustomResourceDefinition that holds projections. A projection there
+	// would register an APIService routing a version of that group here, and
+	// the role generated for it would grant access to projections themselves,
+	// which is a grant on the thing that decides what everything else grants.
+	if group == crispv1alpha1.GroupName {
+		return fmt.Errorf(
+			"%s: spec.resource.group is %q, which is kube-crisp's own group; a projection cannot live "+
+				"in the group that holds projections, and a generated role for it would grant access to "+
+				"projections themselves",
+			projection, group)
+	}
+
 	if reservedGroups[group] {
 		return fmt.Errorf(
 			"%s: spec.resource.group is %q, which Kubernetes owns; a generated role for it would grant "+

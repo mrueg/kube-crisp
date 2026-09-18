@@ -1059,6 +1059,9 @@ func projectionEvent(
 	}
 
 	if err := registrationError(p, unregistered); err != nil && !errors.Is(err, errRegistrationPending) {
+		if errors.Is(err, errGroupServedElsewhere) {
+			return corev1.EventTypeWarning, "GroupAlreadyServed", err.Error()
+		}
 		return corev1.EventTypeWarning, "NotRouted", err.Error()
 	}
 
@@ -1229,6 +1232,17 @@ func (c *Controller) updateStatus(
 			// Registered condition is where the wait is visible.
 			setUnknown(crispv1alpha1.ConditionRegistered, "Pending", unregistered.Error())
 			set(crispv1alpha1.ConditionReady, true, "Serving", fmt.Sprintf("Serving %s.", servedPaths[0]))
+
+		case errors.Is(unregistered, errGroupServedElsewhere):
+			// Compiled and installed, but the aggregation layer sends the
+			// group version somewhere else -- most often to the kube-apiserver
+			// itself, because a CustomResourceDefinition already owns the
+			// group. That APIService is Available, and this used to read its
+			// condition as the projection's: Registered=True and Ready=True
+			// for an API no request could reach.
+			set(crispv1alpha1.ConditionRegistered, false, "GroupAlreadyServed", unregistered.Error())
+			set(crispv1alpha1.ConditionReady, false, "NotRegistered",
+				fmt.Sprintf("Compiled, but not reachable through the aggregation layer: %s", unregistered.Error()))
 
 		default:
 			// Compiled and installed, but nothing can reach it. Ready used to

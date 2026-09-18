@@ -1205,6 +1205,15 @@ drifts, and deletes it when the last projection in that group goes away. Objects
 are never adopted — it only touches APIServices labelled `app.kubernetes.io/managed-by: kube-crisp` —
 so an existing registration is left exactly as it is.
 
+Left alone is not the same as registered. An existing `APIService` for a projected group version
+that does not point at kube-crisp's Service — a CustomResourceDefinition in that group, whose
+`APIService` the kube-apiserver manages itself, or another aggregated server — routes every request
+for the projection somewhere else, and its `Available` condition describes that other API rather
+than this one. The projection reports `Registered=False` with reason `GroupAlreadyServed`, naming
+the `APIService`, and is not `Ready`. Give the projection another group, or remove that `APIService`
+(and the CRD behind it, if that is what serves the group). One written by hand against kube-crisp's
+own Service, as `examples/apiservice.yaml` is, routes here and counts as registered.
+
 Point it at the right Service with `--apiservice-service-name`, `--apiservice-service-namespace`,
 and `--apiservice-service-port`, supply `--apiservice-ca-bundle-file` if you have a real serving
 certificate, or turn the whole thing off with `--manage-apiservices=false` — in which case

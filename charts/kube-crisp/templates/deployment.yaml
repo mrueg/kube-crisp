@@ -58,6 +58,13 @@ spec:
             - --max-open-conns-per-datasource={{ .Values.crisp.maxOpenConnsPerDataSource }}
             - --enable-leader-election={{ .Values.crisp.leaderElection }}
             - --enable-admission={{ .Values.crisp.admission }}
+            {{- if .Values.crisp.admission }}
+            {{- with include "kube-crisp.disabledAdmissionPlugins" . }}
+            # A policy plugin whose API this cluster does not serve would
+            # otherwise refuse every projected write; see _helpers.tpl.
+            - --disable-admission-plugins={{ . }}
+            {{- end }}
+            {{- end }}
             - --enable-priority-and-fairness={{ .Values.crisp.priorityAndFairness }}
             - --profiling={{ .Values.crisp.profiling }}
             {{- if .Values.crisp.tracing.enabled }}

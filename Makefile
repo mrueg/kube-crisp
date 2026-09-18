@@ -281,6 +281,9 @@ helm-lint:
 	  "" \
 	  "--set serviceMonitor.enabled=true --set networkPolicy.enabled=true" \
 	  "--set crisp.admission=true --set crisp.priorityAndFairness=true" \
+	  "--set crisp.admission=true --kube-version 1.29.0" \
+	  "--set crisp.admission=true --kube-version 1.35.0" \
+	  "--set crisp.admission=true --kube-version 1.36.0" \
 	  "--set replicaCount=1 --set podDisruptionBudget.enabled=false --set crisp.leaderElection=false" \
 	  "--set crisp.caBundle=placeholder" \
 	  "--set crisp.tracing.enabled=true --set crisp.tracing.endpoint=otel:4317" \

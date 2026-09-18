@@ -33,6 +33,17 @@ request metrics.
 scrape them with the Prometheus Operator.
 {{- end }}
 
+{{- if .Values.crisp.admission }}
+{{- with include "kube-crisp.disabledAdmissionPlugins" . }}
+
+Admission is on, but Kubernetes {{ $.Capabilities.KubeVersion.Version }} does not serve the v1 API
+behind {{ . }}, so --disable-admission-plugins turns it off rather than
+leaving it refusing every projected write while it waits for a watch that can
+never sync. Policies of that kind do not apply to projected writes on this
+cluster; the rest of the chain does. If this was a helm template run outside
+the cluster, pass --kube-version to render for the real one.
+{{- end }}
+{{- end }}
 {{- if not .Values.networkPolicy.enabled }}
 
 This server connects to whatever database a projection names, using credentials

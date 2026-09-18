@@ -119,6 +119,14 @@ func (c *Compiler) Prepare(ctx context.Context, p *crispv1alpha1.CustomResourceP
 	}
 	prepared.Borrowed = borrowed
 
+	// Validate checked the mapped paths against the schemas the projection
+	// declares; the borrowed ones are only known now. Here rather than in
+	// CompileWith so that Check, which stops at Prepare, refuses the same
+	// projection the compile would.
+	if err := projection.CheckMappedPaths(p, borrowed); err != nil {
+		return nil, err
+	}
+
 	spec, err := json.Marshal(p.Spec)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprinting projection %s: %w", p.Name, err)

@@ -185,6 +185,44 @@ func TestCompileBorrowsASchema(t *testing.T) {
 	}
 }
 
+// TestCheckRefusesAMappedPathTheBorrowedSchemaLacks: a borrowed schema is only
+// known once it has been resolved, which is after Validate. The check runs
+// again with it in hand, and on the path the admission webhook takes, so a
+// projection that would erase a column on every write is refused at apply
+// rather than reported Ready.
+func TestCheckRefusesAMappedPathTheBorrowedSchemaLacks(t *testing.T) {
+	compiler := newTestCompiler(t)
+	compiler.Schemas = borrowedSchema{schema: &apiextensionsv1.JSONSchemaProps{
+		Type:       "object",
+		Properties: map[string]apiextensionsv1.JSONSchemaProps{"spec": {Type: "object"}},
+	}}
+
+	p := testProjection()
+	p.Spec.Resource.Schema = nil
+	p.Spec.Resource.SchemaFrom = &crispv1alpha1.CRDReference{Name: "orders.acme.example.com"}
+	p.Spec.Mapping.Fields = []crispv1alpha1.FieldMapping{{Column: "customer", Path: "spec.customer"}}
+
+	for name, run := range map[string]func(context.Context, *crispv1alpha1.CustomResourceProjection) error{
+		"Check": compiler.Check,
+		"Compile": func(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) error {
+			_, err := compiler.Compile(ctx, p)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := run(context.Background(), p)
+			if err == nil {
+				t.Fatal("a mapped path the borrowed schema does not describe was accepted")
+			}
+			for _, want := range []string{"version v1alpha1", "spec.customer", `"customer"`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %s", err, want)
+				}
+			}
+		})
+	}
+}
+
 // TestCompileWithoutASchemaResolver: schemaFrom without a cluster connection is
 // refused rather than quietly serving an unvalidated resource.
 func TestCompileWithoutASchemaResolver(t *testing.T) {
@@ -296,10 +334,18 @@ func ptr[T any](v T) *T { return &v }
 
 var _ projection.SchemaResolver = borrowedSchema{}
 
+// openSchema keeps whatever a write carries, for tests about columns rather
+// than shapes: a mapped path has to be one the schema keeps on a write, and a
+// bare `type: object` keeps none.
+func openSchema() *apiextensionsv1.JSONSchemaProps {
+	return &apiextensionsv1.JSONSchemaProps{Type: "object", XPreserveUnknownFields: ptr(true)}
+}
+
 // multiVersionProjection serves one kind at two versions, mapping the same
 // columns to different places — the reason to add a version at all.
 func multiVersionProjection() *crispv1alpha1.CustomResourceProjection {
 	p := testProjection()
+	p.Spec.Resource.Schema = openSchema()
 	p.Spec.Mapping = crispv1alpha1.Mapping{
 		Name:      "id",
 		Namespace: "tenant",
@@ -310,7 +356,7 @@ func multiVersionProjection() *crispv1alpha1.CustomResourceProjection {
 	}
 	p.Spec.Resource.Versions = []crispv1alpha1.ProjectedVersion{{
 		Name:   "v1beta1",
-		Schema: &apiextensionsv1.JSONSchemaProps{Type: "object"},
+		Schema: openSchema(),
 		Mapping: &crispv1alpha1.Mapping{
 			Name:      "id",
 			Namespace: "tenant",

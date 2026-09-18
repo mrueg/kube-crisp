@@ -195,6 +195,42 @@ func TestRouterRejectsDuplicateResources(t *testing.T) {
 	}
 }
 
+// A check says what a rebuild would say, and serves nothing while saying it.
+//
+// The resource here is what a projection with plural "orders/status" compiles
+// to: a subresource to the endpoint installer, with no parent registered, so
+// the whole group version is refused. Rebuild has no way to say which resource
+// it refused; Check is asked about one projection's resources at a time, which
+// is how the controller finds out.
+func TestRouterCheckRefusesWhatRebuildRefuses(t *testing.T) {
+	router, _ := newTestRouter(t)
+
+	if err := router.Check([]Resource{testResource()}); err != nil {
+		t.Fatalf("Check() refused a resource Rebuild installs: %v", err)
+	}
+	if got := router.ServedPaths(); len(got) != 0 {
+		t.Fatalf("Check() installed %v", got)
+	}
+
+	subresource := testResource()
+	subresource.Plural = "orders/status"
+
+	checkErr := router.Check([]Resource{subresource})
+	if checkErr == nil {
+		t.Fatal("Check() accepted a plural the endpoint installer refuses")
+	}
+	rebuildErr := router.Rebuild([]Resource{subresource})
+	if rebuildErr == nil {
+		t.Fatal("Rebuild() accepted a plural the endpoint installer refuses")
+	}
+	if checkErr.Error() != rebuildErr.Error() {
+		t.Errorf("Check() said %q; Rebuild() said %q", checkErr, rebuildErr)
+	}
+	if got := router.ServedPaths(); len(got) != 0 {
+		t.Errorf("a refused check or rebuild installed %v", got)
+	}
+}
+
 func TestRouterKeepsServingWhenRebuildFails(t *testing.T) {
 	router, handler := newTestRouter(t)
 	if err := router.Rebuild([]Resource{testResource()}); err != nil {

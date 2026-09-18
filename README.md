@@ -543,6 +543,8 @@ attaches build provenance.
   changing in the cluster is: the directory and everything under it is watched, and re-read on every
   sync. A file that does
   not parse keeps the last good set rather than taking every file-backed projection out of service.
+  A file that parses but will not validate fails that one projection, by name, and the files beside
+  it are served.
   Backed by a ConfigMap, the wait is the kubelet's rather than this server's — around a minute in the
   e2e cluster, with no restart.
 - **A watched projection holds its whole collection in memory** and needs `maxRows` set above the

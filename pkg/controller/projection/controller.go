@@ -637,6 +637,25 @@ func (c *Controller) sync(ctx context.Context) error {
 			failed(name, err)
 			continue
 		}
+
+		// Installed on its own before it is installed with everything else.
+		//
+		// The router takes the surface whole and refuses it whole, and cannot
+		// say which projection it refused. A resource the endpoint installer
+		// would not have -- a plural naming a subresource, say -- therefore
+		// used to fail the rebuild below, and with it every projection: sync
+		// returned before c.compiled was replaced and before hasSynced was
+		// set, so the server served nothing and never became ready. Asked
+		// here, per projection, the same mistake fails this projection alone,
+		// exactly as one that will not compile: its storage is released, it is
+		// named by Degraded and in its conditions, and whatever it compiled to
+		// last time stays serving.
+		if err := c.router.Check(compiled); err != nil {
+			apidynamic.DestroyAll(compiled)
+			failed(name, err)
+			continue
+		}
+
 		for _, res := range compiled {
 			if !res.DataSourceReady && res.DataSourceError != nil {
 				unreachable[name] = res.DataSourceError
@@ -827,6 +846,12 @@ func (c *Controller) sync(ctx context.Context) error {
 // half-written file takes every file-backed projection out of service, which is
 // a worse answer to a mistake than carrying on with the last good one — and the
 // same reasoning that keeps a projection serving when it fails to recompile.
+//
+// A projection that parses but will not validate is read all the same. It is
+// failed by name when it is prepared, the way a cluster object that will not
+// validate is, so one bad file neither hides the good files beside it nor
+// holds back an edit to them; refusing the whole directory for it did both,
+// and on a cold start the last good set was nothing at all.
 func (c *Controller) staticProjections() []crispv1alpha1.CustomResourceProjection {
 	if c.staticDir == "" {
 		return c.currentStatic()
@@ -834,7 +859,7 @@ func (c *Controller) staticProjections() []crispv1alpha1.CustomResourceProjectio
 
 	// Read outside the lock: this is a directory walk and a parse, and the
 	// handler that takes the lock is on the informer's goroutine.
-	loaded, err := projection.LoadDir(c.staticDir)
+	loaded, err := projection.LoadPath(c.staticDir)
 	if err != nil {
 		current := c.currentStatic()
 		utilruntime.HandleError(fmt.Errorf(

@@ -424,13 +424,16 @@ func (c *watchCache) Watch(ctx context.Context, namespace string, selector label
 		initial = append(initial, watch.Event{Type: watch.Added, Object: item.DeepCopy()})
 	}
 
-	// Whatever the client missed while it was away, in the order it happened.
+	// Whatever the client missed while it was away, in the order it happened —
+	// and filtered the way the live stream is, so a row that left this
+	// watcher's selector while it was away is a deletion here too.
 	for _, recorded := range missed {
-		if !w.matches(recorded.event.Object) {
+		event, wanted := w.transition(recorded.event)
+		if !wanted {
 			continue
 		}
 		initial = append(initial, watch.Event{
-			Type: recorded.event.Type, Object: recorded.event.Object.DeepCopyObject(),
+			Type: event.Type, Object: event.Object.DeepCopyObject(),
 		})
 	}
 
@@ -705,7 +708,7 @@ func (c *watchCache) applyLocked(
 	full bool,
 	watermark string,
 	removed []cacheIdentity,
-) ([]watch.Event, []*cacheWatcher) {
+) ([]cacheEvent, []*cacheWatcher) {
 	// The high-water mark is what both incremental polling and the reported
 	// resourceVersion are built on, so it is tracked whichever query ran. The
 	// incremental query returns rows in version order, but a list query need
@@ -737,7 +740,7 @@ func (c *watchCache) applyLocked(
 		c.lastFullResync = time.Now()
 	}
 
-	var events []watch.Event
+	var events []cacheEvent
 	next := c.items
 
 	if full {
@@ -762,9 +765,9 @@ func (c *watchCache) applyLocked(
 			previous, existed := c.items[key]
 			switch {
 			case !existed:
-				events = append(events, watch.Event{Type: watch.Added, Object: read[key]})
+				events = append(events, added(read[key]))
 			case changed(previous, item):
-				events = append(events, watch.Event{Type: watch.Modified, Object: read[key]})
+				events = append(events, c.modified(read[key], previous))
 			default:
 				continue
 			}
@@ -796,7 +799,7 @@ func (c *watchCache) applyLocked(
 				if row, ok := described[key]; ok {
 					item = row
 				}
-				events = append(events, watch.Event{Type: watch.Deleted, Object: item})
+				events = append(events, deleted(item))
 			}
 		}
 	} else {
@@ -807,9 +810,9 @@ func (c *watchCache) applyLocked(
 			previous, existed := next[key]
 			switch {
 			case !existed:
-				events = append(events, watch.Event{Type: watch.Added, Object: &item})
+				events = append(events, added(&item))
 			case changed(previous, &item):
-				events = append(events, watch.Event{Type: watch.Modified, Object: &item})
+				events = append(events, c.modified(&item, previous))
 			default:
 				continue
 			}
@@ -851,11 +854,11 @@ func (c *watchCache) applyLocked(
 				// removed between two polls, which a cache-only path drops
 				// silently.
 				if identity.object != nil {
-					events = append(events, watch.Event{Type: watch.Deleted, Object: identity.object})
+					events = append(events, deleted(identity.object))
 				}
 				continue
 			}
-			events = append(events, watch.Event{Type: watch.Deleted, Object: previous})
+			events = append(events, deleted(previous))
 			delete(next, key)
 		}
 	}
@@ -884,7 +887,9 @@ func (c *watchCache) applyLocked(
 	// reached after the first one.
 	//
 	// Only for objects with no version of their own, so a projection that maps
-	// one copies nothing.
+	// one copies nothing. The previous object is left as it is: it was stamped
+	// when it was the event, and from here it is only ever matched against a
+	// selector, never sent.
 	for i, event := range events {
 		obj, ok := event.Object.(*unstructured.Unstructured)
 		if !ok || obj.GetResourceVersion() != "" {
@@ -928,7 +933,7 @@ func (c *watchCache) applyLocked(
 // it belongs to. Over-invalidating costs a query; under-invalidating serves an
 // entry this poll has already proven wrong, which is the bug and not a cheaper
 // version of it.
-func changedNamespaces(events []watch.Event) []string {
+func changedNamespaces(events []cacheEvent) []string {
 	if len(events) == 0 {
 		return nil
 	}
@@ -1002,15 +1007,16 @@ func (c *watchCache) emitBookmarksLocked() {
 // another's object change under it, with nothing raised anywhere. That is not a
 // trade worth 25ms, so the copy stays until the whole path has been established
 // rather than sampled.
-func (c *watchCache) broadcast(events []watch.Event, targets []*cacheWatcher) {
+func (c *watchCache) broadcast(events []cacheEvent, targets []*cacheWatcher) {
 	var behind []*cacheWatcher
 
 	for _, event := range events {
 		for _, w := range targets {
-			if !w.matches(event.Object) {
+			sent, wanted := w.transition(event)
+			if !wanted {
 				continue
 			}
-			if !w.enqueue(watch.Event{Type: event.Type, Object: event.Object.DeepCopyObject()}) {
+			if !w.enqueue(watch.Event{Type: sent.Type, Object: sent.Object.DeepCopyObject()}) {
 				// The watcher is too far behind; drop it so the client relists.
 				klog.V(2).InfoS("disconnecting a watcher that fell behind")
 				w.terminate()
@@ -1123,17 +1129,61 @@ func movesForward(watermark, version string) bool {
 	return ok && order > 0
 }
 
+// cacheEvent is one change as the cache saw it: the event a client is sent,
+// and for a modification the object as the cache held it before.
+//
+// The previous object is what a watcher with a selector needs. Whether a
+// change is a modification to that watcher, or the row arriving in its
+// selector, or leaving it, depends on both sides — and filtered on the new
+// object alone, a row that left was never mentioned at all.
+type cacheEvent struct {
+	watch.Event
+
+	// previous is the object before this change, for a Modified event. Nil
+	// when nothing is known about it, which is a change replayed out of the
+	// database: the table holds the row as it is now and nothing of what it
+	// was.
+	previous *unstructured.Unstructured
+
+	// previousTrimmed says previous is a lightweight cache's entry, which
+	// carries the namespace and the labels and no mapped field.
+	previousTrimmed bool
+}
+
+// added is the event for a row the cache did not hold.
+func added(obj *unstructured.Unstructured) cacheEvent {
+	return cacheEvent{Event: watch.Event{Type: watch.Added, Object: obj}}
+}
+
+// deleted is the event for a row that is gone, carrying it as it last was.
+func deleted(obj *unstructured.Unstructured) cacheEvent {
+	return cacheEvent{Event: watch.Event{Type: watch.Deleted, Object: obj}}
+}
+
+// modified is the event for a row that changed, keeping what it changed from.
+func (c *watchCache) modified(obj, previous *unstructured.Unstructured) cacheEvent {
+	return cacheEvent{
+		Event:           watch.Event{Type: watch.Modified, Object: obj},
+		previous:        previous,
+		previousTrimmed: c.trimmed(previous),
+	}
+}
+
 // recordedEvent is one change, the version the cache was at before it, and the
 // version it reached by applying it. Both ends are needed to answer whether a
 // client sitting at some version can still be caught up.
+//
+// The change is kept whole, previous object included, because a replay is
+// filtered per watcher exactly as the live stream was — and a client resuming
+// after a row left its selector has to be told so just the same.
 type recordedEvent struct {
 	from    string
 	version string
-	event   watch.Event
+	event   cacheEvent
 }
 
 // record appends to the history ring, dropping the oldest when it is full.
-func (c *watchCache) record(from, version string, events []watch.Event) {
+func (c *watchCache) record(from, version string, events []cacheEvent) {
 	if c.historySize <= 0 {
 		return
 	}
@@ -1514,22 +1564,92 @@ func (w *cacheWatcher) countPendingLocked(delta int) {
 	}
 }
 
-// matches reports whether an event is relevant to this watcher.
+// matches reports whether an object is relevant to this watcher.
 func (w *cacheWatcher) matches(object any) bool {
 	obj, ok := object.(*unstructured.Unstructured)
 	if !ok {
 		return false
 	}
+	return w.matchesMetadata(obj) && w.matchesFields(obj)
+}
+
+// matchesMetadata is the namespace and the label selector: the half of a match
+// that a trimmed entry can still answer.
+func (w *cacheWatcher) matchesMetadata(obj *unstructured.Unstructured) bool {
 	if w.namespace != "" && obj.GetNamespace() != w.namespace {
 		return false
 	}
-	if w.selector != nil && !w.selector.Empty() && !w.selector.Matches(labels.Set(obj.GetLabels())) {
-		return false
+	return w.selector == nil || w.selector.Empty() || w.selector.Matches(labels.Set(obj.GetLabels()))
+}
+
+// matchesFields is the field selector, which only the projection can apply
+// since which fields are selectable is a property of the projection.
+func (w *cacheWatcher) matchesFields(obj *unstructured.Unstructured) bool {
+	return w.matchFields == nil || w.matchFields(obj, w.fields)
+}
+
+// transition is the event this watcher is sent for a change, and whether it is
+// sent one at all.
+//
+// An addition and a deletion are filtered on the object they carry. A
+// modification is filtered on both sides, the way the apiserver's own cacher
+// does it: a row that matched before and still does is a modification, one
+// that only matches now has arrived in this watcher's selector and is an
+// addition, and one that only matched before has left it and is a deletion —
+// carrying the object as it was, which is what a deletion is defined to carry
+// and the last thing this watcher was told about it.
+//
+// Filtered on the new object alone, the row that left was never mentioned. The
+// watcher kept it in its store for as long as it stayed connected, and nothing
+// on either side could have said so.
+func (w *cacheWatcher) transition(event cacheEvent) (watch.Event, bool) {
+	if event.Type != watch.Modified {
+		return event.Event, w.matches(event.Object)
 	}
-	if w.matchFields == nil {
-		return true
+	obj, ok := event.Object.(*unstructured.Unstructured)
+	if !ok {
+		return watch.Event{}, false
 	}
-	return w.matchFields(obj, w.fields)
+
+	now := w.matches(obj)
+	before, last := w.matchedBefore(event, obj)
+	switch {
+	case before && now:
+		return event.Event, true
+	case now:
+		return watch.Event{Type: watch.Added, Object: obj}, true
+	case before:
+		return watch.Event{Type: watch.Deleted, Object: last}, true
+	default:
+		return watch.Event{}, false
+	}
+}
+
+// matchedBefore reports whether the object a modification replaced was
+// relevant to this watcher, and which object a deletion would carry.
+//
+// Nothing known about it means it may have been. Answering no would leave a
+// resumed client holding a row that left its selector while it was away,
+// silently, which is the bug this exists to fix; answering yes hands a client
+// that never held the row a deletion of it, which an informer discards and a
+// watch is allowed to do. That is the direction to be wrong in, and the
+// deletion carries the row as it is now because that is all there is.
+//
+// A trimmed entry carries the namespace and the labels and no mapped field, so
+// the field half is answered from the row in hand. A row that leaves a field
+// selector on a lightweight cache is therefore not reported — the same limit a
+// trimmed entry puts on a deletion, where the tombstone's own row answers it
+// and here nothing can. A row that leaves a label selector is, which is one
+// more reason the trimmed entry keeps its labels.
+func (w *cacheWatcher) matchedBefore(event cacheEvent, obj *unstructured.Unstructured) (bool, *unstructured.Unstructured) {
+	switch {
+	case event.previous == nil:
+		return true, obj
+	case event.previousTrimmed:
+		return w.matchesMetadata(event.previous) && w.matchesFields(obj), event.previous
+	default:
+		return w.matches(event.previous), event.previous
+	}
 }
 
 // Watch streams changes to a projected resource.
@@ -1669,12 +1789,17 @@ func (c *watchCache) replayFromDatabase(
 	// way ends up in the same state either way; a client reading raw events
 	// sees a modification for something it did not know about, which is the
 	// honest description of what the database told us.
+	//
+	// With no previous object, because the database holds the row as it is
+	// now and nothing of what it was. A watcher with a selector is then told a
+	// deletion for a changed row that no longer matches — see transition for
+	// why that is the direction to be wrong in.
 	for i := range changed {
 		item := changed[i]
 		events = append(events, recordedEvent{
 			from:    since,
 			version: item.GetResourceVersion(),
-			event:   watch.Event{Type: watch.Modified, Object: &item},
+			event:   cacheEvent{Event: watch.Event{Type: watch.Modified, Object: &item}},
 		})
 	}
 
@@ -1685,7 +1810,7 @@ func (c *watchCache) replayFromDatabase(
 		events = append(events, recordedEvent{
 			from:    since,
 			version: since,
-			event:   watch.Event{Type: watch.Deleted, Object: c.tombstone(identity, gvk)},
+			event:   deleted(c.tombstone(identity, gvk)),
 		})
 	}
 
@@ -1790,4 +1915,9 @@ func (c *watchCache) retain(item *unstructured.Unstructured) *unstructured.Unstr
 	}
 
 	return trimmed
+}
+
+// trimmed reports whether retain kept an entry trimmed, by the same rule.
+func (c *watchCache) trimmed(entry *unstructured.Unstructured) bool {
+	return c.lightweight && entry.GetResourceVersion() != ""
 }

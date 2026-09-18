@@ -1689,6 +1689,27 @@ func (r *REST) keysetValue(row crispsql.Row, obj *unstructured.Unstructured) (an
 	if raw, ok := value.([]byte); ok {
 		return string(raw), nil
 	}
+
+	// A JSON aggregate hands the key over as its digits, so an id past
+	// fifty-three bits arrives intact — and is bound back as the int64 it is,
+	// so the next page resumes after the row that was actually read. A whole
+	// number past int64 has no exact JSON number and travels as its text, which
+	// the database compares at the column's own width; only a fraction is a
+	// float64.
+	if number, ok := value.(json.Number); ok {
+		if key, err := number.Int64(); err == nil {
+			return key, nil
+		}
+		if !strings.ContainsAny(number.String(), ".eE") {
+			return number.String(), nil
+		}
+		key, err := number.Float64()
+		if err != nil {
+			return nil, fmt.Errorf("keysetColumn %q holds %s, which is not a value a page can resume after",
+				r.keysetColumn, number)
+		}
+		return key, nil
+	}
 	return value, nil
 }
 
@@ -1781,6 +1802,8 @@ func toInt64(value any) (int64, error) {
 		return int64(v), nil
 	case float64:
 		return int64(v), nil
+	case json.Number:
+		return v.Int64()
 	case []byte:
 		return strconv.ParseInt(string(v), 10, 64)
 	case string:

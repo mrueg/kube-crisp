@@ -5,6 +5,7 @@ package projection
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -740,6 +741,27 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 				return nil, fmt.Errorf("value %v is not an integer", v)
 			}
 			return int64(v), nil
+		case json.Number:
+			// A JSON aggregate and a json column are decoded keeping every
+			// number's digits, so this is the value the row holds, and it is
+			// parsed at the width the field promises rather than through a
+			// float64 that keeps fifty-three bits of it. Past int64 there is
+			// no JSON number for it, which is the answer a BIGINT UNSIGNED
+			// gets below, and the remedy is the same. A fraction or an
+			// exponent is a float64 at heart and is read as one.
+			parsed, err := strconv.ParseInt(v.String(), 10, 64)
+			if err == nil {
+				return parsed, nil
+			}
+			if errors.Is(err, strconv.ErrRange) {
+				return nil, fmt.Errorf(
+					"value %s does not fit an integer field; map this column as type: string", v)
+			}
+			fractional, err := v.Float64()
+			if err != nil {
+				return nil, fmt.Errorf("value %s is not an integer", v)
+			}
+			return coerce(fractional, t)
 		case uint64:
 			// MySQL BIGINT UNSIGNED reaches past what an int64 holds, and a
 			// JSON number cannot represent it either. Saying so beats dropping
@@ -783,6 +805,10 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 		switch v := raw.(type) {
 		case float64:
 			return v, nil
+		case json.Number:
+			// The digits a JSON aggregate or json column kept, parsed once at
+			// the width a number field has.
+			return v.Float64()
 		case float32:
 			return float64(v), nil
 		case int64:
@@ -841,6 +867,14 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 					"value %v is not a boolean; map this column as type: number if it is a measurement", v)
 			}
 			return v != 0, nil
+		case json.Number:
+			// The same 0 or 1, from an aggregate decoded keeping its digits.
+			// The float64 case above decides what a number means as a flag.
+			flag, err := v.Float64()
+			if err != nil {
+				return nil, fmt.Errorf("value %s is not a boolean", v)
+			}
+			return coerce(flag, t)
 		case string:
 			return strconv.ParseBool(strings.TrimSpace(v))
 		default:
@@ -867,8 +901,8 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 	case crispv1alpha1.FieldTypeJSON:
 		// The json_agg path hands back values that are already decoded.
 		switch raw.(type) {
-		case map[string]any, []any:
-			return normalizeJSON(raw), nil
+		case map[string]any, []any, json.Number:
+			return normalizeJSON(raw)
 		}
 
 		s, err := toString(raw)
@@ -876,12 +910,13 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 			return nil, err
 		}
 		var decoded any
-		if err := json.Unmarshal([]byte(s), &decoded); err != nil {
+		if err := crispsql.DecodeJSON([]byte(s), &decoded); err != nil {
 			return nil, fmt.Errorf("parsing JSON column: %w", err)
 		}
-		// json.Unmarshal yields float64 for every number; unstructured objects
-		// require int64 for integral values.
-		return normalizeJSON(decoded), nil
+		// Decoded keeping every number's digits, and unstructured objects take
+		// none of those: normalizeJSON is where each becomes the int64 or
+		// float64 the object serves.
+		return normalizeJSON(decoded)
 
 	default:
 		return nil, fmt.Errorf("unknown field type %q", t)
@@ -929,7 +964,15 @@ func parseTimestamp(s string) (time.Time, error) {
 
 // normalizeJSON rewrites decoded JSON so that it only contains types the
 // unstructured converter accepts.
-func normalizeJSON(v any) any {
+//
+// A json.Number is the one thing the decoder produces that the converter does
+// not take — runtime.DeepCopyJSONValue panics on it — so none may survive into
+// an object. An integer an int64 holds becomes an int64, which is the widest
+// exact reading JSON offers, and a client reads back the same digits the row
+// held; everything else is the float64 it would always have been. Before, a
+// float64 was what every number arrived as, and an integer past fifty-three
+// bits had already been rounded by the time anything here saw it.
+func normalizeJSON(v any) (any, error) {
 	switch t := v.(type) {
 	case map[string]any:
 		// Copied rather than normalised in place: the row this came from can be
@@ -937,22 +980,45 @@ func normalizeJSON(v any) any {
 		// must never hold a reference into it.
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			out[k] = normalizeJSON(val)
+			normalized, err := normalizeJSON(val)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = normalized
 		}
-		return out
+		return out, nil
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			out[i] = normalizeJSON(val)
+			normalized, err := normalizeJSON(val)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = normalized
 		}
-		return out
+		return out, nil
+	case json.Number:
+		if integral, err := t.Int64(); err == nil {
+			return integral, nil
+		}
+		fractional, err := t.Float64()
+		if err != nil {
+			// Only a magnitude no float64 holds gets here. json.Unmarshal
+			// refused such a value outright, and the object cannot serve a
+			// number the row does not hold, so this is refused too.
+			return nil, fmt.Errorf("number %s is out of range", t)
+		}
+		return normalizeJSON(fractional)
 	case float64:
-		if t == float64(int64(t)) {
-			return int64(t)
+		// The range check is what keeps the conversion honest at the edges:
+		// int64() of a float64 past its range is whatever the hardware does
+		// with it, and on some of it that rounds back to the same float64.
+		if t == math.Trunc(t) && t >= math.MinInt64 && t < math.MaxInt64 {
+			return int64(t), nil
 		}
-		return t
+		return t, nil
 	default:
-		return v
+		return v, nil
 	}
 }
 
@@ -1179,6 +1245,11 @@ func toString(raw any) (string, error) {
 		return strconv.FormatUint(uint64(v), 10), nil
 	case float64:
 		return strconv.FormatFloat(v, 'f', -1, 64), nil
+	case json.Number:
+		// The digits as the row held them. This is what makes type: string the
+		// exact carrier for an id out of a JSON aggregate, past fifty-three
+		// bits and past int64 alike — and mapping.name reads through here.
+		return v.String(), nil
 	case float32:
 		// Formatted at the precision the value actually has. Widening a float32
 		// to a float64 first and printing that prints the rounding error along

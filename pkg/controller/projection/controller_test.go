@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -313,7 +314,8 @@ func TestSyncKeepsServingWhenOneProjectionIsBroken(t *testing.T) {
 }
 
 // TestAPIServiceOwnedByAnotherControllerIsLeftAlone: adopting an APIService
-// this server did not create could redirect an unrelated API to it.
+// this server did not create could redirect an unrelated API to it. Leaving it
+// alone is not registering, though, and the projection has to say which.
 func TestAPIServiceOwnedByAnotherControllerIsLeftAlone(t *testing.T) {
 	foreign := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apiregistration.k8s.io/v1",
@@ -339,6 +341,12 @@ func TestAPIServiceOwnedByAnotherControllerIsLeftAlone(t *testing.T) {
 	service, _, _ := unstructured.NestedMap(apiService.Object, "spec", "service")
 	if service["name"] != "other" {
 		t.Errorf("the foreign APIService was rewritten to %v", service)
+	}
+
+	registered := conditionOf(t, f, "bins", crispv1alpha1.ConditionRegistered)
+	if registered.Status != metav1.ConditionFalse || registered.Reason != "GroupAlreadyServed" {
+		t.Errorf("Registered = %v (%s), want False (GroupAlreadyServed) for a group routed elsewhere",
+			registered.Status, registered.Reason)
 	}
 }
 
@@ -633,7 +641,8 @@ func TestAPIServiceReconcileReadsThroughTheCache(t *testing.T) {
 
 // TestAPIServiceReconcileLeavesForeignRegistrationsAlone: an APIService this
 // server did not create must survive a cached read the same way it survived an
-// uncached one.
+// uncached one -- and be reported as taking the group version, not as
+// registering it.
 func TestAPIServiceReconcileLeavesForeignRegistrationsAlone(t *testing.T) {
 	foreign := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apiregistration.k8s.io/v1",
@@ -661,8 +670,13 @@ func TestAPIServiceReconcileLeavesForeignRegistrationsAlone(t *testing.T) {
 	)
 
 	resources := []apidynamic.Resource{{Group: "store.example.com", Version: "v1alpha1", Plural: "orders"}}
-	if _, err := manager.reconcile(context.Background(), resources, nil); err != nil {
+	unregistered, err := manager.reconcile(context.Background(), resources, nil)
+	if err != nil {
 		t.Fatalf("reconcile() returned error: %v", err)
+	}
+	gv := schema.GroupVersion{Group: "store.example.com", Version: "v1alpha1"}
+	if !errors.Is(unregistered[gv], errGroupServedElsewhere) {
+		t.Errorf("a group version somebody else registered was reported as %v, want the conflict", unregistered[gv])
 	}
 
 	after, err := manager.client.Resource(APIServiceGVR).

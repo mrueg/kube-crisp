@@ -1214,19 +1214,32 @@ registration failure is.
 
 ### Two projections claiming one resource
 
-`plural.group/version` identifies an API path, and only one projection can answer it. When two claim
-the same one, the projection already serving it keeps it and the other is failed by name, with the
-conflict in its `Ready` condition and its ClusterRole left alone. Nothing else changes: every other
-projection installs, and the server becomes ready as usual.
+Within a group, a resource's names are its own: its plural, singular and short names, and its kind
+and list kind. Only one projection can answer to each, at any version. When two claim the same one,
+the projection already serving it keeps it and the other is failed by name, with the name that
+collided and the projection serving it in its `Ready` condition and its ClusterRole left alone.
+Nothing else changes: every other projection installs, and the server becomes ready as usual.
 
-Whoever is serving wins, because the mistake is in the object just applied and applying it must not
-take a working API group away from whichever projection had it. On a cold start nothing is serving
-yet, so the older projection wins instead — usually re-electing whoever was serving before the
-restart — with the name as the tie-break, so every replica settles on the same answer.
+The version is deliberately not part of the claim. Two projections serving `bins.example.com` at
+`v1` and `v1beta1` would install as two versions of one resource, and the preferred-version sort
+would then decide which table answers a client that names neither. A kind served at several
+versions belongs in one projection's `versions`, which claims each name once. Nor are the names
+separate claims: a short name that is another projection's plural, or a kind two plurals share,
+would leave `kubectl` and discovery with one name and two resources behind it — the rule a
+CustomResourceDefinition is held to.
 
-A projection loses whole. One claiming two resources and conflicting on one of them serves neither,
+Whoever is serving the name wins, because the mistake is in the object just applied and applying it
+must not take a working API group away from whichever projection had it. That is judged per
+resource: a projection edited to name a resource another one serves is the newcomer for that
+resource, however long it has been serving its own, and it is the edited object that fails. On a
+cold start nothing is serving yet, so the older projection wins instead — usually re-electing
+whoever was serving before the restart — with the name as the tie-break, so every replica settles
+on the same answer.
+
+A projection loses whole. One claiming two names and conflicting on one of them serves neither,
 since a half-installed projection is a surface whose missing half looks exactly like a projection
-nobody applied.
+nobody applied. It gives way only to a projection that is itself going to serve, though: one that
+loses elsewhere takes nothing with it.
 
 Applying one by hand while the reconciler is on is the case worth avoiding: it carries no
 `managed-by` label, so the server will not touch it, and it outlives the projection it was written

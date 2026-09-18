@@ -662,6 +662,13 @@ func (c *Controller) sync(ctx context.Context) error {
 	// its storage released rather than left polling its table with nobody
 	// reading the result.
 	for name, err := range resolveClaims(surviving, created, c.compiled) {
+		// A loser that compiled afresh this sync built storage that nothing
+		// routes to and that c.compiled has never held, so the pass below
+		// would not find it. Its previous compilation is found there, or was
+		// retired above when the recompile replaced it.
+		if lost := surviving[name]; lost.fingerprint != c.compiled[name].fingerprint {
+			retired = append(retired, lost.resources...)
+		}
 		delete(surviving, name)
 		failures[name] = err
 		klog.ErrorS(err, "projection claims a resource another projection serves", "projection", name)
@@ -1440,19 +1447,67 @@ func (c *Controller) warnIfUnversioned(p *crispv1alpha1.CustomResourceProjection
 			"or run a single replica")
 }
 
-// resourceClaim identifies the API path a projection asks to serve. Two
+// resourceClaim is one name a projection asks for within its group. Two
 // projections naming the same one is the conflict resolveClaims settles.
+//
+// The version is deliberately not part of it. Two projections serving one
+// plural at different versions would install as versions of a single resource,
+// and the preferred-version sort would then decide which table answers a client
+// that names neither; a kind served at several versions belongs in one
+// projection's versions, which is the supported way to declare it. The other
+// names of a resource are claimed as well -- its kind and list kind, its plural,
+// singular and short names -- so that two projections cannot present two kinds,
+// or two resources answering to one name, under one group. Kubernetes checks
+// the same for CustomResourceDefinitions.
 type resourceClaim struct {
-	group   string
-	version string
-	plural  string
+	group string
+	// what says which namespace the name lives in. Resource names -- plural,
+	// singular and short names -- collide with one another, and kinds with one
+	// another, which is the rule a CustomResourceDefinition is held to.
+	what string
+	name string
 }
+
+const (
+	claimResourceName = "resource name"
+	claimKind         = "kind"
+)
 
 func (k resourceClaim) String() string {
-	return fmt.Sprintf("%s.%s/%s", k.plural, k.group, k.version)
+	return fmt.Sprintf("%s %q in group %s", k.what, k.name, k.group)
 }
 
-// resolveClaims decides which projection serves a resource that more than one
+// claimsOf lists the names a set of resources asks for, each once. A projection
+// serving several versions of one kind names it once per version, and must not
+// be found in conflict with itself.
+func claimsOf(resources []apidynamic.Resource) []resourceClaim {
+	seen := map[resourceClaim]struct{}{}
+	var claims []resourceClaim
+	add := func(what, name string, res apidynamic.Resource) {
+		if name == "" {
+			return
+		}
+		claim := resourceClaim{group: res.Group, what: what, name: name}
+		if _, dup := seen[claim]; dup {
+			return
+		}
+		seen[claim] = struct{}{}
+		claims = append(claims, claim)
+	}
+	for _, res := range resources {
+		add(claimResourceName, res.Plural, res)
+		add(claimResourceName, res.Singular, res)
+		for _, short := range res.ShortNames {
+			add(claimResourceName, short, res)
+		}
+		add(claimKind, res.Kind, res)
+		add(claimKind, res.ListKind, res)
+	}
+	sort.Slice(claims, func(i, j int) bool { return claims[i].String() < claims[j].String() })
+	return claims
+}
+
+// resolveClaims decides which projection serves a name that more than one
 // claims, and returns an error for each projection that loses.
 //
 // The router refuses to install two storages at one path, and rightly: the
@@ -1461,66 +1516,127 @@ func (k resourceClaim) String() string {
 // projection should give way, so it failed the rebuild -- taking every
 // unrelated projection down with the pair that disagreed.
 //
-// Losing is decided so that the answer does not move:
+// Losing is decided per name, so that the answer does not move:
 //
-//   - A projection already serving the resource keeps it. Applying a
-//     conflicting projection must not take a working API group away from the
-//     one that had it; the mistake is in the object just applied, and that is
-//     the object that should fail.
+//   - A projection already serving the name keeps it. Applying a conflicting
+//     projection must not take a working API group away from the one that had
+//     it; the mistake is in the object just applied, and that is the object
+//     that should fail. Serving something else is no help here: a projection
+//     edited to claim a resource another one serves is the newcomer for that
+//     resource, however long it has been serving its own.
 //   - Otherwise the older projection wins, which on a cold start usually
 //     re-elects whoever was serving before the restart.
 //   - Then the name, so that two created in the same instant still settle the
 //     same way in every replica.
 //
-// A projection loses whole. One that claims two resources and conflicts on one
-// of them serves neither: half a projection is a surface whose absent half
-// looks like a projection that was never applied.
+// A projection loses whole. One that claims two names and conflicts on one of
+// them serves neither: half a projection is a surface whose absent half looks
+// like a projection that was never applied. It loses only to a projection that
+// is itself going to serve, though. Giving way to one that loses elsewhere
+// would withdraw a working resource in favour of nobody.
 func resolveClaims(
 	surviving map[string]compilation,
 	created map[string]metav1.Time,
 	serving map[string]compilation,
 ) map[string]error {
-	names := make([]string, 0, len(surviving))
-	for name := range surviving {
-		names = append(names, name)
+	claims := make(map[string][]resourceClaim, len(surviving))
+	for name, compiled := range surviving {
+		claims[name] = claimsOf(compiled.resources)
 	}
-	sort.Slice(names, func(i, j int) bool {
-		a, b := names[i], names[j]
-		if _, ai := serving[a]; ai != mapHas(serving, b) {
-			return ai
+	held := make(map[string]map[resourceClaim]bool, len(serving))
+	for name, compiled := range serving {
+		held[name] = map[resourceClaim]bool{}
+		for _, claim := range claimsOf(compiled.resources) {
+			held[name][claim] = true
 		}
+	}
+
+	older := func(a, b string) bool {
 		at, bt := created[a], created[b]
 		if !at.Equal(&bt) {
 			return at.Before(&bt)
 		}
 		return a < b
-	})
+	}
+	// prefers reports whether a should serve claim rather than b.
+	prefers := func(a, b string, claim resourceClaim) bool {
+		if ah, bh := held[a][claim], held[b][claim]; ah != bh {
+			return ah
+		}
+		return older(a, b)
+	}
 
-	claimed := make(map[resourceClaim]string, len(surviving))
 	losses := map[string]error{}
-	for _, name := range names {
-		held := false
-		for _, res := range surviving[name].resources {
-			claim := resourceClaim{group: res.Group, version: res.Version, plural: res.Plural}
-			if other, taken := claimed[claim]; taken {
-				losses[name] = fmt.Errorf(
-					"resource %s is claimed by projection %q as well, which serves it", claim, other)
-				held = true
+	for {
+		// The projection each name would go to among those still standing.
+		winner := map[resourceClaim]string{}
+		standing := make([]string, 0, len(surviving))
+		for name := range surviving {
+			if _, lost := losses[name]; lost {
+				continue
+			}
+			standing = append(standing, name)
+			for _, claim := range claims[name] {
+				if other, taken := winner[claim]; !taken || prefers(name, other, claim) {
+					winner[claim] = name
+				}
+			}
+		}
+		sort.Strings(standing)
+
+		// A projection that wins every name it claims is going to serve, and
+		// whoever it beat gives way. One that wins some and loses others is
+		// not decided yet; whatever it beat waits until it is.
+		settled := func(name string) bool {
+			for _, claim := range claims[name] {
+				if winner[claim] != name {
+					return false
+				}
+			}
+			return true
+		}
+		lose := func(name string, claim resourceClaim) {
+			losses[name] = fmt.Errorf(
+				"%s is claimed by projection %q as well, which serves it", claim, winner[claim])
+		}
+
+		var undecided []string
+		lost := false
+		for _, name := range standing {
+			if settled(name) {
+				continue
+			}
+			undecided = append(undecided, name)
+			for _, claim := range claims[name] {
+				if other := winner[claim]; other != name && settled(other) {
+					lose(name, claim)
+					lost = true
+					break
+				}
+			}
+		}
+		if len(undecided) == 0 {
+			return losses
+		}
+		if lost {
+			continue
+		}
+
+		// Nobody settled beat anybody, yet somebody is undecided: two
+		// projections each hold a name the other has just been edited to
+		// claim. Both edits are the mistake; the newer object gives way, so
+		// that at least one of them keeps serving.
+		last := undecided[0]
+		for _, name := range undecided[1:] {
+			if older(last, name) {
+				last = name
+			}
+		}
+		for _, claim := range claims[last] {
+			if winner[claim] != last {
+				lose(last, claim)
 				break
 			}
 		}
-		if held {
-			continue
-		}
-		for _, res := range surviving[name].resources {
-			claimed[resourceClaim{group: res.Group, version: res.Version, plural: res.Plural}] = name
-		}
 	}
-	return losses
-}
-
-// mapHas keeps the comparison in resolveClaims' sort readable.
-func mapHas(m map[string]compilation, name string) bool {
-	_, ok := m[name]
-	return ok
 }

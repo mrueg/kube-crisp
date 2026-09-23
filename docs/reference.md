@@ -1296,6 +1296,28 @@ Applying one by hand while the reconciler is on is the case worth avoiding: it c
 for. The aggregation layer then reports that group as unavailable, which degrades `kubectl
 api-resources` for the whole cluster rather than only for that group.
 
+### A file-backed projection's name is reserved
+
+A projection loaded from `--projection-dir` holds its `metadata.name`. A `CustomResourceProjection`
+in the cluster with the same name is neither compiled nor installed: the file keeps serving
+unchanged, and the object reports `Ready` false with reason `NameReservedByFile`, a message naming
+the directory and the resource the file serves, and a warning Event. It is counted by
+`kube_crisp_projections{state="failed"}` and named by the `projections-degraded` check, like any
+other projection that is defined and not served.
+
+The claim resolver above cannot settle this one. It decides between projections, and a file and an
+object of one name were merged into one before it looked — so the object replaced the file
+wholesale, and anyone permitted to create a projection could serve their own statements to the
+file's consumers by choosing its name. The name belongs to whoever controls the directory, in
+either order: an object created under a file's name is refused it, and a file added under a name an
+object already uses takes the name over on the next sync, with the object giving way. Removing the
+file hands the name back, and the object is served on the sync after.
+
+The two are different projections, not generations of one. A broken file does not fall back to
+what the object of its name last compiled, and a broken object does not keep a file the operator
+removed alive: the previous configuration a projection keeps serving while it fails to recompile is
+its own.
+
 ## Pagination
 
 Bind `:after` in the list query and pages are keyset-based, which is what makes them stable:

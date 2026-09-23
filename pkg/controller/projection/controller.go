@@ -185,6 +185,12 @@ type Controller struct {
 type compilation struct {
 	fingerprint string
 	resources   []apidynamic.Resource
+
+	// fromFile records whether this came from --projection-dir rather than
+	// from the cluster. A file and a cluster object of one name are two
+	// projections, not two generations of one, so a compilation is never
+	// served as the previous configuration of the other.
+	fromFile bool
 }
 
 // Options configures a Controller.
@@ -538,13 +544,29 @@ func (c *Controller) sync(ctx context.Context) error {
 		return fmt.Errorf("listing projections: %w", err)
 	}
 
+	// A file-backed projection's name is reserved. Merged by name, a cluster
+	// object of the same name used to replace the file wholesale: whoever
+	// could create a CustomResourceProjection could read the operator's
+	// file-backed projection's name from the log and serve their own
+	// statements to its consumers, and the claim resolver saw nothing, since
+	// it settles claims between projections and only one of that name was
+	// left. The file keeps serving, and the object is failed the way a losing
+	// claim is -- reported, not compiled, not installed. Whichever order they
+	// arrived in: the operator controls the directory, so a file added under
+	// a name a cluster object already uses takes the name over.
 	static := c.staticProjections()
+	files := make(map[string]*crispv1alpha1.CustomResourceProjection, len(static))
 	candidates := make([]projectionCandidate, 0, len(objects)+len(static))
 	for i := range static {
+		files[static[i].Name] = &static[i]
 		candidates = append(candidates, projectionCandidate{projection: &static[i]})
 	}
 	for _, obj := range objects {
-		candidates = append(candidates, projectionCandidate{projection: obj, stored: obj})
+		cand := projectionCandidate{projection: obj, stored: obj}
+		if file, taken := files[obj.Name]; taken {
+			cand.reserved = &nameReservedError{dir: c.staticDir, file: file}
+		}
+		candidates = append(candidates, cand)
 	}
 
 	var (
@@ -558,6 +580,11 @@ func (c *Controller) sync(ctx context.Context) error {
 		// stale names the projections that failed to compile this time but are
 		// still being served from what they compiled to last time.
 		stale = map[string]struct{}{}
+
+		// reserved names the cluster objects whose name a file holds. Apart
+		// from failures, because the name is being served -- by the file --
+		// and everything keyed by the name describes the file.
+		reserved = map[string]error{}
 	)
 
 	// Storage that is about to stop being served, released once the router no
@@ -581,13 +608,18 @@ func (c *Controller) sync(ctx context.Context) error {
 	// Nothing is hidden by doing so: the projection is still counted as failed,
 	// still named by Degraded, and still reports Ready=False for the generation
 	// that did not compile.
-	failed := func(name string, err error) {
+	failed := func(cand projectionCandidate, err error) {
+		name := cand.projection.Name
 		failures[name] = err
 
 		previous, served := c.compiled[name]
-		if !served {
+		if !served || previous.fromFile != cand.fromFile() {
 			// Never compiled, so there is nothing to fall back to and no
-			// registration to protect.
+			// registration to protect. Or compiled from the other side of
+			// the name: a file that has just been removed is not the previous
+			// configuration of the cluster object taking its name over, and
+			// serving it would keep the file the operator deleted alive for
+			// as long as the object stayed broken.
 			klog.ErrorS(err, "projection is not servable", "projection", name)
 			return
 		}
@@ -606,11 +638,16 @@ func (c *Controller) sync(ctx context.Context) error {
 
 	for _, cand := range candidates {
 		name := cand.projection.Name
+		if cand.reserved != nil {
+			reserved[name] = cand.reserved
+			klog.ErrorS(cand.reserved, "projection is not servable", "projection", name)
+			continue
+		}
 		created[name] = cand.projection.CreationTimestamp
 
 		prepared, err := c.compiler.Prepare(ctx, cand.projection)
 		if err != nil {
-			failed(name, err)
+			failed(cand, err)
 			continue
 		}
 
@@ -627,6 +664,10 @@ func (c *Controller) sync(ctx context.Context) error {
 			if reachErr != nil {
 				unreachable[name] = reachErr
 			}
+			// The same storage whichever side of the name compiled it: a file
+			// and an object with one spec and one credential compile to one
+			// fingerprint.
+			previous.fromFile = cand.fromFile()
 			surviving[name] = previous
 			resources = append(resources, previous.resources...)
 			continue
@@ -634,7 +675,7 @@ func (c *Controller) sync(ctx context.Context) error {
 
 		compiled, err := c.compiler.CompileWith(ctx, cand.projection, prepared)
 		if err != nil {
-			failed(name, err)
+			failed(cand, err)
 			continue
 		}
 
@@ -652,7 +693,7 @@ func (c *Controller) sync(ctx context.Context) error {
 		// last time stays serving.
 		if err := c.router.Check(compiled); err != nil {
 			apidynamic.DestroyAll(compiled)
-			failed(name, err)
+			failed(cand, err)
 			continue
 		}
 
@@ -664,7 +705,9 @@ func (c *Controller) sync(ctx context.Context) error {
 		if previous, ok := c.compiled[name]; ok {
 			retired = append(retired, previous.resources...)
 		}
-		surviving[name] = compilation{fingerprint: prepared.Fingerprint, resources: compiled}
+		surviving[name] = compilation{
+			fingerprint: prepared.Fingerprint, resources: compiled, fromFile: cand.fromFile(),
+		}
 		resources = append(resources, compiled...)
 	}
 
@@ -717,15 +760,24 @@ func (c *Controller) sync(ctx context.Context) error {
 	c.hasSynced.Store(true)
 
 	// A projection that is gone takes its remembered status with it, so a later
-	// object of the same name is not compared against a stranger's.
+	// object of the same name is not compared against a stranger's. Judged by
+	// the cluster objects alone: a file of that name is not the object the
+	// status was written for, and while it kept the name alive a new object
+	// under it would have been compared against the deleted one's status,
+	// found unchanged, and written nothing.
+	inCluster := make(map[string]struct{}, len(objects))
+	for _, obj := range objects {
+		inCluster[obj.Name] = struct{}{}
+	}
+	for name := range c.lastStatus {
+		if _, still := inCluster[name]; !still {
+			delete(c.lastStatus, name)
+		}
+	}
+
 	live := make(map[string]struct{}, len(candidates))
 	for _, cand := range candidates {
 		live[cand.projection.Name] = struct{}{}
-	}
-	for name := range c.lastStatus {
-		if _, still := live[name]; !still {
-			delete(c.lastStatus, name)
-		}
 	}
 
 	// The same for the unversioned warning. A projection that has been deleted
@@ -773,15 +825,23 @@ func (c *Controller) sync(ctx context.Context) error {
 		utilruntime.HandleError(fmt.Errorf("reconciling APIServices: %w", err))
 	}
 
-	broken := make([]string, 0, len(failures))
+	// A reserved object is defined and not served, which is what Degraded and
+	// the failed count exist to report. A file that failed to compile and an
+	// object refused its name are each counted, and the name is listed once.
+	broken := make([]string, 0, len(failures)+len(reserved))
 	for name := range failures {
 		broken = append(broken, name)
+	}
+	for name := range reserved {
+		if _, listed := failures[name]; !listed {
+			broken = append(broken, name)
+		}
 	}
 	sort.Strings(broken)
 	c.degraded.Store(&broken)
 
 	crispmetrics.Projections.WithLabelValues(crispmetrics.ProjectionServing).Set(float64(len(resources)))
-	crispmetrics.Projections.WithLabelValues(crispmetrics.ProjectionFailed).Set(float64(len(failures)))
+	crispmetrics.Projections.WithLabelValues(crispmetrics.ProjectionFailed).Set(float64(len(failures) + len(reserved)))
 	// Worth its own series: a projection serving configuration it can no longer
 	// recompile looks healthy from the outside, and only stops being correct
 	// when whatever broke the recompile is fixed. Alerting on this above zero
@@ -822,12 +882,17 @@ func (c *Controller) sync(ctx context.Context) error {
 	}
 
 	for _, cand := range candidates {
+		// Not for an object that serves nothing: the warnings are about how a
+		// projection serves, and the gauges under its name are the file's.
+		if cand.reserved != nil {
+			continue
+		}
 		c.warnIfUnversioned(cand.projection)
 		c.warnIfCacheUnshared(cand.projection)
 	}
 
 	klog.InfoS("projections installed",
-		"servable", len(resources), "failed", len(failures), "stale", len(stale))
+		"servable", len(resources), "failed", len(failures)+len(reserved), "stale", len(stale))
 
 	// Status is reported only for projections that exist in the cluster;
 	// file-based ones have no object to write back to.
@@ -836,8 +901,8 @@ func (c *Controller) sync(ctx context.Context) error {
 			continue
 		}
 		name := cand.projection.Name
-		_, servingPrevious := stale[name]
-		if err := c.updateStatus(ctx, cand.stored, failures[name], unreachable[name],
+		failure, servingPrevious := cand.outcome(failures, stale)
+		if err := c.updateStatus(ctx, cand.stored, failure, unreachable[name],
 			registrationError(cand.projection, unregistered), servingPrevious); err != nil {
 			utilruntime.HandleError(fmt.Errorf("updating status of %s: %w", name, err))
 		}
@@ -985,6 +1050,14 @@ func (c *Controller) reportProjectionStates(
 	live := map[string]bool{}
 
 	for _, cand := range candidates {
+		// The series is by name, and the name is the file's: it is serving,
+		// and the object refused the name has its conditions, its Event and
+		// Degraded to say so. A series of its own would outlive it, since the
+		// name it would be removed under stays live for as long as the file
+		// does.
+		if cand.reserved != nil {
+			continue
+		}
 		name := cand.projection.Name
 		live[name] = true
 		resource := projectionregistry.ResourceLabel(cand.projection.Spec.Resource)
@@ -1059,7 +1132,8 @@ func (c *Controller) recordProjectionEvents(
 		name := cand.projection.Name
 		live[name] = true
 
-		kind, reason, message := projectionEvent(cand.projection, failures[name], stale, unregistered)
+		failure, servingPrevious := cand.outcome(failures, stale)
+		kind, reason, message := projectionEvent(cand.projection, failure, servingPrevious, unregistered)
 		if c.events[name] == reason+message {
 			continue
 		}
@@ -1078,16 +1152,16 @@ func (c *Controller) recordProjectionEvents(
 func projectionEvent(
 	p *crispv1alpha1.CustomResourceProjection,
 	failure error,
-	stale map[string]struct{},
+	servingPrevious bool,
 	unregistered map[schema.GroupVersion]error,
 ) (kind, reason, message string) {
 	if failure != nil {
-		if _, servingPrevious := stale[p.Name]; servingPrevious {
+		if servingPrevious {
 			return corev1.EventTypeWarning, "ServingPreviousConfiguration",
 				fmt.Sprintf("%s. The previously compiled configuration is still being served, "+
 					"so requests succeed and the spec answering them is not the spec that was applied.", failure)
 		}
-		return corev1.EventTypeWarning, "CompilationFailed", failure.Error()
+		return corev1.EventTypeWarning, failureReason(failure), failure.Error()
 	}
 
 	if err := registrationError(p, unregistered); err != nil && !errors.Is(err, errRegistrationPending) {
@@ -1109,6 +1183,58 @@ type projectionCandidate struct {
 	// stored is nil for file-based projections, which have no object to write
 	// status back to.
 	stored *crispv1alpha1.CustomResourceProjection
+
+	// reserved is set on a cluster object whose name a file-backed projection
+	// holds. The object is neither compiled nor installed, and this is what
+	// its status and its Event say.
+	reserved error
+}
+
+// fromFile reports whether the candidate was read from --projection-dir.
+func (cand projectionCandidate) fromFile() bool { return cand.stored == nil }
+
+// outcome is what the candidate is reported as: the failure it has, if any,
+// and whether the surface still answers for it from a previous compilation.
+//
+// Both are looked up by name for a candidate that was compiled. A reserved
+// object was not, and the entries under its name describe the file: its
+// failure is its own, and nothing of its own is being served.
+func (cand projectionCandidate) outcome(
+	failures map[string]error,
+	stale map[string]struct{},
+) (failure error, servingPrevious bool) {
+	if cand.reserved != nil {
+		return cand.reserved, false
+	}
+	_, servingPrevious = stale[cand.projection.Name]
+	return failures[cand.projection.Name], servingPrevious
+}
+
+// nameReservedError is why a cluster object is not served when a file-backed
+// projection holds its name.
+type nameReservedError struct {
+	dir  string
+	file *crispv1alpha1.CustomResourceProjection
+}
+
+func (e *nameReservedError) Error() string {
+	source := "--projection-dir"
+	if e.dir != "" {
+		source = e.dir
+	}
+	return fmt.Sprintf("the name %q is reserved by the file-backed projection of that name loaded from %s, "+
+		"which serves %s.%s and keeps serving it; a cluster object cannot take a name a file holds",
+		e.file.Name, source, e.file.Spec.Resource.Plural, e.file.Spec.Resource.Group)
+}
+
+// failureReason names, for a condition and an Event, why a projection is not
+// served.
+func failureReason(failure error) string {
+	var reserved *nameReservedError
+	if errors.As(failure, &reserved) {
+		return "NameReservedByFile"
+	}
+	return "CompilationFailed"
 }
 
 // apiServiceOwners works out which CustomResourceProjections should own each
@@ -1131,6 +1257,12 @@ func (c *Controller) apiServiceOwners(
 ) map[schema.GroupVersion][]metav1.OwnerReference {
 	stored := make(map[string]*crispv1alpha1.CustomResourceProjection, len(candidates))
 	for _, cand := range candidates {
+		// A cluster object refused its name serves nothing, and must not be
+		// made the owner of the registration the file of that name serves
+		// through: deleting the object would collect it from under the file.
+		if cand.reserved != nil {
+			continue
+		}
 		stored[cand.projection.Name] = cand.stored
 	}
 
@@ -1294,7 +1426,7 @@ func (c *Controller) updateStatus(
 		set(crispv1alpha1.ConditionReady, false, "ServingPreviousConfiguration",
 			fmt.Sprintf("%s. The previously compiled configuration is still being served.", failure.Error()))
 	} else {
-		set(crispv1alpha1.ConditionReady, false, "CompilationFailed", failure.Error())
+		set(crispv1alpha1.ConditionReady, false, failureReason(failure), failure.Error())
 	}
 
 	status := crispv1alpha1.CustomResourceProjectionStatus{

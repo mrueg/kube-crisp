@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -39,10 +40,13 @@ func NewCommandPrune(out, errOut io.Writer) *cobra.Command {
 			"the day somebody projects that group name again and the old grant applies to the\n" +
 			"new rows.\n\n" +
 			"A group is served when a projection in the cluster declares it, or when an\n" +
-			"APIService kube-crisp wrote for it is not reported unavailable by the aggregation\n" +
-			"layer. The second is what a projection loaded from --projection-dir looks like\n" +
-			"from the cluster: there is no object to find, and the group is answered for all\n" +
-			"the same. Its roles are as live as any, and this command leaves them be.\n\n" +
+			"APIService kube-crisp wrote for it exists. The second is what a projection loaded\n" +
+			"from --projection-dir looks like from the cluster: there is no object to find, and\n" +
+			"the group is answered for all the same. Its roles are as live as any, and this\n" +
+			"command leaves them be. Whether the aggregation layer currently reports that\n" +
+			"APIService available does not enter into it, because a restarting server makes\n" +
+			"every one of its registrations unavailable for a while, and a prune run in that\n" +
+			"window must not read the outage as every file-backed group having gone.\n\n" +
 			"The bindings that reference an orphaned role go with it. A ClusterRoleBinding, and\n" +
 			"also a RoleBinding in any namespace, since that is how a namespaced projected kind\n" +
 			"is granted per tenant — leaving those behind would leave a reference to a role that\n" +
@@ -53,7 +57,9 @@ func NewCommandPrune(out, errOut io.Writer) *cobra.Command {
 			"whose deletion could collect it — so stopping the server without first removing\n" +
 			"the files strands one. A stranded registration is a cluster-scoped object the\n" +
 			"aggregation layer goes on dialling, and it degrades `kubectl api-resources` for\n" +
-			"the whole cluster rather than only for that group.\n\n" +
+			"the whole cluster rather than only for that group. It also keeps its group counted\n" +
+			"as served, so the order that finds everything is `--apiservices --delete` first,\n" +
+			"then a plain `--delete` for the roles the removed registrations were holding up.\n\n" +
 			"Prints what it would remove. Pass --delete to remove it.",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
@@ -110,10 +116,23 @@ func (o *pruneOptions) prune(
 	dyn dynamic.Interface,
 	out, errOut io.Writer,
 ) error {
-	orphans, err := orphanedRoles(ctx, crisp, kube, dyn)
+	orphans, held, err := orphanedRoles(ctx, crisp, kube, dyn)
 	if err != nil {
 		return err
 	}
+
+	// Said whether or not anything was found. A role kept because a stranded
+	// registration still names its group is indistinguishable, from the
+	// outside, from one this command missed — and the way to release it is a
+	// different run.
+	for _, stranded := range held {
+		_, _ = fmt.Fprintf(errOut,
+			"%s is unavailable and nothing claims it, and its group counts as served while it exists: "+
+				"the server may be restarting, or the registration is stranded. `prune --apiservices` "+
+				"tells which, and removing it is what lets the roles for that group be pruned.\n",
+			stranded.name)
+	}
+
 	if len(orphans) == 0 {
 		_, _ = fmt.Fprintln(errOut, "no orphaned roles")
 		return nil
@@ -131,7 +150,7 @@ func (o *pruneOptions) prune(
 	if !o.delete {
 		for i := range orphans {
 			role := &orphans[i]
-			_, _ = fmt.Fprintf(out, "%s\t(%s: nothing serves this group)\n",
+			_, _ = fmt.Fprintf(out, "%s\t(%s: no projection declares this group and no registration kube-crisp wrote for it exists)\n",
 				role.Name, role.Labels[rbac.GroupLabel])
 			for _, binding := range bindings {
 				if binding.role == role.Name {
@@ -256,15 +275,25 @@ func bindingsTo(ctx context.Context, kube kubernetes.Interface, roles sets.Set[s
 }
 
 // orphanedRoles returns the generated roles whose group nothing serves any
-// more.
+// more, and the stranded registrations whose groups are being kept on their
+// account, so that the command can say why a role it might have been expected
+// to find is not in the list.
 //
 // Served means a projection in the cluster declares the group, or a
-// registration kube-crisp wrote for it is not reported unavailable. The second
-// is not a nicety: a projection loaded from --projection-dir has no object in
-// the cluster, and a command that only looked for objects would call every
-// role for such a group orphaned and, with --delete, cut off every tenant
-// bound to one. The APIService is the only trace such a projection leaves,
-// and the same survey the --apiservices half runs is what reads it.
+// registration kube-crisp wrote for it exists. The second is not a nicety: a
+// projection loaded from --projection-dir has no object in the cluster, and a
+// command that only looked for objects would call every role for such a group
+// orphaned and, with --delete, cut off every tenant bound to one. The
+// APIService is the only trace such a projection leaves, and the same survey
+// the --apiservices half runs is what reads it.
+//
+// Existing is the whole test; whether the aggregation layer reports the
+// registration available is not part of it. A rolling restart or an upgrade
+// of the server leaves every registration it owns unavailable for a while,
+// and a prune that read the verdict would spend that window seeing every
+// file-backed group as unserved — the outage above, one restart away. A
+// registration that is stranded rather than restarting is the --apiservices
+// half's to remove, and the group it held stops counting once it is gone.
 //
 // What is served is settled first and a failure there is fatal, which is the
 // safety property this rests on: an error listing either the projections or
@@ -277,10 +306,10 @@ func orphanedRoles(
 	crisp crispclient.Interface,
 	kube kubernetes.Interface,
 	dyn dynamic.Interface,
-) ([]rbacv1.ClusterRole, error) {
+) ([]rbacv1.ClusterRole, []strandedAPIService, error) {
 	survey, err := surveyAPIServices(ctx, crisp, dyn)
 	if err != nil {
-		return nil, fmt.Errorf("cannot tell which groups are served, so no role is orphaned: %w", err)
+		return nil, nil, fmt.Errorf("cannot tell which groups are served, so no role is orphaned: %w", err)
 	}
 	served := survey.served
 
@@ -292,10 +321,11 @@ func orphanedRoles(
 		LabelSelector: rbac.GroupLabel,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing cluster roles: %w", err)
+		return nil, nil, fmt.Errorf("listing cluster roles: %w", err)
 	}
 
 	var orphans []rbacv1.ClusterRole
+	granted := sets.New[string]()
 	for i := range roles.Items {
 		role := roles.Items[i]
 		group, labelled := role.Labels[rbac.GroupLabel]
@@ -305,11 +335,22 @@ func orphanedRoles(
 			// this command's business.
 			continue
 		}
+		granted.Insert(group)
 		if !served.Has(group) {
 			orphans = append(orphans, role)
 		}
 	}
 
+	// Only the stranded registrations that are holding a role up are worth
+	// naming; one for a group nobody generated a role for keeps nothing
+	// from this half, and is --apiservices's alone.
+	var held []strandedAPIService
+	for _, stranded := range survey.stranded {
+		if group, _, _ := strings.Cut(stranded.groupVersion, "/"); granted.Has(group) {
+			held = append(held, stranded)
+		}
+	}
+
 	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Name < orphans[j].Name })
-	return orphans, nil
+	return orphans, held, nil
 }

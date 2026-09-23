@@ -457,7 +457,10 @@ unreachable and requests are getting `503`, while the API group stays installed.
 served at all; `Ready` false with reason `ServingPreviousConfiguration` means the
 generation in the cluster did not compile and the previous one is still
 answering — requests work, and the spec answering them is not the spec you
-applied.
+applied. `Ready` false with reason `NameReservedByFile` means a projection loaded
+from `--projection-dir` has the object's name: the file is serving, the object is
+not, and it will be once the file is removed. The name is the operator's,
+whichever of the two came first.
 
 `Registered` is about the aggregation layer rather than about this server.
 Compiling a projection and installing its handlers is only half of serving it:
@@ -541,7 +544,7 @@ Published on the apiserver's own `/metrics`, alongside the standard apiserver re
 | `kube_crisp_projections{state="failed"}` | Projections defined but not served |
 | `kube_crisp_projections{state="stale"}` | Projections still serving what they last compiled, having failed to recompile since |
 | `kube_crisp_watch_poll_duration_seconds` | Cost of one poll and diff |
-| `kube_crisp_projection_state` | The state of each projection **by name**, one series per state with exactly one set. `kube_crisp_projections` counts them and answers whether anything is wrong; this answers which |
+| `kube_crisp_projection_state` | The state of each projection **by name**, one series per state with exactly one set. `kube_crisp_projections` counts them and answers whether anything is wrong; this answers which. A cluster object refused its name by a file under `--projection-dir` has no series of its own: the one under that name is the file's, which is serving, and the object is counted as failed and says why in its conditions |
 | `kube_crisp_admission_reviews_total` | Admission reviews the projection webhook answered, by result. Going flat at zero is how a webhook the cluster cannot call looks from here — its policy is `Ignore`, so nothing else reports it |
 | `kube_crisp_admission_duration_seconds` | Time to answer one. The check reaches the database, inside a request the cluster gives ten seconds |
 | `kube_crisp_datasource_connections` | Pool state, so exhaustion shows up before latency does |
@@ -666,7 +669,8 @@ shows its query breakdown in the log without a collector deployed at all.
 ## Events
 
 A projection records an Event when its state changes: `Serving`, `CompilationFailed`,
-`ServingPreviousConfiguration`, `NotRouted`, `GroupAlreadyServed`. Conditions say what the state
+`ServingPreviousConfiguration`, `NameReservedByFile`, `NotRouted`, `GroupAlreadyServed`.
+Conditions say what the state
 is now, which is what a controller reconciling against it needs; an Event says that it changed and
 when, which is what `kubectl describe` shows and what anything watching for failures reacts to.
 

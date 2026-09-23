@@ -549,6 +549,11 @@ attaches build provenance.
   it are served.
   Backed by a ConfigMap, the wait is the kubelet's rather than this server's — around a minute in the
   e2e cluster, with no restart.
+- **A file-backed projection's name is reserved.** A `CustomResourceProjection` in the cluster with
+  the same `metadata.name` as a file under `--projection-dir` is not served: the file keeps serving,
+  and the object reports `Ready` false with reason `NameReservedByFile`, whichever of the two came
+  first. Without that, creating an object of the file's name replaced the file, and its consumers
+  were served whatever the object pointed at.
 - **A watched projection holds its whole collection in memory** and needs `maxRows` set above the
   row count, since the periodic full resync reads all of it. A projection that maps a
   `resourceVersion` and has a `deletedQuery` keeps only keys and versions instead — the diff needs

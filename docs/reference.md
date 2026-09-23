@@ -848,12 +848,24 @@ The trade is that a new watcher's initial state is read rather than remembered, 
 asks for the collection costs a query. A tombstone holding only the identity columns is still
 supported and still the documented minimum; the cache simply keeps the objects in that case.
 
-Two things to know about what arrives. Changes come as `Modified` rather than `Added`, because that
+Three things to know about what arrives. Changes come as `Modified` rather than `Added`, because that
 is what the database said: the row changed at or after this version, and whether the client had
 already seen it is not something a row can answer. client-go turns an update for an object its store
-does not hold into an add, so an informer ends up in the same state either way. And a deletion
-carries only the identity, since the row is gone from the table and the tombstone records only which
-row it was.
+does not hold into an add, so an informer ends up in the same state either way. A deletion carries
+only the identity, since the row is gone from the table and the tombstone records only which row it
+was. And a watcher with a selector is told a `Deleted` for a changed row in its namespace that the
+selector rejects, carrying the row as it is now: the database holds nothing of what the row was, so
+whether it left the selector while the client was away cannot be answered, and a deletion the client
+discards is better than a row it keeps. That is within the namespace only. A namespaced watcher is
+never told about a row in another namespace, whatever the replay knows about it — the row was never
+its to hold and cannot have left it — while a cluster-wide watcher is entitled to every namespace and
+is told across all of them.
+
+A row that leaves a watcher's selector on the live stream, or in a replay from the ring, is a
+`Deleted` to that watcher carrying the row as it last saw it, and one that arrives in the selector is
+an `Added` — the same transitions the apiserver's own cacher makes. The departure carries the version
+of the change that took the row out rather than the old object's own, because a reflector resumes
+from the last version it was handed and would otherwise resume from before its own departure.
 
 A replay larger than the collection is refused, because past that point relisting is cheaper than
 being handed the difference.

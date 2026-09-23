@@ -31,6 +31,11 @@ func goldSelector() labels.Selector {
 // as it stayed connected — nothing on either side could have said otherwise.
 // The apiserver's own cacher compares both sides: leaving the selector is a
 // deletion to that watcher, and arriving in it is an addition.
+//
+// The deletion carries the object as it was, at the version of the change
+// that took it out — the cacher re-stamps it the same way, because a reflector
+// takes the point it has synced to from every event object, and one left at
+// the old version would resume from before its own departure.
 func TestAWatcherIsToldWhenARowCrossesItsSelector(t *testing.T) {
 	rows := []unstructured.Unstructured{
 		labelledItem("acme", "order-1", "1", map[string]string{"tier": "gold"}),
@@ -52,7 +57,7 @@ func TestAWatcherIsToldWhenARowCrossesItsSelector(t *testing.T) {
 		version string
 		tier    string
 		// What the watcher is told, and the tier of the object it is handed —
-		// a deletion carries the object as it was.
+		// a deletion carries the object as it was, at the version it left.
 		want     watch.EventType
 		wantTier string
 	}{
@@ -78,6 +83,10 @@ func TestAWatcherIsToldWhenARowCrossesItsSelector(t *testing.T) {
 			}
 			if got := obj.GetLabels()["tier"]; got != step.wantTier {
 				t.Errorf("the event carries tier=%q, want %q", got, step.wantTier)
+			}
+			if got := obj.GetResourceVersion(); got != step.version {
+				t.Errorf("the event carries version %q, want %q: a client resuming from it "+
+					"would otherwise start from before this change", got, step.version)
 			}
 		})
 	}
@@ -177,7 +186,9 @@ func TestADatabaseReplayReportsARowThatNoLongerMatchesAsDeleted(t *testing.T) {
 
 // TestALightweightCacheStillReportsARowLeavingALabelSelector: a lightweight
 // cache holds a trimmed entry in place of the previous object, and the labels
-// it keeps are what make this transition decidable at all.
+// it keeps are what make this transition decidable at all. The entry is what
+// the deletion carries, re-stamped with the version of the change that took
+// the row out.
 func TestALightweightCacheStillReportsARowLeavingALabelSelector(t *testing.T) {
 	rows := []unstructured.Unstructured{
 		labelledItem("acme", "order-1", "1", map[string]string{"tier": "gold"}),
@@ -218,9 +229,9 @@ func TestALightweightCacheStillReportsARowLeavingALabelSelector(t *testing.T) {
 	if !ok {
 		t.Fatalf("the event carried %T, want an object", event.Object)
 	}
-	if obj.GetLabels()["tier"] != "gold" || obj.GetResourceVersion() != "1" {
-		t.Errorf("the deletion carries tier=%q at version %q, want the entry as it was: gold at 1",
-			obj.GetLabels()["tier"], obj.GetResourceVersion())
+	if obj.GetLabels()["tier"] != "gold" || obj.GetResourceVersion() != "2" {
+		t.Errorf("the deletion carries tier=%q at version %q, want the entry as it was at the "+
+			"version that took it out: gold at 2", obj.GetLabels()["tier"], obj.GetResourceVersion())
 	}
 	if obj.GetAPIVersion() == "" || obj.GetKind() == "" {
 		t.Errorf("the deletion carries apiVersion=%q kind=%q and cannot be encoded",

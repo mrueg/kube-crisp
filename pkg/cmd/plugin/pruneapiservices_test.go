@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -80,6 +81,13 @@ func TestAStrandedRegistrationIsFound(t *testing.T) {
 	}
 	if survey.stranded[0].groupVersion != "gone.example.com/v1alpha1" {
 		t.Errorf("groupVersion = %q, want it read from the spec", survey.stranded[0].groupVersion)
+	}
+	// Stranded for this half, and still served for the other: the group is
+	// counted for as long as the registration exists, since from here an
+	// unavailable registration is indistinguishable from a restarting
+	// server's, and removing it is what lets the roles for its group go.
+	if !survey.served.Has("gone.example.com") {
+		t.Errorf("served = %v, want the group counted while its registration exists", sets.List(survey.served))
 	}
 }
 

@@ -46,10 +46,19 @@ type apiServiceSurvey struct {
 	unjudged []string
 	// served are the API groups something answers for: every group a
 	// projection in the cluster declares, and the group of every registration
-	// this server owns that the aggregation layer has not reported
-	// unavailable. The second is how a group served from --projection-dir
-	// shows up at all, and it is what the RBAC half reads before it calls a
-	// role orphaned.
+	// this server owns, whatever the aggregation layer currently says about
+	// it. The second is how a group served from --projection-dir shows up at
+	// all, and it is what the RBAC half reads before it calls a role
+	// orphaned.
+	//
+	// The registration's availability is deliberately not consulted. While
+	// the server restarts or is upgraded the aggregation layer reports every
+	// registration it owns unavailable for a while, and a survey that read
+	// the verdict would, in that window, find every file-backed group
+	// unserved and hand the RBAC half every one of their roles to delete.
+	// A registration that is stranded rather than restarting is the
+	// --apiservices half's to remove, and once it is gone the group stops
+	// counting.
 	served sets.Set[string]
 }
 
@@ -97,20 +106,23 @@ func surveyAPIServices(
 			continue
 		}
 
-		// A registration counts its group as served unless the aggregation
-		// layer has said it is unavailable. One it has not judged yet has not
-		// failed, and a group about to come up is served for the purpose of
-		// deciding what to remove.
-		available, _, message := apiServiceAvailability(object)
-		if available == nil || *available {
-			group, _, _ := strings.Cut(groupVersion, "/")
-			survey.served.Insert(group)
-		}
+		// A registration counts its group as served by existing, not by
+		// being available. An unavailable one is either stranded, which
+		// removing it settles, or answered by a server that is restarting,
+		// and the roles for a restarting server's groups are the ones a
+		// prune must not touch.
+		group, _, _ := strings.Cut(groupVersion, "/")
+		survey.served.Insert(group)
 
 		if _, stillClaimed := claimed[groupVersion]; stillClaimed {
 			continue
 		}
 
+		// Here the verdict does decide, since what is being sorted is the
+		// registration itself. One the aggregation layer has not judged yet
+		// has not failed, and a group about to come up is not one to
+		// unregister.
+		available, _, message := apiServiceAvailability(object)
 		switch {
 		case available == nil:
 			survey.unjudged = append(survey.unjudged, object.GetName())

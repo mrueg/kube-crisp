@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -377,6 +378,176 @@ func TestConfirmedRegistrationQueuesNoRecheck(t *testing.T) {
 	if n := f.controller.queue.Len(); n != 0 {
 		t.Errorf("a fully registered projection queued %d re-check(s); it should sync only on change", n)
 	}
+}
+
+// TestSettledVerdictsBackTheRecheckOff pins the cadence itself.
+//
+// A group version that belongs to somebody else's APIService is not going to
+// be judged differently by the aggregator, so re-reading it every fifteen
+// seconds only re-prepares every projection for nothing. The wait doubles from
+// the interval up to the resync period and stays there; anything still pending
+// among the failures takes the fixed interval and starts the backoff over.
+func TestSettledVerdictsBackTheRecheckOff(t *testing.T) {
+	gv := schema.GroupVersion{Group: "warehouse.example.com", Version: "v1alpha1"}
+	other := schema.GroupVersion{Group: "other.example.com", Version: "v1"}
+	taken := servedElsewhere("v1alpha1.warehouse.example.com", crdAPIService())
+
+	want := []time.Duration{
+		15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute,
+		4 * time.Minute, 8 * time.Minute, ResyncPeriod, ResyncPeriod,
+	}
+	var previous time.Duration
+	for i, wanted := range want {
+		previous = registrationRecheck(map[schema.GroupVersion]error{gv: taken}, previous)
+		if previous != wanted {
+			t.Fatalf("recheck after settled sync %d = %v, want %v", i+1, previous, wanted)
+		}
+	}
+
+	// A refused group is settled in the same way, wrapped as reconcile
+	// reports it.
+	refused := fmt.Errorf("ensuring APIService v1.other.example.com: %w",
+		fmt.Errorf("%w: not under any allowed suffix", errGroupNotAllowed))
+	if got := registrationRecheck(map[schema.GroupVersion]error{other: refused}, time.Minute); got != 2*time.Minute {
+		t.Errorf("recheck for a refused group = %v, want the backoff to carry on", got)
+	}
+
+	// Pending anywhere in the set is the fixed interval, however far the
+	// backoff had got.
+	pending := fmt.Errorf("%w: nothing has reported yet", errRegistrationPending)
+	got := registrationRecheck(map[schema.GroupVersion]error{gv: taken, other: pending}, 8*time.Minute)
+	if got != registrationRecheckInterval {
+		t.Errorf("recheck with a pending registration = %v, want %v", got, registrationRecheckInterval)
+	}
+
+	// So is the aggregator saying unavailable: that is its verdict of the
+	// moment, not a settled one, and the recheck is what catches it changing
+	// during a sync.
+	unavailable := errors.New("the aggregation layer reports APIService v1.other.example.com unavailable")
+	got = registrationRecheck(map[schema.GroupVersion]error{other: unavailable}, 8*time.Minute)
+	if got != registrationRecheckInterval {
+		t.Errorf("recheck for an unavailable registration = %v, want %v", got, registrationRecheckInterval)
+	}
+
+	if got := registrationRecheck(nil, 8*time.Minute); got != 0 {
+		t.Errorf("recheck with nothing unresolved = %v, want none", got)
+	}
+}
+
+// TestGroupServedElsewhereIsNotRecheckedAtTheFixedCadence is the defect seen
+// end to end: one projection whose group a CRD owns kept the whole controller
+// syncing every fifteen seconds for as long as the process ran. Here the wait
+// widens with every sync that finds nothing but that verdict, and goes back to
+// the fixed interval the moment the conflict is gone and the registration is
+// merely pending.
+func TestGroupServedElsewhereIsNotRecheckedAtTheFixedCadence(t *testing.T) {
+	shortenRegistrationRecheck(t, 100*time.Millisecond)
+
+	f := newFixture(t, []runtime.Object{projectionObject("bins", "bins")}, crdAPIService())
+	f.syncUntil(t, func() bool { return len(f.router.ServedPaths()) == 1 })
+	if got := conditionOf(t, f, "bins", crispv1alpha1.ConditionRegistered).Reason; got != "GroupAlreadyServed" {
+		t.Fatalf("Registered reason = %q, want GroupAlreadyServed for this fixture", got)
+	}
+	if f.controller.recheck < registrationRecheckInterval {
+		t.Fatalf("a settled verdict scheduled a recheck of %v, want at least %v", f.controller.recheck, registrationRecheckInterval)
+	}
+
+	// Every sync that finds only the conflict waits twice as long as the last.
+	for range 3 {
+		before := f.controller.recheck
+		if err := f.controller.sync(context.Background()); err != nil {
+			t.Fatalf("sync() returned error: %v", err)
+		}
+		if f.controller.recheck != 2*before {
+			t.Fatalf("recheck after another settled sync = %v, want %v", f.controller.recheck, 2*before)
+		}
+	}
+
+	// Let the rechecks the syncs above scheduled land, and drain them, so
+	// that anything found in the queue from here on was queued by the sync
+	// below.
+	time.Sleep(f.controller.recheck + registrationRecheckInterval)
+	for f.controller.queue.Len() > 0 {
+		item, _ := f.controller.queue.Get()
+		f.controller.queue.Done(item)
+	}
+	if err := f.controller.sync(context.Background()); err != nil {
+		t.Fatalf("sync() returned error: %v", err)
+	}
+
+	// A recheck at the fixed cadence would have landed by now.
+	time.Sleep(registrationRecheckInterval * 3)
+	if f.controller.queue.Len() != 0 {
+		t.Fatal("a settled verdict was rechecked at the fixed cadence")
+	}
+
+	// The backed-off recheck still comes: it is the backstop for a deletion
+	// the informer did not see.
+	deadline := time.Now().Add(f.controller.recheck + 10*time.Second)
+	for f.controller.queue.Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("a settled verdict queued no recheck at all")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The conflict resolved: the CRD's APIService is gone. The next sync
+	// registers the group, which in this fixture -- no aggregator -- leaves
+	// the registration pending, and pending is rechecked at the fixed
+	// interval again.
+	if err := f.dynamic.Resource(APIServiceGVR).Delete(context.Background(),
+		"v1alpha1.warehouse.example.com", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("removing the CRD's APIService: %v", err)
+	}
+	if err := f.controller.sync(context.Background()); err != nil {
+		t.Fatalf("sync after the conflict was removed: %v", err)
+	}
+	registered := conditionOf(t, f, "bins", crispv1alpha1.ConditionRegistered)
+	if registered.Status != metav1.ConditionUnknown || registered.Reason != "Pending" {
+		t.Errorf("Registered = %v (%s), want Unknown (Pending) once the group is registered here", registered.Status, registered.Reason)
+	}
+	if f.controller.recheck != registrationRecheckInterval {
+		t.Errorf("recheck once the registration is pending = %v, want %v", f.controller.recheck, registrationRecheckInterval)
+	}
+}
+
+// TestRemovingAForeignAPIServiceQueuesASync is what the widened recheck leans
+// on: the APIService informer is not filtered to this server's registrations,
+// so a foreign one going away -- including the one the kube-apiserver removes
+// when a CRD is deleted -- queues a sync as it happens, and the group is
+// registered on that sync rather than at the next recheck.
+func TestRemovingAForeignAPIServiceQueuesASync(t *testing.T) {
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{APIServiceGVR: "APIServiceList"},
+		crdAPIService(),
+	)
+
+	factory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
+	informer := factory.ForResource(APIServiceGVR).Informer()
+	controller := New(Options{
+		Client:             crispfake.NewSimpleClientset(),
+		DynamicClient:      dynamicClient,
+		Factory:            crispinformers.NewSharedInformerFactory(crispfake.NewSimpleClientset(), 0),
+		APIServiceInformer: informer,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	factory.Start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		t.Fatal("the APIService cache never synced")
+	}
+
+	// The initial listing enqueues too; take that one out of the way so the
+	// next item can only have come from the deletion below.
+	take(t, controller)
+
+	if err := dynamicClient.Resource(APIServiceGVR).Delete(ctx, "v1alpha1.warehouse.example.com", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("removing the CRD's APIService: %v", err)
+	}
+
+	take(t, controller)
 }
 
 // TestStatusWriteRetriesOnConflict covers the write that used to be logged and

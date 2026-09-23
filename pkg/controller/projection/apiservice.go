@@ -248,6 +248,14 @@ var errRegistrationPending = errors.New("registration pending")
 // a healthy registration for an API no request ever reaches.
 var errGroupServedElsewhere = errors.New("the group version is already served elsewhere")
 
+// errGroupNotAllowed marks a group version this server has been told not to
+// register, because the group is outside every suffix the operator allows.
+//
+// Like a group served elsewhere, and unlike a registration waiting on the
+// aggregator, it is settled: nothing that happens in the cluster changes the
+// answer, only the projection or the flags do.
+var errGroupNotAllowed = errors.New("the API group is not one this server may register")
+
 // routesHere reports whether an existing APIService sends the group version to
 // this server.
 //
@@ -344,11 +352,10 @@ func (m *apiServiceManager) ensure(ctx context.Context, name string, gv schema.G
 	// Before anything is created, because what would be created is the claim.
 	if !m.options.groupAllowed(gv.Group) {
 		return fmt.Errorf(
-			"API group %q is not one this server may register: it is not under any of the suffixes "+
-				"--projection-group-suffixes allows (%s). An APIService routes the whole group to this "+
-				"server and is not given back, so the group a projection claims is an operator's "+
-				"decision rather than the projection's",
-			gv.Group, strings.Join(m.options.AllowedGroupSuffixes, ", "))
+			"%w: %q is not under any of the suffixes --projection-group-suffixes allows (%s). "+
+				"An APIService routes the whole group to this server and is not given back, so the "+
+				"group a projection claims is an operator's decision rather than the projection's",
+			errGroupNotAllowed, gv.Group, strings.Join(m.options.AllowedGroupSuffixes, ", "))
 	}
 
 	existing, err := m.lookup(ctx, name)

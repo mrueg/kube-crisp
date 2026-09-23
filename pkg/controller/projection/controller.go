@@ -71,6 +71,9 @@ const syncKey = "sync"
 // between a projection describing a recovery within seconds and describing an
 // outage that is over until the next resync.
 //
+// It is also where the backoff for a settled verdict starts; see
+// registrationRecheck.
+//
 // A variable so tests can shorten it; nothing else assigns to it.
 var registrationRecheckInterval = 15 * time.Second
 
@@ -106,6 +109,11 @@ type Controller struct {
 	compiler    *apidynamic.Compiler
 	router      *apidynamic.Router
 	apiServices *apiServiceManager
+
+	// recheck is how long the last sync waited before looking at a settled
+	// registration verdict again, and zero when the last sync found none. Only
+	// sync reads and assigns it, so it needs no lock.
+	recheck time.Duration
 
 	// static projections come from --projection-dir and are always served,
 	// regardless of what exists in the cluster. staticDir is where they were
@@ -816,9 +824,13 @@ func (c *Controller) sync(ctx context.Context) error {
 	// something unrelated queued the next sync ten minutes later.
 	//
 	// Only while something is unresolved, so a healthy server still syncs only
-	// when something actually changes.
-	if len(unregistered) > 0 {
-		c.queue.AddAfter(syncKey, registrationRecheckInterval)
+	// when something actually changes — and at a widening interval when what
+	// is unresolved is settled rather than pending, so one projection whose
+	// group belongs to a CRD does not keep every projection re-preparing at
+	// this cadence for the life of the process.
+	c.recheck = registrationRecheck(unregistered, c.recheck)
+	if c.recheck > 0 {
+		c.queue.AddAfter(syncKey, c.recheck)
 	}
 
 	for _, cand := range candidates {
@@ -844,6 +856,46 @@ func (c *Controller) sync(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// registrationRecheck says how long to wait before looking at the unresolved
+// registrations again, or zero when there is nothing to look at.
+//
+// A registration the aggregator has not judged yet, or has judged unavailable,
+// can change without anyone touching this server, and the recheck is what
+// catches a verdict that landed while a sync was already reading the cache. A
+// group version that belongs to somebody else's APIService, or that this server
+// is not allowed to register, is different: the answer is settled, and it only
+// changes when that APIService goes away or the projection is edited — both of
+// which the informers turn into a sync of their own. Rechecking those at the
+// same cadence, forever, was a full sync every fifteen seconds: every
+// projection prepared again, every data source pinged, every registration
+// read, with nothing to show for it. So a sync that finds only settled
+// verdicts waits twice as long as the last one did, up to ResyncPeriod, which
+// keeps a backstop for a deletion the informer missed while costing one sync
+// per resync period rather than four per minute. Anything pending among them
+// takes the fixed interval, and takes the backoff back to the start with it.
+func registrationRecheck(unregistered map[schema.GroupVersion]error, previous time.Duration) time.Duration {
+	if len(unregistered) == 0 {
+		return 0
+	}
+	for _, err := range unregistered {
+		if !settledRegistration(err) {
+			return registrationRecheckInterval
+		}
+	}
+	next := min(previous*2, ResyncPeriod)
+	if next < registrationRecheckInterval {
+		next = registrationRecheckInterval
+	}
+	return next
+}
+
+// settledRegistration reports whether a registration failure is a verdict
+// rather than a wait: nothing the aggregation layer does on its own will
+// change it.
+func settledRegistration(err error) bool {
+	return errors.Is(err, errGroupServedElsewhere) || errors.Is(err, errGroupNotAllowed)
 }
 
 // staticProjections returns what --projection-dir holds now.

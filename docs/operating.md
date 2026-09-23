@@ -470,7 +470,15 @@ projection. `Registered` false with reason `GroupAlreadyServed` means the
 `APIService` for the group version exists and is somebody else's — a
 CustomResourceDefinition in the same group is the usual case — so requests go
 there rather than here, whatever that `APIService`'s own `Available` says; the
-message names it. `Registered` `Unknown` with reason `Pending` means the registration
+message names it. It is a verdict rather than a wait: the controller watches
+`APIService` objects, so removing the foreign one (or the CustomResourceDefinition
+behind it, which takes its `APIService` with it) is noticed as it happens and the
+group is registered on the sync that follows. Until then the controller looks
+again on its own at a widening interval, from fifteen seconds up to the resync
+period, rather than at the fixed cadence it uses for a registration the
+aggregator has not judged yet — one stuck projection would otherwise have every
+projection re-prepared and every data source pinged every fifteen seconds for
+the life of the process. `Registered` `Unknown` with reason `Pending` means the registration
 exists and nothing has dialled it yet, which is the ordinary state for the first
 second of a projection's life and the permanent state in a cluster with no
 aggregation layer; `Ready` stands on its own in that case.

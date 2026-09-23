@@ -1730,10 +1730,16 @@ func (w *cacheWatcher) matches(object any) bool {
 	return w.matchesMetadata(obj) && w.matchesFields(obj)
 }
 
+// matchesNamespace is the namespace alone: a namespaced watcher sees its own
+// and a cluster-wide one sees every namespace.
+func (w *cacheWatcher) matchesNamespace(obj *unstructured.Unstructured) bool {
+	return w.namespace == "" || obj.GetNamespace() == w.namespace
+}
+
 // matchesMetadata is the namespace and the label selector: the half of a match
 // that a trimmed entry can still answer.
 func (w *cacheWatcher) matchesMetadata(obj *unstructured.Unstructured) bool {
-	if w.namespace != "" && obj.GetNamespace() != w.namespace {
+	if !w.matchesNamespace(obj) {
 		return false
 	}
 	return w.selector == nil || w.selector.Empty() || w.selector.Matches(labels.Set(obj.GetLabels()))
@@ -1759,12 +1765,20 @@ func (w *cacheWatcher) matchesFields(obj *unstructured.Unstructured) bool {
 // Filtered on the new object alone, the row that left was never mentioned. The
 // watcher kept it in its store for as long as it stayed connected, and nothing
 // on either side could have said so.
+//
+// The namespace is settled first, on the row in hand, before either side is
+// asked. A row's namespace is part of its key, so a row in another namespace
+// was never this watcher's and cannot have left it — and a deletion carrying
+// it would hand a client scoped to one namespace a row from another, which is
+// the one thing the scope exists to prevent. That held only by accident while
+// every modification carried its previous object, and stopped holding the
+// moment one did not.
 func (w *cacheWatcher) transition(event cacheEvent) (watch.Event, bool) {
 	if event.Type != watch.Modified {
 		return event.Event, w.matches(event.Object)
 	}
 	obj, ok := event.Object.(*unstructured.Unstructured)
-	if !ok {
+	if !ok || !w.matchesNamespace(obj) {
 		return watch.Event{}, false
 	}
 
@@ -1776,21 +1790,50 @@ func (w *cacheWatcher) transition(event cacheEvent) (watch.Event, bool) {
 	case now:
 		return watch.Event{Type: watch.Added, Object: obj}, true
 	case before:
-		return watch.Event{Type: watch.Deleted, Object: last}, true
+		return watch.Event{Type: watch.Deleted, Object: exited(last, obj.GetResourceVersion())}, true
 	default:
 		return watch.Event{}, false
 	}
 }
 
+// exited is the object a deletion carries for a row that left this watcher's
+// selector: the row as it was, at the version of the change that took it out.
+//
+// The change's version rather than the old object's own, because a client-go
+// reflector takes the point it has synced to from every event object it is
+// handed, and the apiserver's cacher re-stamps a departure for exactly that
+// reason. Left at the old version, a client reconnecting after this event
+// resumed from before it and was handed the departure a second time — or,
+// once the ring had moved past the older version, told to relist. Onto a
+// copy, because the old object is the cache's own and shared with every other
+// watcher.
+func exited(last *unstructured.Unstructured, version string) *unstructured.Unstructured {
+	if last.GetResourceVersion() == version {
+		return last
+	}
+	out := last.DeepCopy()
+	out.SetResourceVersion(version)
+	return out
+}
+
 // matchedBefore reports whether the object a modification replaced was
 // relevant to this watcher, and which object a deletion would carry.
 //
-// Nothing known about it means it may have been. Answering no would leave a
-// resumed client holding a row that left its selector while it was away,
-// silently, which is the bug this exists to fix; answering yes hands a client
-// that never held the row a deletion of it, which an informer discards and a
-// watch is allowed to do. That is the direction to be wrong in, and the
-// deletion carries the row as it is now because that is all there is.
+// Only the selector halves are asked. The namespace is settled by transition
+// before this is reached, on the row in hand, since the previous object is
+// not always there to be asked and the answer could not differ anyway.
+//
+// Nothing known about the previous object means it may have matched. Answering
+// no would leave a resumed client holding a row that left its selector while
+// it was away, silently, which is the bug this exists to fix; answering yes
+// hands a client that never held the row a deletion of it, which an informer
+// discards and a watch is allowed to do. That is the direction to be wrong in,
+// and the deletion carries the row as it is now because that is all there is.
+// It discloses nothing: the row is in this watcher's namespace, or the watcher
+// is cluster-wide and every namespace is its own, and without a selector it
+// would have been sent the row whole. What it costs is a deletion for every
+// changed row the selector rejects, and that is bounded by the replay itself,
+// which is refused past the size of the collection.
 //
 // A trimmed entry carries the namespace and the labels and no mapped field, so
 // the field half is answered from the row in hand. A row that leaves a field
@@ -1949,8 +1992,9 @@ func (c *watchCache) replayFromDatabase(
 	//
 	// With no previous object, because the database holds the row as it is
 	// now and nothing of what it was. A watcher with a selector is then told a
-	// deletion for a changed row that no longer matches — see transition for
-	// why that is the direction to be wrong in.
+	// deletion for a changed row in its namespace that no longer matches — see
+	// matchedBefore for why that is the direction to be wrong in — and nothing
+	// at all for a row in another namespace, which it could never have held.
 	for i := range changed {
 		item := changed[i]
 		events = append(events, recordedEvent{

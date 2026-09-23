@@ -111,22 +111,30 @@ until somebody projects that group name again and the old grant lands on the new
 
 ```console
 $ kubectl crisp prune
-kube-crisp:gone.example.com:view                      (gone.example.com: nothing serves this group)
+kube-crisp:gone.example.com:view                      (gone.example.com: no projection declares this group and no registration kube-crisp wrote for it exists)
   clusterrolebinding.rbac.authorization.k8s.io/pagila-view          (bound to it)
   rolebinding.rbac.authorization.k8s.io/pagila-view -n store-1      (bound to it)
-kube-crisp:gone.example.com:edit                      (gone.example.com: nothing serves this group)
+kube-crisp:gone.example.com:edit                      (gone.example.com: no projection declares this group and no registration kube-crisp wrote for it exists)
 
 2 orphaned role(s) and 2 binding(s). Pass --delete to remove them.
 ```
 
 A group counts as served when a `CustomResourceProjection` in the cluster declares it, or when an
-`APIService` carrying the `app.kubernetes.io/managed-by: kube-crisp` label routes it and the
-aggregation layer has not reported it unavailable. The second is what a projection loaded from
-`--projection-dir` looks like from the cluster: there is no object to find, but the server
-registered the group and is answering for it, and the roles generated for it with `kubectl crisp
-rbac -f` are as live as any. A registration the aggregator has not judged yet counts too, for the
-reason `--apiservices` leaves one alone — it has not failed, and a group about to come up is not one
-to strip the grants from.
+`APIService` carrying the `app.kubernetes.io/managed-by: kube-crisp` label routes it. The second is
+what a projection loaded from `--projection-dir` looks like from the cluster: there is no object to
+find, but the server registered the group and is answering for it, and the roles generated for it
+with `kubectl crisp rbac -f` are as live as any.
+
+Whether the aggregation layer currently reports that registration available does not enter into
+it. During a rolling restart or an upgrade every registration the server owns is reported
+unavailable for a while, and a prune that read the verdict would spend that window seeing every
+file-backed group as unserved — and with `--delete`, removing every one of their roles and every
+tenant binding on them. So a registration counts its group as served for as long as it exists, and
+a stranded one, whose server is not coming back, is `--apiservices`'s to remove. The order that
+finds everything is therefore `prune --apiservices --delete` first, then `prune --delete` for the
+roles the removed registrations were holding up. A registration that is unavailable and unclaimed
+is named on stderr for that reason, so a role that is not in the list is not mistaken for one the
+command missed.
 
 The bindings go with the role. Both kinds, because both are how a projected group is granted: a
 `ClusterRoleBinding` for a cluster-scoped kind, and a `RoleBinding` in each tenant's namespace
@@ -724,8 +732,10 @@ alone for that reason is named on stderr, since one that is silently skipped loo
 the command failed to find. A registration the aggregator has not judged yet is also left alone: it
 has not failed, and unregistering it would take down a group that was about to come up.
 
-`--delete` removes them. Without it nothing is removed, and the underlying question is still
-answerable by hand:
+`--delete` removes them. Do that before a plain `kubectl crisp prune --delete`: a registration
+kube-crisp wrote counts its group as served for as long as it exists, so the roles generated for a
+stranded one are kept until it is gone. Without `--delete` nothing is removed, and the underlying
+question is still answerable by hand:
 
 ```console
 $ kubectl get apiservices -l app.kubernetes.io/managed-by=kube-crisp

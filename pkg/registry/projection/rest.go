@@ -667,7 +667,7 @@ func (r *REST) pollSince(ctx context.Context, since string) ([]unstructured.Unst
 	items := make([]unstructured.Unstructured, 0, len(rows))
 	var skipped int
 	for i, row := range rows {
-		obj, err := r.mapper.Row(row)
+		obj, err := r.mapper.RowFrom(row, r.watchQuery.statement.Format)
 		if err != nil {
 			if r.failUnmappable {
 				crispmetrics.RowsUnmappable.WithLabelValues(r.projection, r.label).Inc()
@@ -732,7 +732,7 @@ func (r *REST) deletedSince(ctx context.Context, since string) ([]cacheIdentity,
 
 		// Not counted as unmappable when this fails: a tombstone holding only
 		// the identity columns is doing exactly what it is meant to.
-		if obj, err := r.mapper.Row(row); err == nil {
+		if obj, err := r.mapper.RowFrom(row, r.deletedQuery.statement.Format); err == nil {
 			identity.object = obj
 		}
 
@@ -1081,7 +1081,7 @@ func (r *REST) getObject(ctx context.Context, name string, mode readMode, notOld
 			namespace, name, len(rows)))
 	}
 
-	obj, err := r.mapper.Row(rows[0])
+	obj, err := r.mapper.RowFrom(rows[0], r.get.statement.Format)
 	if err != nil {
 		return nil, len(rows), errors.NewInternalError(fmt.Errorf("mapping row: %w", err))
 	}
@@ -1395,7 +1395,7 @@ func (r *REST) listWith(
 	var foreign int
 
 	for i, row := range rows {
-		obj, mapErr := r.mapper.Row(row)
+		obj, mapErr := r.mapper.RowFrom(row, r.list.statement.Format)
 
 		// The keyset resumes after the last row that was read, including one
 		// that could not be mapped — otherwise every later page reads it again.
@@ -3172,7 +3172,7 @@ func (w *WritableREST) write(ctx context.Context, query *compiledQuery, obj *uns
 			return nil, touched, w.missedRows(query, obj, verb, name)
 		}
 
-		result, err := w.mapper.Row(rows[0])
+		result, err := w.mapper.RowFrom(rows[0], query.statement.Format)
 		if err != nil {
 			return nil, touched, errors.NewInternalError(fmt.Errorf("mapping returned row: %w", err))
 		}

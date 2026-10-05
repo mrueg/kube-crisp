@@ -157,6 +157,7 @@ func TestEncryptedReadsTheConnectionString(t *testing.T) {
 		{"mysql", "u:p@tcp(db:3306)/store?tls=preferred", false},
 	} {
 		t.Run(tc.driver+" "+tc.dsn, func(t *testing.T) {
+			registerMySQLTLSConfig(t, "custom")
 			driver, ok := Lookup(tc.driver)
 			if !ok {
 				t.Fatalf("driver %q is not registered", tc.driver)

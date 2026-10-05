@@ -27,6 +27,17 @@ rewriter.
 Mapping `namespace` to a tenant column is the idiom worth knowing: it makes ordinary namespace RBAC
 apply to database rows, and the identity parameters let a projection scope rows to the caller.
 
+The filter belongs in every statement, and the server checks that it was there. A get refuses a row
+from another namespace and a list drops them, with a warning. A single-object `create`, `update`,
+`updateStatus`, `markDeleted` or `delete` is answered `500` when its statement reached more than
+one row — by the rows `RETURNING` produced, or by the affected count — or returned a row from
+another namespace or, other than on a create, of another name: `UPDATE orders ... WHERE id = :name`
+over an identity of `(tenant, id)` rewrites every tenant's row of that id. A statement written under
+`statements` is checked before its transaction commits, so nothing is written; a single statement
+has already committed by the time its result can be seen, and the error says so. Either way the log
+names the statement's verb and the fix, and `kube_crisp_query_rows_out_of_namespace_total` counts
+rows that came back from another namespace.
+
 Because a mapped column is bound by its own name, into the same set, a column may not be *called*
 after one of the parameters the server fills in — `:user`, `:userUID`, `:userGroups`, `:userExtra`,
 `:limit`, `:offset`, `:after`, `:since`, `:labelSelector`, `:name_not`, `:resourceVersion`, or

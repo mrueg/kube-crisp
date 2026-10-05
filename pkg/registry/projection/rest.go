@@ -2520,7 +2520,7 @@ func (w *WritableREST) deleteOnce(
 	}
 
 	ctx, done := w.startQuery(ctx, "delete")
-	_, affected, err := w.run(ctx, w.delete, args, w.session(ctx, namespace, name))
+	_, affected, err := w.run(ctx, w.delete, args, w.session(ctx, namespace, name), w.oneRow("delete", namespace, name))
 	release()
 	w.flights.detach(namespace)
 	w.cache.invalidate(namespace)
@@ -2810,7 +2810,7 @@ func (w *WritableREST) deleteInBulk(
 	}
 
 	ctx, done := w.startQuery(ctx, "deletecollection")
-	_, affected, err := w.run(ctx, w.deleteCollection, args, w.session(ctx, namespace, ""))
+	_, affected, err := w.run(ctx, w.deleteCollection, args, w.session(ctx, namespace, ""), nil)
 
 	// In the order every other write uses. Detaching before invalidating is
 	// what stops a reader arriving between the two from joining a query that
@@ -3116,7 +3116,7 @@ func (w *WritableREST) write(ctx context.Context, query *compiledQuery, obj *uns
 	// still drop what the statement invalidated.
 	defer finish()
 
-	rows, affected, err := w.run(ctx, query, args, w.session(ctx, namespace, name))
+	rows, affected, err := w.run(ctx, query, args, w.session(ctx, namespace, name), w.oneRow(verb, namespace, name))
 	finish()
 
 	// What the statement touched: the rows it returned, or the count it
@@ -3173,21 +3173,115 @@ func (w *WritableREST) write(ctx context.Context, query *compiledQuery, obj *uns
 
 // run executes a write, as one statement or as a transaction, and reports
 // whichever of rows and affected count the caller can use.
+//
+// verify, when set, is shown what the statement produced and may refuse it.
+// Inside a transaction it runs before the commit, so a refusal leaves nothing
+// written. A single statement has already committed by the time anything can
+// look at it; the refusal still stands between the caller and a response built
+// from rows it was never meant to reach, and says the write itself was not
+// undone.
 func (w *WritableREST) run(
 	ctx context.Context,
 	query *compiledQuery,
 	args map[string]any,
 	session []crispsql.SessionVariable,
+	verify crispsql.Verify,
 ) ([]crispsql.Row, int64, error) {
 	if query.transactional() {
-		return w.pool.TransactWith(ctx, session, query.all(), args)
+		return w.pool.TransactVerifiedWith(ctx, session, query.all(), args, verify)
 	}
+
+	var (
+		rows     []crispsql.Row
+		affected int64
+		err      error
+	)
 	if query.returnsRows {
-		rows, err := w.pool.QueryWith(ctx, session, query.statement, args)
-		return rows, int64(len(rows)), err
+		rows, err = w.pool.QueryWith(ctx, session, query.statement, args)
+		affected = int64(len(rows))
+	} else {
+		affected, err = w.pool.ExecWith(ctx, session, query.statement, args)
 	}
-	affected, err := w.pool.ExecWith(ctx, session, query.statement, args)
-	return nil, affected, err
+	if err == nil && verify != nil {
+		if err = verify(rows, affected); err != nil {
+			err = fmt.Errorf("%w; it ran as a single statement rather than a transaction, so what it wrote "+
+				"has not been rolled back", err)
+		}
+	}
+	return rows, affected, err
+}
+
+// errWroteOtherRows is a single-object write whose statement reached rows other
+// than the one the request named.
+var errWroteOtherRows = goerrors.New("the statement wrote rows other than the one the request named")
+
+// oneRow is the check a single-object write's statement is held to: it reaches
+// the row the request named, and only that row.
+//
+// The reads defend themselves against a statement that forgot a filter — a get
+// refuses a row from another namespace, a list drops them, and a collection
+// delete that cannot see the namespace is not run in bulk at all — but a write
+// was answered from whatever the statement produced. An update keyed on the id
+// alone, where the identity is (tenant, id), rewrote every tenant's row of that
+// id, and with RETURNING answered an acme caller with globex's copy. Nothing in
+// the response or the logs said so.
+//
+// More than one row is refused, by the rows a RETURNING clause produced or by
+// the affected count. The count is not held against a create: MySQL reports
+// an INSERT ... ON DUPLICATE KEY UPDATE that changed one row as two, and an
+// insert that reached another tenant's row is caught by the row it returns or
+// by the read back, which is scoped. A row that came back from another
+// namespace is refused, and so is one carrying another name — except on a
+// create, whose name a database may legitimately assign.
+//
+// A returned row whose identity cannot be read is left to the mapping after
+// the commit, which reports it as it always has: refusing here would roll back
+// a write over a column the statement did not mean to return.
+func (w *WritableREST) oneRow(verb, namespace, name string) crispsql.Verify {
+	return func(rows []crispsql.Row, affected int64) error {
+		reached := int64(len(rows))
+		if verb != "create" && affected > reached {
+			reached = affected
+		}
+
+		var foreign int
+		for _, row := range rows {
+			if ns, err := w.mapper.NamespaceFrom(row); err == nil && w.NamespaceScoped() && ns != namespace {
+				foreign++
+			}
+		}
+		if foreign > 0 {
+			crispmetrics.RowsOutOfNamespace.WithLabelValues(w.projection, w.label).Add(float64(foreign))
+		}
+
+		if reached > 1 {
+			klog.InfoS("refused a write whose statement reached more than one row; the statement does not "+
+				"filter on every column of the object's identity",
+				"resource", w.label, "verb", verb, "namespace", namespace, "name", name,
+				"rows", reached, "outOfNamespace", foreign,
+				"fix", "add the namespace and the name to the statement's WHERE clause, as \"tenant = :namespace AND id = :name\" or the equivalent")
+			return fmt.Errorf("%w: it reached %d rows where it must reach one", errWroteOtherRows, reached)
+		}
+		if foreign > 0 {
+			found, _ := w.mapper.NamespaceFrom(rows[0])
+			klog.InfoS("refused a write whose statement returned a row from another namespace; the statement "+
+				"does not filter on the column mapped to metadata.namespace",
+				"resource", w.label, "verb", verb, "namespace", namespace, "name", name, "found", found,
+				"fix", "add the namespace to the statement's WHERE clause, as \"tenant = :namespace\" or the equivalent")
+			return fmt.Errorf("%w: it returned a row from namespace %q", errWroteOtherRows, found)
+		}
+		if verb == "create" || len(rows) == 0 {
+			return nil
+		}
+		if found, err := w.mapper.NameFrom(rows[0]); err == nil && found != name {
+			klog.InfoS("refused a write whose statement returned a row of another name; the statement "+
+				"does not filter on the columns mapped to metadata.name",
+				"resource", w.label, "verb", verb, "namespace", namespace, "name", name, "found", found,
+				"fix", "add the name to the statement's WHERE clause, as \"id = :name\" or the equivalent")
+			return fmt.Errorf("%w: it returned %q", errWroteOtherRows, found)
+		}
+		return nil
+	}
 }
 
 // missedRows explains a write that matched nothing. When the client asserted a

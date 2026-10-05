@@ -559,6 +559,7 @@ Published on the apiserver's own `/metrics`, alongside the standard apiserver re
 | `kube_crisp_watch_poll_errors_total` | Polls that failed or were shed — a watch that has quietly stopped advancing |
 | `kube_crisp_watch_resync_failing` | 1 while the last full resync failed and incremental polls are carrying the watchers — deletions are not being noticed until it completes |
 | `kube_crisp_query_rows_unmappable_total` | Rows skipped because they could not be turned into objects |
+| `kube_crisp_query_rows_out_of_namespace_total` | Rows a statement returned from a namespace other than the request's, withheld from a read or refused on a write — a statement missing its namespace filter |
 | `kube_crisp_cache_reads_total` | Read cache hits and misses, when `cacheTTL` is set |
 | `kube_crisp_cache_entries` | What the cache holds; sitting at its bound means it is evicting entries a request was about to ask for |
 | `kube_crisp_cache_evictions_total` | Entries dropped, by reason — `expired` is the cache working, `full` means it is smaller than the key space, `invalidated` means writes outpace the TTL |

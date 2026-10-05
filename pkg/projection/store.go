@@ -26,36 +26,6 @@ import (
 	crispsql "github.com/mrueg/kube-crisp/pkg/sql"
 )
 
-// LoadDir reads every .yaml or .yml file under dir as a CustomResourceProjection.
-//
-// This is the bootstrap path: it serves projections that exist as files rather
-// than as cluster objects, which is what makes the server runnable without a
-// cluster at all. Projections that do live in the cluster are watched and
-// installed while the server runs, by pkg/controller/projection.
-func LoadDir(dir string) ([]crispv1alpha1.CustomResourceProjection, error) {
-	var out []crispv1alpha1.CustomResourceProjection
-	err := walkManifests(dir, func(path string) error {
-		// The root is one the operator named on the command line and the rest
-		// comes from reading it, so no part of this path is attacker-controlled
-		// and no name can climb out of it.
-		loaded, err := LoadFile(path)
-		if err != nil {
-			return err
-		}
-		for i := range loaded {
-			if err := Validate(&loaded[i]); err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-		}
-		out = append(out, loaded...)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // walkManifests calls fn for every .yaml or .yml file under dir, subdirectories
 // included, in lexical order.
 //
@@ -98,13 +68,14 @@ func walkManifests(dir string, fn func(path string) error) error {
 // LoadPath reads a file, or every .yaml and .yml file in a directory, as
 // CustomResourceProjections.
 //
-// Parsing only, unlike LoadDir: it is for the commands that reason about a
-// projection they are not going to serve — checking one, or generating the RBAC
-// that makes it reachable — where stopping at the first projection that would
-// not compile means running the command again to find the second. The running
-// server re-reads --projection-dir through it too, for the same reason: a
-// projection that will not validate is failed by name when it is prepared, and
-// refusing the whole directory for it would hide every good file beside it.
+// Parsing only. It is for the commands that reason about a projection they are
+// not going to serve — checking one, or generating the RBAC that makes it
+// reachable — where stopping at the first projection that would not compile
+// means running the command again to find the second. The server reads
+// --projection-dir through it too, at startup and on every re-read, for the
+// same reason: a projection that will not validate is failed by name when it is
+// prepared, and refusing the whole directory for it would hide every good file
+// beside it.
 //
 // Subdirectories are read too, matching --projection-dir.
 func LoadPath(path string) ([]crispv1alpha1.CustomResourceProjection, error) {
@@ -134,10 +105,9 @@ func LoadPath(path string) ([]crispv1alpha1.CustomResourceProjection, error) {
 // LoadFile reads every CustomResourceProjection in one YAML file.
 //
 // Parsing only: what comes back is what the file says, not what has been
-// checked. LoadDir validates on top of this because a projection it cannot
-// serve is one it must refuse; `kube-crisp-apiserver validate` wants the parsed
-// projections whether or not they pass, so it can report each one rather than
-// stopping at the first.
+// checked. Validation happens where a projection is prepared, or in
+// `kube-crisp-apiserver validate`, which wants the parsed projections whether
+// or not they pass, so it can report each one rather than stopping at the first.
 func LoadFile(path string) ([]crispv1alpha1.CustomResourceProjection, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied path
 	if err != nil {

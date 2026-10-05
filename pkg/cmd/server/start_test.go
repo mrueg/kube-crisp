@@ -570,3 +570,68 @@ func TestAdmissionNeedsAClusterAndSaysSo(t *testing.T) {
 		t.Errorf("Config() error = %v, want it to name the flag and what it needs", err)
 	}
 }
+
+// TestConfigKeepsTheFilesBesideOneThatWillNotValidate: one projection that
+// parses but will not validate is that projection's problem. Validated here,
+// at startup, it refused the whole directory and the server did not start --
+// while the same directory re-read by the running server fails that one
+// projection by name and serves the rest.
+func TestConfigKeepsTheFilesBesideOneThatWillNotValidate(t *testing.T) {
+	o := offlineOptions(t)
+	invalid := `apiVersion: crisp.kubecrisp.io/v1alpha1
+kind: CustomResourceProjection
+metadata:
+  name: broken
+spec:
+  dataSource:
+    driver: sqlite
+    secretRef: {name: orders-db, namespace: kube-crisp}
+  resource:
+    group: store.example.com
+    version: v1alpha1
+    kind: Broken
+    plural: brokens
+    scope: Namespaced
+    schema:
+      type: object
+  queries:
+    list:
+      sql: SELECT id FROM orders
+  mapping:
+    name: id
+`
+	if err := os.WriteFile(filepath.Join(o.ProjectionDir, "broken.yaml"), []byte(invalid), 0o600); err != nil {
+		t.Fatalf("writing the projection: %v", err)
+	}
+
+	config, err := o.Config()
+	if err != nil {
+		t.Fatalf("Config() refused the directory over one invalid projection: %v", err)
+	}
+	names := map[string]bool{}
+	for i := range config.ExtraConfig.StaticProjections {
+		names[config.ExtraConfig.StaticProjections[i].Name] = true
+	}
+	if !names["orders"] || !names["broken"] {
+		t.Errorf("loaded %v, want both orders and broken, to be prepared by name", names)
+	}
+}
+
+// TestConfigRefusesAFileThatDoesNotParse: the running server keeps the last
+// set it read when a file stops parsing, and at startup there is no such set.
+// Starting with nothing would take every file-backed projection out of
+// service without a word, so this one stays fatal, and names the file.
+func TestConfigRefusesAFileThatDoesNotParse(t *testing.T) {
+	o := offlineOptions(t)
+	if err := os.WriteFile(filepath.Join(o.ProjectionDir, "torn.yaml"), []byte("kind: [unterminated\n"), 0o600); err != nil {
+		t.Fatalf("writing the file: %v", err)
+	}
+
+	_, err := o.Config()
+	if err == nil {
+		t.Fatal("a directory holding a file that does not parse was accepted")
+	}
+	if !strings.Contains(err.Error(), "torn.yaml") {
+		t.Errorf("error %q does not name the file", err)
+	}
+}

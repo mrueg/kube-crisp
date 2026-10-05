@@ -88,7 +88,10 @@ What kube-crisp does not do, or does with a condition attached, and why.
   sync. A file that does
   not parse keeps the last good set rather than taking every file-backed projection out of service.
   A file that parses but will not validate fails that one projection, by name, and the files beside
-  it are served.
+  it are served — at startup too, where it used to stop the server starting. A file that does not
+  parse at startup still does: there is no last good set yet to keep, and starting with none would
+  serve no file-backed projection without saying why. Without a cluster there is nothing to fail a
+  projection by name against, so there every projection has to compile for the server to start.
   Backed by a ConfigMap, the wait is the kubelet's rather than this server's — around a minute in the
   e2e cluster, with no restart.
 - **A file-backed projection's name is reserved.** A `CustomResourceProjection` in the cluster with

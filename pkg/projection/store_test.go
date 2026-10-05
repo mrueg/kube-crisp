@@ -149,10 +149,10 @@ spec:
     namespace: tenant
 `
 
-// TestLoadDirReadsOnlyProjections: a directory may hold Secrets, ConfigMaps, or
+// TestLoadPathReadsOnlyProjections: a directory may hold Secrets, ConfigMaps, or
 // anything else, and a loader that choked on them would make the simple case
 // awkward.
-func TestLoadDirReadsOnlyProjections(t *testing.T) {
+func TestLoadPathReadsOnlyProjections(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, "orders.yaml", validManifest)
 	writeManifest(t, dir, "secret.yaml", `apiVersion: v1
@@ -165,9 +165,9 @@ stringData:
 `)
 	writeManifest(t, dir, "notes.txt", "not a manifest at all")
 
-	projections, err := LoadDir(dir)
+	projections, err := LoadPath(dir)
 	if err != nil {
-		t.Fatalf("LoadDir() returned error: %v", err)
+		t.Fatalf("LoadPath() returned error: %v", err)
 	}
 	if len(projections) != 1 {
 		t.Fatalf("loaded %d projections, want 1", len(projections))
@@ -177,42 +177,52 @@ stringData:
 	}
 }
 
-func TestLoadDirReadsMultipleDocuments(t *testing.T) {
+func TestLoadPathReadsMultipleDocuments(t *testing.T) {
 	dir := t.TempDir()
 	second := strings.Replace(validManifest, "name: orders", "name: orders-two", 1)
 	second = strings.Replace(second, "plural: orders", "plural: ordertwos", 1)
 	writeManifest(t, dir, "both.yaml", validManifest+"\n---\n"+second)
 
-	projections, err := LoadDir(dir)
+	projections, err := LoadPath(dir)
 	if err != nil {
-		t.Fatalf("LoadDir() returned error: %v", err)
+		t.Fatalf("LoadPath() returned error: %v", err)
 	}
 	if len(projections) != 2 {
 		t.Fatalf("loaded %d projections, want 2", len(projections))
 	}
 }
 
-func TestLoadDirRejectsAnInvalidProjection(t *testing.T) {
+// TestLoadPathLeavesValidationToItsCaller: a projection that parses but will
+// not validate is read all the same, so the server can fail it by name and
+// serve the files beside it rather than refuse the directory.
+func TestLoadPathLeavesValidationToItsCaller(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, "orders.yaml", strings.Replace(validManifest, "    namespace: tenant\n", "", 1))
 
-	if _, err := LoadDir(dir); err == nil {
-		t.Fatal("a namespaced projection with no namespace column was loaded")
+	projections, err := LoadPath(dir)
+	if err != nil {
+		t.Fatalf("LoadPath() returned error: %v", err)
+	}
+	if len(projections) != 1 {
+		t.Fatalf("loaded %d projections, want 1", len(projections))
+	}
+	if err := Validate(&projections[0]); err == nil {
+		t.Error("a namespaced projection with no namespace column validated")
 	}
 }
 
-func TestLoadDirRejectsUnknownFields(t *testing.T) {
+func TestLoadPathRejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, "orders.yaml", validManifest+"  notAField: surprise\n")
 
-	if _, err := LoadDir(dir); err == nil {
+	if _, err := LoadPath(dir); err == nil {
 		t.Fatal("a manifest with an unknown field was accepted")
 	}
 }
 
-func TestLoadDirOnAMissingDirectory(t *testing.T) {
-	if _, err := LoadDir(filepath.Join(t.TempDir(), "absent")); err == nil {
-		t.Fatal("LoadDir() succeeded on a directory that does not exist")
+func TestLoadPathOnAMissingDirectory(t *testing.T) {
+	if _, err := LoadPath(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("LoadPath() succeeded on a directory that does not exist")
 	}
 }
 

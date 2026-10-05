@@ -113,8 +113,9 @@ subjects:
 {{- range $namespace := (default (list .Release.Namespace) .Values.crisp.dataSourceNamespaces) }}
 ---
 # Data source credentials are read from this namespace only, and only from
-# Secrets that opted in. Narrow this to named Secrets with resourceNames before
-# production use.
+# Secrets that opted in. The namespace is what narrows this: the server lists
+# and watches Secrets here by label, which RBAC cannot express, and a
+# resourceNames restriction cannot authorize a list or watch at all.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

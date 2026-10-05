@@ -780,8 +780,10 @@ $ kubectl get apiservices -l app.kubernetes.io/managed-by=kube-crisp
   configuration, which is a grant worth making deliberately. Each has its own manifest, and
   enabling one without applying it leaves the server unable to start its informers.
 - The `secrets` rule in `manifests/20-rbac.yaml` is a namespaced `Role`, scoped to the namespace
-  data source Secrets are read from. Narrow it further to named Secrets with `resourceNames` before
-  production use.
+  data source Secrets are read from. Give those Secrets a namespace of their own rather than
+  narrowing the rule with `resourceNames`: the server lists and watches the namespace's Secrets
+  (selecting the opt-in label, which RBAC cannot express), and `resourceNames` cannot authorize a
+  list or watch, so the server would never finish syncing and no group would become available.
 - Managing APIServices needs cluster-wide write access to `apiregistration.k8s.io`. Set
   `--manage-apiservices=false` and drop that rule if you would rather register groups yourself.
 - The `APIService` the server creates sets `insecureSkipTLSVerify: true` because it self-signs by

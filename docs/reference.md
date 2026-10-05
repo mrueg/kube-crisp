@@ -1549,6 +1549,13 @@ lets a deletion be answered from the table rather than from memory, and lets the
 only keys and versions. Turning the resync off without a `deletedQuery` is refused rather than
 accepted, since nothing would then ever notice a row disappearing.
 
+A query that filters on `deleted_at` while the tombstone's mapped `resourceVersion` is the row's last
+`updated_at` returns the same tombstone on every poll for as long as it is kept, because nothing it
+carries moves `:since` past its `deleted_at`. That is expected, and each removal is reported once: a
+tombstone is a deletion only for a row the watch cache still holds, or for one whose version is past
+the point the poll read from — a row created and removed between two polls. Every later return of it
+is a no-op.
+
 What the resync also catches is a row committed out of stamp order. A version from
 `clock_timestamp()` records when the statement ran, not when the transaction committed, so a writer
 that stamps a row and commits seconds later has stamped it *behind* rows committed in between — and

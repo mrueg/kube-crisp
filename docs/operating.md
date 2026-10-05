@@ -134,7 +134,8 @@ a stranded one, whose server is not coming back, is `--apiservices`'s to remove.
 finds everything is therefore `prune --apiservices --delete` first, then `prune --delete` for the
 roles the removed registrations were holding up. A registration that is unavailable and unclaimed
 is named on stderr for that reason, so a role that is not in the list is not mistaken for one the
-command missed.
+command missed. Only one whose Service is gone is pointed at `--apiservices`; one whose Service
+still exists is most likely a server coming back, and its roles are left to it.
 
 The bindings go with the role. Both kinds, because both are how a projected group is granted: a
 `ClusterRoleBinding` for a cluster-scoped kind, and a `RoleBinding` in each tenant's namespace
@@ -155,7 +156,10 @@ role written by hand is never a candidate however exactly it matches, and one ge
 `--name-prefix` is found anyway. If the projections or the APIServices cannot be listed it reports
 nothing rather than everything: an error on either would leave groups looking unserved and generated
 roles looking orphaned, and a forbidden APIService list in particular would leave every file-backed
-group looking that way. Running it needs permission to list both.
+group looking that way. Running it needs permission to list both. It also reads the Service each
+unavailable registration routes to, to say whether that registration is stranded or its server is
+likely restarting; without `get` on `services` it says it could not tell, and keeps the roles either
+way.
 
 The plugin is a separate binary from the server, `kubectl-crisp`, published with each release. Put
 it on `PATH` and kubectl finds it as `kubectl crisp`. It reads projections and nothing else — no
@@ -723,26 +727,38 @@ failing to reach, and it is nobody's obvious job to notice.
 
 A group version served by a projection loaded from `--projection-dir` is deliberately left unowned,
 because there is no object whose deletion should collect it. Those registrations are removed by the
-running server when it stops serving the group, so shutting the server down without first removing
+running server when it stops serving the group, so uninstalling the server without first removing
 the files leaves them behind. To find any that outlived their server:
 
 ```console
 $ kubectl crisp prune --apiservices
-v1alpha1.orders.example.com  (orders.example.com/v1alpha1: no projection serves this group, and it is unavailable)
+v1alpha1.orders.example.com  (orders.example.com/v1alpha1: no projection serves this group, it is unavailable, and Service kube-crisp/kube-crisp-apiserver does not exist)
   service/kube-crisp-apiserver in kube-crisp not found
 
 1 stranded APIService(s). Pass --delete to remove them.
 ```
 
-A registration is a candidate only when all three hold: it carries the
+A registration is a candidate only when all four hold: it carries the
 `app.kubernetes.io/managed-by: kube-crisp` label, so nothing written by anybody else is ever
-considered; no projection in the cluster declares its group version; and the aggregation layer
-reports it unavailable. That last one is what makes this safe to run while file-backed projections
-are being served — such a projection is invisible from the cluster, so the second test is true of a
-registration that is in use, and only the aggregator can tell the two apart. A registration left
-alone for that reason is named on stderr, since one that is silently skipped looks exactly like one
-the command failed to find. A registration the aggregator has not judged yet is also left alone: it
-has not failed, and unregistering it would take down a group that was about to come up.
+considered; no projection in the cluster declares its group version; the aggregation layer reports
+it unavailable; and the Service its `spec.service` names does not exist. The third is what makes
+this safe to run while file-backed projections are being served — such a projection is invisible
+from the cluster, so the second test is true of a registration that is in use, and only the
+aggregator can tell the two apart. The fourth is what makes it safe while that server restarts,
+crashloops or is upgraded, when every registration it owns is unavailable and unclaimed for a
+while. Removing one then would make its group count as unserved, a plain `prune --delete` would
+take its roles and every binding on them, and nothing recreates those bindings when the server
+comes back and registers the group again. A missing Service is what uninstalling the server leaves;
+a Service with no endpoints is not taken as evidence, since a Recreate rollout or a scale to zero
+looks the same.
+
+Each registration left alone is named on stderr, with the reason, since one that is silently skipped
+looks exactly like one the command failed to find. A registration the aggregator has not judged yet
+is left alone: it has not failed, and unregistering it would take down a group that was about to
+come up. One that is unavailable while its Service still exists, or whose Service cannot be read, is
+left alone unless `--include-unavailable` is passed — for a server that was stopped for good with
+its Service left in place. Telling these apart needs `get` on `services` in the namespace each
+registration routes to, as well as `list` on `apiservices` and `customresourceprojections`.
 
 `--delete` removes them. Do that before a plain `kubectl crisp prune --delete`: a registration
 kube-crisp wrote counts its group as served for as long as it exists, so the roles generated for a

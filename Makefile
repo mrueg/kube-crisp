@@ -285,7 +285,9 @@ helm-lint:
 	  "--set crisp.admission=true --kube-version 1.35.0" \
 	  "--set crisp.admission=true --kube-version 1.36.0" \
 	  "--set replicaCount=1 --set podDisruptionBudget.enabled=false --set crisp.leaderElection=false" \
-	  "--set crisp.caBundle=placeholder" \
+	  "--set crisp.caBundle=placeholder --set crisp.servingCertSecret=serving-tls" \
+	  "--set crisp.caBundle=placeholder --set crisp.servingCertSecret=serving-tls --set serviceMonitor.enabled=true" \
+	  "--set crisp.servingCertSecret=serving-tls" \
 	  "--set crisp.tracing.enabled=true --set crisp.tracing.endpoint=otel:4317" \
 	  "--set crisp.audit.enabled=true" \
 	  "--set spreadReplicasAcrossNodes=false" \
@@ -293,6 +295,11 @@ helm-lint:
 	  $(HELM) template kube-crisp charts/kube-crisp --namespace kube-crisp $$values >/dev/null \
 	    || { echo "==> chart failed to render with: $$values"; exit 1; }; \
 	done
+	@# A CA bundle with no certificate it signs would leave every APIService
+	@# unavailable, so the chart has to refuse it rather than render it.
+	@$(HELM) template kube-crisp charts/kube-crisp --namespace kube-crisp \
+	    --set crisp.caBundle=placeholder 2>&1 | grep -q 'crisp.caBundle needs crisp.servingCertSecret' \
+	  || { echo "==> chart did not refuse a caBundle with no serving certificate"; exit 1; }
 	@echo "==> chart renders with every combination checked"
 
 # govulncheck is installed rather than "go run": go run exits 1 for any non-zero

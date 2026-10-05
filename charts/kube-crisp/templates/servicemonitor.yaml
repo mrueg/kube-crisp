@@ -59,10 +59,17 @@ spec:
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
         {{- if .Values.crisp.caBundle }}
+        # The same bundle the APIServices trust, from the ConfigMap the
+        # Deployment template writes it to. The scrape goes to a pod IP, so the
+        # name to verify is the Service's rather than the address dialled.
+        ca:
+          configMap:
+            name: {{ include "kube-crisp.fullname" . }}-ca
+            key: ca.crt
         serverName: {{ include "kube-crisp.fullname" . }}.{{ .Release.Namespace }}.svc
         {{- else }}
         # Matches the self-signed certificate the server generates when none is
-        # supplied. Set crisp.caBundle and a real serving certificate to verify.
+        # supplied. Set crisp.caBundle and crisp.servingCertSecret to verify.
         insecureSkipVerify: true
         {{- end }}
       # Replicas serve the same projections, so their series differ only by

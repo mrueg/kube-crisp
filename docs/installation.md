@@ -42,7 +42,15 @@ Use it for a change to the chart that is not released yet, with `--set image.tag
 or name an image you built.
 
 `helm show values oci://ghcr.io/mrueg/charts/kube-crisp` lists what can be turned on: admission,
-fair queueing, a `ServiceMonitor`, an egress `NetworkPolicy`, a real CA bundle.
+fair queueing, a `ServiceMonitor`, an egress `NetworkPolicy`, a real serving certificate.
+
+A real certificate is two values set together. `crisp.servingCertSecret` names an existing
+`kubernetes.io/tls` Secret in the release namespace, valid for `<fullname>.<namespace>.svc` — a
+cert-manager `Certificate` is the usual way to get one — and the server presents it instead of the
+certificate it signs for itself. `crisp.caBundle` is the PEM CA that signed it, written into the
+APIServices the server creates and used by the `ServiceMonitor` to verify its scrape. The chart
+refuses a `caBundle` without the Secret: the APIServices would trust a CA the server does not present
+a certificate from, and every group would stay unavailable.
 
 Or with plain manifests:
 

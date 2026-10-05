@@ -29,40 +29,126 @@ import (
 // walkManifests calls fn for every .yaml or .yml file under dir, subdirectories
 // included, in lexical order.
 //
-// Directories whose name begins with a dot are skipped, and that is what makes
+// Anything whose name begins with a dot is skipped, and that is what makes
 // this safe to point at a mounted ConfigMap. Such a mount is not a flat
 // directory: the keys are symlinks beside a `..data` symlink pointing at a
 // real, timestamped directory holding the files. Descending into that one would
 // load every projection a second time, under a second path — and two
 // projections claiming one resource is a conflict, so a recursive read of a
 // ConfigMap would otherwise fail every projection in the mount against its own
-// twin. The symlinks need no rule: WalkDir does not follow them, so `..data` is
-// a non-directory with no manifest extension, and each key is read exactly once
-// through the name the ConfigMap gave it.
+// twin. Skipped by name, each key is read exactly once, through the name the
+// ConfigMap gave it.
 //
-// Skipping dotted directories costs nothing else: `.git`, `.helm`, and an
-// editor's `.cache` are not where anybody keeps a manifest they mean to serve.
+// Skipping dotted names costs nothing else: `.git`, `.helm`, and an editor's
+// `.cache` are not where anybody keeps a manifest they mean to serve, and an
+// editor's files are the reason files are skipped as well as directories.
+// Emacs keeps `.#orders.yaml` beside a modified buffer as a symlink to nowhere,
+// and reading it failed the whole directory for as long as the edit lasted.
+//
+// Symlinked directories are followed, the root included. Not following them
+// read nothing at all through a root that is a link -- the `current ->
+// releases/42` a deploy swaps atomically -- and skipped the subdirectory of a
+// ConfigMap whose items name nested paths, which the kubelet mounts as `sub ->
+// ..data/sub`. A directory is read once by where it really is, so a link back
+// up the tree ends rather than looping, and two links to one directory do not
+// load it twice.
 func walkManifests(dir string, fn func(path string) error) error {
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if path != dir && strings.HasPrefix(d.Name(), ".") {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		switch strings.ToLower(filepath.Ext(d.Name())) {
-		case ".yaml", ".yml":
-			return fn(path)
-		}
-		return nil
-	})
-	if err != nil {
+	if err := walkTree(dir, nil, fn); err != nil {
 		return fmt.Errorf("reading projection directory %s: %w", dir, err)
 	}
 	return nil
+}
+
+// ManifestDirs returns every directory walkManifests reads under dir, dir
+// included, each by where it really is.
+//
+// This is for watching the tree, and it has to be the same set: a directory
+// the watch missed is a change picked up a resync late, and one it added
+// beyond the walk is a sync for a change that cannot matter. Real paths rather
+// than the names they were reached by, because a watch is on the directory a
+// link pointed at when it was added -- a link swapped to another is a new
+// directory to watch, which a name already watched would hide.
+func ManifestDirs(dir string) ([]string, error) {
+	var dirs []string
+	err := walkTree(dir, func(real string) error {
+		dirs = append(dirs, real)
+		return nil
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reading projection directory %s: %w", dir, err)
+	}
+	return dirs, nil
+}
+
+// walkTree is the walk walkManifests and ManifestDirs share: onDir for every
+// directory, by its real path, and onFile for every manifest, by the path it
+// was reached through, so an error names the file as the operator knows it.
+// Either may be nil.
+func walkTree(dir string, onDir, onFile func(path string) error) error {
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
+
+	seen := sets.New[string]()
+	var walk func(path, real string) error
+	walk = func(path, real string) error {
+		if seen.Has(real) {
+			return nil
+		}
+		seen.Insert(real)
+		if onDir != nil {
+			if err := onDir(real); err != nil {
+				return err
+			}
+		}
+
+		// Sorted by name, so the order is the same on every read.
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			child := filepath.Join(path, name)
+
+			if entry.IsDir() {
+				if err := walk(child, filepath.Join(real, name)); err != nil {
+					return err
+				}
+				continue
+			}
+			if entry.Type()&fs.ModeSymlink != 0 {
+				// A link that leads nowhere is left to the extension rule
+				// below: one named like a manifest fails to read, as a missing
+				// manifest should, and anything else is not this walk's
+				// business.
+				if target, err := filepath.EvalSymlinks(child); err == nil {
+					if info, err := os.Stat(target); err == nil && info.IsDir() {
+						if err := walk(child, target); err != nil {
+							return err
+						}
+						continue
+					}
+				}
+			}
+
+			if onFile == nil {
+				continue
+			}
+			switch strings.ToLower(filepath.Ext(name)) {
+			case ".yaml", ".yml":
+				if err := onFile(child); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(dir, root)
 }
 
 // LoadPath reads a file, or every .yaml and .yml file in a directory, as

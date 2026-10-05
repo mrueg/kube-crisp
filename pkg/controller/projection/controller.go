@@ -9,10 +9,9 @@ import (
 
 	"context"
 	"fmt"
-	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1076,25 +1075,36 @@ func (c *Controller) watchStaticDir(ctx context.Context) {
 }
 
 // watchStaticTree adds a watch to the projection directory and to every
-// directory under it.
+// directory under it that is read for projections.
 //
-// Dotted directories are skipped, for the reason walkManifests skips them: a
-// mounted ConfigMap keeps its real files in a timestamped `..`-prefixed
-// directory that nothing reads projections out of, and each write there would
-// otherwise queue a second sync for a change already seen through the symlink.
+// The set is the loader's own, from projection.ManifestDirs, so the two cannot
+// drift: dotted directories are skipped, because a mounted ConfigMap keeps its
+// real files in a timestamped `..`-prefixed directory that nothing reads
+// projections out of, and each write there would otherwise queue a second sync
+// for a change already seen through the symlink; symlinked directories are
+// followed, root included, because the loader reads through them and a
+// directory it reads but nothing watches is a change picked up a resync late.
+// Walked separately, the watch stopped at a link the loader went on to read,
+// and a root that was a link was not watched at all.
+//
+// A root that is a link is watched from its parent as well. Swapping it to
+// another target -- which is the reason to deploy through one -- changes
+// nothing inside the directory it pointed at, so only the parent sees it; and
+// the re-walk that event queues is what moves the watch to the new target.
 func (c *Controller) watchStaticTree(watcher *fsnotify.Watcher) error {
-	return filepath.WalkDir(c.staticDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+	dirs, err := projection.ManifestDirs(c.staticDir)
+	if err != nil {
+		return err
+	}
+	if info, err := os.Lstat(c.staticDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		dirs = append(dirs, filepath.Dir(c.staticDir))
+	}
+	for _, dir := range dirs {
+		if err := watcher.Add(dir); err != nil {
 			return err
 		}
-		if !d.IsDir() {
-			return nil
-		}
-		if path != c.staticDir && strings.HasPrefix(d.Name(), ".") {
-			return fs.SkipDir
-		}
-		return watcher.Add(path)
-	})
+	}
+	return nil
 }
 
 // updateStatus reports whether a projection is being served.

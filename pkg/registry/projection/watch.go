@@ -1089,10 +1089,11 @@ func (c *watchCache) applyLocked(
 		}
 		for key, item := range c.items {
 			if _, still := next[key]; !still {
+				event := c.deletedEntry(item)
 				if row, ok := described[key]; ok {
-					item = row
+					event = deleted(row)
 				}
-				events = append(events, deleted(item))
+				events = append(events, event)
 			}
 		}
 
@@ -1214,7 +1215,14 @@ func (c *watchCache) applyLocked(
 				}
 				continue
 			}
-			events = append(events, deleted(previous))
+			// Flagged when what it carries is the cache's own entry, which on a
+			// lightweight cache is trimmed; the tombstone's row standing in for
+			// it above is whole.
+			event := deleted(previous)
+			if entry, held := next[key]; held && entry == previous {
+				event = c.deletedEntry(previous)
+			}
+			events = append(events, event)
 			delete(next, key)
 		}
 	}
@@ -1557,6 +1565,13 @@ type cacheEvent struct {
 	// previousTrimmed says previous is a lightweight cache's entry, which
 	// carries the namespace and the labels and no mapped field.
 	previousTrimmed bool
+
+	// trimmed and bare say how little a deletion's object describes: a
+	// trimmed entry has the namespace and the labels and no mapped field, and
+	// a bare one — a tombstone that recorded only the identity columns — has
+	// the namespace and the name and nothing else. See transition.
+	trimmed bool
+	bare    bool
 }
 
 // added is the event for a row the cache did not hold.
@@ -1567,6 +1582,14 @@ func added(obj *unstructured.Unstructured) cacheEvent {
 // deleted is the event for a row that is gone, carrying it as it last was.
 func deleted(obj *unstructured.Unstructured) cacheEvent {
 	return cacheEvent{Event: watch.Event{Type: watch.Deleted, Object: obj}}
+}
+
+// deletedEntry is the deletion for a row described only by what the cache kept
+// of it, which on a lightweight cache is a trimmed entry.
+func (c *watchCache) deletedEntry(entry *unstructured.Unstructured) cacheEvent {
+	event := deleted(entry)
+	event.trimmed = c.trimmed(entry)
+	return event
 }
 
 // modified is the event for a row that changed, keeping what it changed from.
@@ -2050,6 +2073,9 @@ func (w *cacheWatcher) matchesFields(obj *unstructured.Unstructured) bool {
 // every modification carried its previous object, and stopped holding the
 // moment one did not.
 func (w *cacheWatcher) transition(event cacheEvent) (watch.Event, bool) {
+	if event.Type == watch.Deleted && (event.bare || event.trimmed) {
+		return event.Event, w.mayHaveHeld(event)
+	}
 	if event.Type != watch.Modified {
 		return event.Event, w.matches(event.Object)
 	}
@@ -2070,6 +2096,33 @@ func (w *cacheWatcher) transition(event cacheEvent) (watch.Event, bool) {
 	default:
 		return watch.Event{}, false
 	}
+}
+
+// mayHaveHeld decides a deletion whose object cannot answer the whole selector.
+//
+// A bare identity has no labels and no fields, and a trimmed entry has labels
+// and no mapped field. Asked as it stands, a selector rejected every such
+// deletion for want of the very values it filters on, and a watcher holding the
+// row — it matched when the watcher last saw it — kept it for as long as it
+// stayed connected. That was a database replay with an identity-only tombstone
+// in front of any label selector, and a lightweight cache losing a row with no
+// tombstone in front of any field selector.
+//
+// So what the object cannot say counts as a possible match, the rule
+// matchedBefore applies to a modification whose previous state is unknown: a
+// deletion the watcher never needed is one an informer discards, and one it did
+// need and was not sent is a row it keeps forever. The namespace is always
+// known, being part of the key, and is still asked, so a watcher scoped to one
+// namespace is never told about a row in another.
+func (w *cacheWatcher) mayHaveHeld(event cacheEvent) bool {
+	obj, ok := event.Object.(*unstructured.Unstructured)
+	if !ok || !w.matchesNamespace(obj) {
+		return false
+	}
+	if event.bare {
+		return true
+	}
+	return w.matchesMetadata(obj)
 }
 
 // exited is the object a deletion carries for a row that left this watcher's
@@ -2113,10 +2166,12 @@ func exited(last *unstructured.Unstructured, version string) *unstructured.Unstr
 //
 // A trimmed entry carries the namespace and the labels and no mapped field, so
 // the field half is answered from the row in hand. A row that leaves a field
-// selector on a lightweight cache is therefore not reported — the same limit a
-// trimmed entry puts on a deletion, where the tombstone's own row answers it
-// and here nothing can. A row that leaves a label selector is, which is one
-// more reason the trimmed entry keeps its labels.
+// selector on a lightweight cache is therefore not reported. A deletion has
+// the tombstone's own row to answer that, or failing it is delivered on the
+// labels alone (see mayHaveHeld); a row that is still there has neither, and
+// reporting every modification as a possible departure would be a deletion per
+// change. A row that leaves a label selector is reported, which is one more
+// reason the trimmed entry keeps its labels.
 func (w *cacheWatcher) matchedBefore(event cacheEvent, obj *unstructured.Unstructured) (bool, *unstructured.Unstructured) {
 	switch {
 	case event.previous == nil:
@@ -2303,7 +2358,7 @@ func (c *watchCache) replayFromDatabase(
 		events = append(events, recordedEvent{
 			from:    since,
 			version: since,
-			event:   deleted(c.tombstone(identity, gvk)),
+			event:   c.tombstone(identity, gvk),
 		})
 	}
 
@@ -2314,8 +2369,8 @@ func (c *watchCache) replayFromDatabase(
 	return events, true
 }
 
-// tombstone builds the object a Deleted event carries for a row the cache no
-// longer holds.
+// tombstone builds the Deleted event a replay sends for a row the cache no
+// longer holds, saying how much of a selector its object can answer.
 //
 // The cached object when there is one, since it describes what was actually
 // removed. Otherwise identity alone: the row is gone from the table and the
@@ -2323,7 +2378,7 @@ func (c *watchCache) replayFromDatabase(
 func (c *watchCache) tombstone(
 	identity cacheIdentity,
 	gvk schema.GroupVersionKind,
-) *unstructured.Unstructured {
+) cacheEvent {
 	// The tombstone's own row first when the cache keeps only keys and
 	// versions, since what it holds cannot describe anything. Read under the
 	// lock, since a poll can turn lightweight on while a replay is built.
@@ -2331,7 +2386,7 @@ func (c *watchCache) tombstone(
 	lightweight := c.lightweight
 	c.mu.Unlock()
 	if lightweight && identity.object != nil {
-		return identity.object
+		return deleted(identity.object)
 	}
 
 	// Otherwise the cached object: the row as this server last saw it, which is
@@ -2340,14 +2395,14 @@ func (c *watchCache) tombstone(
 	cached, ok := c.items[identity.key()]
 	c.mu.Unlock()
 	if ok {
-		return cached
+		return c.deletedEntry(cached)
 	}
 
 	// Then the tombstone's own columns, for a replay the cache never held —
 	// resuming against a restarted server, or a replica this client has not
 	// spoken to. This is the case that used to produce a bare name.
 	if identity.object != nil {
-		return identity.object
+		return deleted(identity.object)
 	}
 
 	// Identity alone, which is all a tombstone recording only the identity
@@ -2360,7 +2415,9 @@ func (c *watchCache) tombstone(
 	if identity.namespace != "" {
 		obj.SetNamespace(identity.namespace)
 	}
-	return obj
+	event := deleted(obj)
+	event.bare = true
+	return event
 }
 
 // retain is what the cache keeps for a row.

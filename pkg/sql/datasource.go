@@ -644,7 +644,7 @@ func (p *Pool) QueryWith(ctx context.Context, session []SessionVariable, stmt *S
 	// the same reason: a transaction is the only place a setting can be confined
 	// to one request rather than left on a pooled connection.
 	if len(session) > 0 || stmt.EnforceTimeout {
-		rows, _, err := p.transact(ctx, session, []*Statement{stmt}, args, true)
+		rows, _, err := p.transact(ctx, session, []*Statement{stmt}, args, true, nil)
 		return rows, err
 	}
 
@@ -808,7 +808,7 @@ func (p *Pool) Exec(ctx context.Context, stmt *Statement, args map[string]any) (
 // transaction when there are any.
 func (p *Pool) ExecWith(ctx context.Context, session []SessionVariable, stmt *Statement, args map[string]any) (int64, error) {
 	if len(session) > 0 || stmt.EnforceTimeout {
-		_, affected, err := p.transact(ctx, session, []*Statement{stmt}, args, false)
+		_, affected, err := p.transact(ctx, session, []*Statement{stmt}, args, false, nil)
 		return affected, err
 	}
 
@@ -968,19 +968,42 @@ func (p *Pool) QueryAllWith(ctx context.Context, session []SessionVariable, stmt
 
 // TransactWith runs a transaction with session variables applied to it first.
 func (p *Pool) TransactWith(ctx context.Context, session []SessionVariable, stmts []*Statement, args map[string]any) ([]Row, int64, error) {
+	return p.TransactVerifiedWith(ctx, session, stmts, args, nil)
+}
+
+// Verify inspects what a transaction's last statement produced before it is
+// committed. An error from it rolls the transaction back and is returned as
+// the transaction's own.
+type Verify func(rows []Row, affected int64) error
+
+// TransactVerifiedWith is TransactWith with a check run before the commit.
+//
+// It is for the caller that can only tell whether a write did what it meant to
+// once the statement has run — a write meant for one row that reached several
+// — and that wants the answer to be "nothing happened" rather than an error
+// reported over a change that has already landed.
+func (p *Pool) TransactVerifiedWith(
+	ctx context.Context,
+	session []SessionVariable,
+	stmts []*Statement,
+	args map[string]any,
+	verify Verify,
+) ([]Row, int64, error) {
 	if len(stmts) == 0 {
 		return nil, 0, fmt.Errorf("no statements to run")
 	}
-	return p.transact(ctx, session, stmts, args, stmts[len(stmts)-1].ReturnsRows)
+	return p.transact(ctx, session, stmts, args, stmts[len(stmts)-1].ReturnsRows, verify)
 }
 
-// transact is the shared body: set the session, run the statements, commit.
+// transact is the shared body: set the session, run the statements, verify,
+// commit.
 func (p *Pool) transact(
 	ctx context.Context,
 	session []SessionVariable,
 	stmts []*Statement,
 	args map[string]any,
 	returnsRows bool,
+	verify Verify,
 ) (out []Row, affected int64, err error) {
 	last := stmts[len(stmts)-1]
 	var enforced bool
@@ -1084,6 +1107,13 @@ func (p *Pool) transact(
 		}
 		stmtSpan.endAffected(count, nil)
 		affected = count
+	}
+
+	// Still inside the transaction, so a refusal is a rollback.
+	if verify != nil {
+		if err := verify(out, affected); err != nil {
+			return nil, 0, err
+		}
 	}
 
 	// Before the commit, for the same reason as on the read path.

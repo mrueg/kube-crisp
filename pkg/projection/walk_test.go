@@ -48,9 +48,9 @@ func write(t *testing.T, path, body string) {
 
 func loadedNames(t *testing.T, dir string) []string {
 	t.Helper()
-	loaded, err := LoadDir(dir)
+	loaded, err := LoadPath(dir)
 	if err != nil {
-		t.Fatalf("LoadDir(%s): %v", dir, err)
+		t.Fatalf("LoadPath(%s): %v", dir, err)
 	}
 	out := make([]string, 0, len(loaded))
 	for i := range loaded {
@@ -63,7 +63,7 @@ func loadedNames(t *testing.T, dir string) []string {
 // A directory holding only subdirectories used to load nothing and say nothing,
 // which is what happened to this repository's own examples/ when it grew
 // folders.
-func TestLoadDirReadsSubdirectories(t *testing.T) {
+func TestLoadPathReadsSubdirectories(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "top.yaml"), manifest("top", "tops"))
 	write(t, filepath.Join(dir, "orders", "orders.yaml"), manifest("orders", "orders"))
@@ -88,7 +88,7 @@ func TestLoadDirReadsSubdirectories(t *testing.T) {
 // recursively without care, every projection arrives twice — and two
 // projections claiming one resource is a conflict, so a ConfigMap would fail
 // every projection in it against its own twin.
-func TestLoadDirReadsAConfigMapMountOnce(t *testing.T) {
+func TestLoadPathReadsAConfigMapMountOnce(t *testing.T) {
 	dir := t.TempDir()
 
 	// The real files, where the kubelet puts them.
@@ -114,7 +114,7 @@ func TestLoadDirReadsAConfigMapMountOnce(t *testing.T) {
 
 // Dotted directories are not where manifests live, and descending into them is
 // how the ConfigMap above would double.
-func TestLoadDirSkipsDottedDirectories(t *testing.T) {
+func TestLoadPathSkipsDottedDirectories(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "orders.yaml"), manifest("orders", "orders"))
 	write(t, filepath.Join(dir, ".git", "stale.yaml"), manifest("stale", "stales"))
@@ -128,26 +128,11 @@ func TestLoadDirSkipsDottedDirectories(t *testing.T) {
 
 // A dot on the directory the operator named is not a reason to read nothing:
 // the rule is about what is found underneath, not about where the walk starts.
-func TestLoadDirReadsADottedRoot(t *testing.T) {
+func TestLoadPathReadsADottedRoot(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), ".projections")
 	write(t, filepath.Join(dir, "orders.yaml"), manifest("orders", "orders"))
 
 	if got := loadedNames(t, dir); len(got) != 1 || got[0] != "orders" {
 		t.Fatalf("loaded %v, want orders", got)
-	}
-}
-
-// LoadPath backs the plugin and `validate`, and has to agree with the server
-// about which files are in scope.
-func TestLoadPathReadsSubdirectoriesToo(t *testing.T) {
-	dir := t.TempDir()
-	write(t, filepath.Join(dir, "orders", "orders.yaml"), manifest("orders", "orders"))
-
-	loaded, err := LoadPath(dir)
-	if err != nil {
-		t.Fatalf("LoadPath(%s): %v", dir, err)
-	}
-	if len(loaded) != 1 || loaded[0].Name != "orders" {
-		t.Fatalf("LoadPath loaded %d projections, want orders", len(loaded))
 	}
 }

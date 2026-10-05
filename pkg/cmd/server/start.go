@@ -438,7 +438,20 @@ func (o *CrispServerOptions) Config() (*apiserver.Config, error) {
 
 	var projections []crispv1alpha1.CustomResourceProjection
 	if o.ProjectionDir != "" {
-		loaded, err := projection.LoadDir(o.ProjectionDir)
+		// Parsed here and validated where every projection is: when it is
+		// prepared, which fails one that will not validate by name. Validated
+		// here instead, one such file refused the whole directory and the
+		// server did not start -- while the running server, re-reading the
+		// same directory, served the files beside it. Both now read it the one
+		// way.
+		//
+		// A file that does not parse is still fatal here, where the running
+		// server would keep the last set it read: at startup there is no such
+		// set, and starting with none would take every file-backed projection
+		// out of service without saying so. Without a cluster there is no
+		// controller to fail a projection by name either; that path compiles
+		// once and stops on the first failure, naming the projection.
+		loaded, err := projection.LoadPath(o.ProjectionDir)
 		if err != nil {
 			return nil, err
 		}

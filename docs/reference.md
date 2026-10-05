@@ -499,6 +499,22 @@ RETURNING id, tenant, customer, updated_at
 With `RETURNING`, a statement that matches nothing reports a conflict rather than a lost update.
 Let the database assign the new version; the client's value belongs in the `WHERE` clause.
 
+A delete binds `:resourceVersion` too, to the version of the row its preconditions and admission
+were checked against, so the same guard makes a delete conditional:
+
+```sql
+DELETE FROM orders
+WHERE tenant = :namespace AND id = :name
+  AND (:resourceVersion::text IS NULL OR updated_at = :resourceVersion)
+```
+
+When it matches nothing, something wrote or removed the row after it was read, and the delete is
+decided again on a fresh read, as the etcd store does: a row that is gone answers `404`, one whose
+version no longer meets the client's precondition answers `409`, and one that only moved under a
+client that asserted nothing is deleted, with the response carrying the copy that was removed.
+Without the guard, a write that lands between the read and the delete is deleted along with the
+row.
+
 ## Selectors
 
 Label selectors are applied to mapped objects, or pushed into SQL through `:labelSelector` if the

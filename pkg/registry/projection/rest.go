@@ -2341,9 +2341,46 @@ func (w *WritableREST) Delete(ctx context.Context, name string, deleteValidation
 	return w.deleteObject(ctx, name, nil, deleteValidation, options)
 }
 
+// deleteAttempts bounds how many times a delete that lost a race to another
+// write is decided again on the row as it now is.
+const deleteAttempts = 5
+
+// errDeleteRaced is a delete statement that bound the version it was decided on
+// and matched nothing: the row moved, or went, after it was read.
+var errDeleteRaced = goerrors.New("the row changed between the read and the delete")
+
 // deleteObject removes an object, deciding on known when the caller already
 // holds a fresh copy of it and reading one otherwise.
+//
+// A delete statement that binds :resourceVersion makes the decision atomic: it
+// only removes the row at the version the preconditions, the admission checks
+// and the response were all decided on. When it matches nothing, something
+// changed the row in between, and the delete is decided again on a fresh read
+// — which is what the etcd store does when its conditional delete loses. That
+// re-read is what tells the outcomes apart: a row that is gone answers 404, one
+// whose version no longer meets the client's precondition answers 409, and one
+// that merely moved under a client that asserted nothing is deleted, with the
+// response carrying the copy that was actually removed.
 func (w *WritableREST) deleteObject(
+	ctx context.Context,
+	name string,
+	known runtime.Object,
+	deleteValidation rest.ValidateObjectFunc,
+	options *metav1.DeleteOptions,
+) (runtime.Object, bool, error) {
+	for attempt := 0; attempt < deleteAttempts; attempt++ {
+		obj, deleted, err := w.deleteOnce(ctx, name, known, deleteValidation, options)
+		if !goerrors.Is(err, errDeleteRaced) {
+			return obj, deleted, err
+		}
+		// A copy handed in by the caller is the one that went stale.
+		known = nil
+	}
+	return nil, false, errors.NewConflict(w.groupResource(), name, fmt.Errorf("%s", registry.OptimisticLockErrorMsg))
+}
+
+// deleteOnce is one attempt at deleteObject.
+func (w *WritableREST) deleteOnce(
 	ctx context.Context,
 	name string,
 	known runtime.Object,
@@ -2450,6 +2487,16 @@ func (w *WritableREST) deleteObject(
 	for k, v := range params {
 		args[k] = v
 	}
+	// The version everything above was decided on, bound so a statement can
+	// make the delete conditional on it, as an update's is. Left NULL it was
+	// never anything else: the preconditions were checked against the read
+	// alone, and a write committed after it was deleted along with the row
+	// while the client that asserted the version it no longer had was told
+	// 200. Not the client's precondition but what was read — the two agree
+	// whenever there is one, the check above required it — so a delete that
+	// asserted nothing is not decided on an out-of-date copy either.
+	guarded := w.delete.declares("resourceVersion") && obj.GetResourceVersion() != ""
+	args["resourceVersion"] = nullIfEmpty(obj.GetResourceVersion())
 	if err := w.applyParameters(ctx, args, w.delete.parameters, namespace, name, obj); err != nil {
 		return nil, false, errors.NewInternalError(err)
 	}
@@ -2484,6 +2531,9 @@ func (w *WritableREST) deleteObject(
 		return nil, false, translateWriteError(err, w.groupResource(), name, "delete")
 	}
 	if affected == 0 {
+		if guarded {
+			return nil, false, errDeleteRaced
+		}
 		return nil, false, errors.NewNotFound(w.groupResource(), name)
 	}
 

@@ -243,6 +243,12 @@ parses it and resolves every name against the catalogue without touching a row, 
 database's own and costs it nothing. The same check runs at compile time regardless; the webhook
 only moves it to where the mistake was made.
 
+An update is checked only when it changes the spec. A label, an annotation or a finalizer is let
+through whatever the database now says, and so is any update to a projection that is being
+deleted. Checking those refused them once the database had moved on — a projection whose table was
+dropped could not be relabelled, nor have its finalizer removed, and stayed `Terminating` — while
+the controller reports such a projection as failed either way.
+
 The refusal names the query and the database's error in the server log, not in the response. A
 projection that is malformed in itself — a missing group, a mapping that names no column, a plural
 that is not lowercase — is refused with the same message `kube-crisp validate` gives for the file,

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/authentication/user"
@@ -256,6 +257,34 @@ func (h *Handler) review(ctx context.Context, request *admissionv1.AdmissionRequ
 		// Not a refusal of the projection: there was no projection to refuse.
 		result = crispmetrics.AdmissionError
 		return denied(request.UID, fmt.Sprintf("this is not a CustomResourceProjection: %v", err))
+	}
+
+	// An update is checked only when it changes what the check reads.
+	//
+	// The webhook is there to refuse a spec at the moment someone writes it,
+	// and a label, an annotation, or a finalizer writes no spec. Checked
+	// anyway, every such update was refused once the database had moved on
+	// from the spec -- a dropped table, a renamed column -- so GitOps could
+	// not relabel the projection, and a controller could not remove its
+	// finalizer, which left a projection being deleted Terminating for good.
+	// The projection is failed and reported by the controller regardless;
+	// refusing its metadata only made it harder to get rid of.
+	//
+	// A projection being deleted is let through whatever it changes: nothing
+	// in it will be compiled again, and the update in flight is most likely
+	// the finalizer that stands between it and being gone.
+	if request.Operation == admissionv1.Update {
+		if p.DeletionTimestamp != nil {
+			return allowed()
+		}
+		// No old object, or one that does not decode, is compared as a
+		// changed spec: checked rather than waved through.
+		var old crispv1alpha1.CustomResourceProjection
+		if len(request.OldObject.Raw) > 0 &&
+			json.Unmarshal(request.OldObject.Raw, &old) == nil &&
+			apiequality.Semantic.DeepEqual(old.Spec, p.Spec) {
+			return allowed()
+		}
 	}
 
 	// What is wrong with the object itself is said in full. Validate reads

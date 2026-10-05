@@ -230,6 +230,16 @@ func Open(opts PoolOptions) (*Pool, error) {
 		dsn = driver.PrepareDSN(dsn)
 	}
 
+	// The MySQL driver parses the string as the pool is opened, and its parse
+	// errors quote the value it could not read -- whatever the named Secret key
+	// held. They are plain strings, so redactDSN cannot recognise one after the
+	// fact; this asks first, and answers with the reason alone.
+	if driver.SQLDriver == "mysql" {
+		if err := mysqlParseFailure(dsn); err != nil {
+			return nil, fmt.Errorf("opening %s data source: %w", opts.Driver, err)
+		}
+	}
+
 	// Two ways to open the same database, and which one is used is decided
 	// here, once.
 	//
@@ -496,8 +506,16 @@ func (p *Pool) Ping(ctx context.Context) error { return redactDSN(p.dsn, p.db.Pi
 //
 // Exact substring, because the leak is the value being echoed whole, and
 // anything cleverer would be a guess at what a driver considers sensitive.
+// Except where a driver echoes it not quite whole: pgx's parse failure quotes
+// the string with its password masked, which an exact search cannot find, so
+// that error is replaced outright first -- see withoutParsedInput. MySQL's are
+// caught before they happen, in Open.
 func redactDSN(dsn string, err error) error {
-	if err == nil || dsn == "" {
+	if err == nil {
+		return nil
+	}
+	err = withoutParsedInput(err)
+	if dsn == "" {
 		return err
 	}
 	message := err.Error()

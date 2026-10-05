@@ -150,9 +150,12 @@ func (p *Pool) Listen(ctx context.Context, channel string) (<-chan struct{}, err
 		}, func(err error) {
 			connected.Set(0)
 			if err != nil {
+				// The listener opens its own connection from the same string
+				// as the pool, so its failure to parse it is the pool's, and is
+				// redacted the same way before it is logged.
 				klog.V(2).InfoS("notification listener stopped; reconnecting",
 					"channel", channel, "datasource", datasource,
-					"retryAfter", listenRetryInterval, "err", err)
+					"retryAfter", listenRetryInterval, "err", redactDSN(p.dsn, err))
 			}
 		})
 	}()

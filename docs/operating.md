@@ -471,7 +471,12 @@ The four conditions say different things and are worth reading separately.
 `SchemaResolved` covers the shape, including a schema borrowed with
 `schemaFrom`. `DataSourceConnected` going false means the database is
 unreachable and requests are getting `503`, while the API group stays installed.
-`Ready` false with reason `CompilationFailed` means the projection is not being
+Its message is the driver's error with the connection string taken out. A string
+the driver cannot parse — reported here for PostgreSQL, and as a compilation
+failure for MySQL, which parses it up front — reads `cannot parse [connection
+string redacted]` and the driver's reason, such as `invalid port` or `invalid
+bool value`, with none of the string's contents, since they are whatever the
+named Secret key held. The `503` body and the log carry the same text. `Ready` false with reason `CompilationFailed` means the projection is not being
 served at all; `Ready` false with reason `ServingPreviousConfiguration` means the
 generation in the cluster did not compile and the previous one is still
 answering — requests work, and the spec answering them is not the spec you

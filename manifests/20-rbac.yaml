@@ -35,8 +35,8 @@ subjects:
     name: kube-crisp-apiserver
     namespace: kube-crisp
 ---
-# Read access to projection configuration and to the Secrets holding database
-# credentials. Narrow the secrets rule to specific names in production.
+# Read access to projection configuration. Secrets are granted separately, by
+# the namespaced Role below.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

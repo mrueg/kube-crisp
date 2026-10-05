@@ -85,9 +85,15 @@ The shipped manifests favour a working first deployment. Before production:
 - Replace `insecureSkipTLSVerify` on the `APIService` with a real `caBundle`,
   and give the server a serving certificate rather than the self-signed one it
   generates (`--tls-cert-file`, `--tls-private-key-file`).
-- Narrow `manifests/20-rbac.yaml`'s `secrets` rule to named Secrets with
-  `resourceNames`. It is already restricted to one namespace, but not to
-  individual Secrets.
+- Keep data source Secrets in a namespace of their own. The `secrets` rule in
+  `manifests/20-rbac.yaml` is a `Role` bound only in the namespaces named by
+  `--datasource-namespaces`, and that set of namespaces is what narrows it: the
+  server lists and watches Secrets there to pick up a rotated credential, and
+  RBAC cannot restrict a list to the `crisp.kubecrisp.io/allow-projection=true`
+  label the server selects on. Do not narrow the rule with `resourceNames`:
+  that cannot authorize a list or watch of the namespace, so the informer is
+  refused, the server never reports its projections synced, and every group it
+  serves stays unavailable.
 - Pin the image to a digest rather than `:latest`. Releases are signed with
   cosign and carry SBOMs and build provenance; verify them.
 - Set `--manage-apiservices=false` and drop the `apiregistration.k8s.io` rule if

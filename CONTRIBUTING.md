@@ -101,8 +101,8 @@ them. `make e2e-bench-check` fails if one is orphaned.
 decision usually is not. A comment explaining why a lock is *not* held across a
 database round trip is worth more than one restating the line below it.
 
-**Measurements over assertions.** The performance numbers in [docs/performance.md](docs/performance.md) come from
-`make bench`, and the claims in it are ones the suite checks. If you improve
+**Measurements over assertions.** The performance numbers in the docs come from
+`make bench`, and the claims in them are ones the suite checks. If you improve
 something, a before-and-after benchmark is the argument; if you cannot measure
 it, say so.
 

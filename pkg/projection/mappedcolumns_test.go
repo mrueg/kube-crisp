@@ -88,31 +88,44 @@ func TestMappingColumnsCoversEveryColumnBearingField(t *testing.T) {
 // TestMappingColumnsReportsIdentityFirst is a contract, not a detail.
 //
 // requiredColumns keeps the first description of a column read twice, so a
-// column that is both the object's name and one of its fields is reported as
+// column that is both the object's uid and one of its fields is reported as
 // identity — the half that cannot be dropped. That is only true while identity
-// comes first out of here.
+// comes first out of here. The name and namespace columns cannot be mapped a
+// second time at all, which NewMapper refuses; the uid column can, and a
+// projection showing its key as a field as well is an ordinary thing to write.
 func TestMappingColumnsReportsIdentityFirst(t *testing.T) {
-	columns := MappingColumns(&crispv1alpha1.Mapping{
-		Name: "id",
+	mapping := crispv1alpha1.Mapping{
+		Name: "slug",
+		UID:  "id",
 		Fields: []crispv1alpha1.FieldMapping{
 			{Column: "id", Path: "spec.id"},
 		},
-	})
-
-	if len(columns) != 2 {
-		t.Fatalf("got %d column(s), want the identity and the field: %+v", len(columns), columns)
 	}
-	if columns[0].UsedFor != usedForIdentity {
-		t.Fatalf("the first report of id is %q, want identity", columns[0].UsedFor)
+	if _, err := NewMapper(crispv1alpha1.ProjectedResource{
+		Group: "store.example.com", Version: "v1alpha1", Kind: "Order",
+		Plural: "orders", Scope: crispv1alpha1.ClusterScoped,
+	}, mapping); err != nil {
+		t.Fatalf("NewMapper() refused the mapping this test describes: %v", err)
+	}
+
+	var reports []MappedColumn
+	for _, column := range MappingColumns(&mapping) {
+		if column.Column == "id" {
+			reports = append(reports, column)
+		}
+	}
+	if len(reports) != 2 {
+		t.Fatalf("got %d report(s) of id, want the identity and the field: %+v", len(reports), reports)
+	}
+	if reports[0].UsedFor != usedForIdentity {
+		t.Fatalf("the first report of id is %q, want identity", reports[0].UsedFor)
 	}
 
 	// And the caller that depends on it.
-	required := requiredColumns(crispv1alpha1.Mapping{
-		Name:   "id",
-		Fields: []crispv1alpha1.FieldMapping{{Column: "id", Path: "spec.id"}},
-	})
-	if len(required) != 1 || required[0].UsedFor != usedForIdentity {
-		t.Fatalf("requiredColumns reported %+v, want id once, as identity", required)
+	for _, column := range requiredColumns(mapping) {
+		if column.Name == "id" && column.UsedFor != usedForIdentity {
+			t.Fatalf("requiredColumns reported id as %q, want identity", column.UsedFor)
+		}
 	}
 }
 

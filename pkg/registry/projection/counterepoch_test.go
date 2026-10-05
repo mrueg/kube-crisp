@@ -31,6 +31,7 @@ func TestACounterVersionDoesNotOutliveItsProcess(t *testing.T) {
 	first := newWatchCache(time.Hour, "orders", nil,
 		func(context.Context) ([]unstructured.Unstructured, error) { return before, nil })
 	t.Cleanup(first.Close)
+	first.countFromEpoch()
 
 	resumeFrom := first.versionFor(context.Background())
 	if resumeFrom == "" {
@@ -46,6 +47,7 @@ func TestACounterVersionDoesNotOutliveItsProcess(t *testing.T) {
 	second := newWatchCache(time.Hour, "orders", nil,
 		func(context.Context) ([]unstructured.Unstructured, error) { return after, nil })
 	t.Cleanup(second.Close)
+	second.countFromEpoch()
 	if version := second.versionFor(context.Background()); version == "" {
 		t.Fatal("the second process stamped no version")
 	}
@@ -61,6 +63,37 @@ func TestACounterVersionDoesNotOutliveItsProcess(t *testing.T) {
 	}
 }
 
+// TestAMappedVersionNeverStepsBackFromTheCounter covers a projection that maps a
+// resourceVersion, over a table that is empty when it is first listed.
+//
+// Until the table has a row the cache answers with its counter, and the first
+// row's own version takes over from it. Seeded from the wall clock, that
+// counter was a number far above any ordinary version column, so the version a
+// client was handed went backwards the moment a row arrived — and a watch
+// resuming across it was told its version was from the future.
+func TestAMappedVersionNeverStepsBackFromTheCounter(t *testing.T) {
+	var rows []unstructured.Unstructured
+	cache := newWatchCache(time.Hour, "orders", nil,
+		func(context.Context) ([]unstructured.Unstructured, error) { return rows, nil })
+	t.Cleanup(cache.Close)
+
+	listed := cache.versionFor(context.Background())
+	if listed == "" {
+		t.Fatal("the empty table was listed with no version")
+	}
+
+	rows = []unstructured.Unstructured{cachedItem("acme", "order-1", "3")}
+	if err := cache.poll(context.Background()); err != nil {
+		t.Fatalf("polling: %v", err)
+	}
+	now := cache.ResourceVersion()
+
+	if order, ok := compareVersions(now, listed); !ok || order < 0 {
+		t.Errorf("the reported version went from %q to %q when the first row arrived; it must "+
+			"never step backwards", listed, now)
+	}
+}
+
 // TestACounterVersionStillResumesWithinItsProcess is the other half: the
 // version this process handed out is still a point it can resume from.
 func TestACounterVersionStillResumesWithinItsProcess(t *testing.T) {
@@ -68,6 +101,7 @@ func TestACounterVersionStillResumesWithinItsProcess(t *testing.T) {
 	cache := newWatchCache(time.Hour, "orders", nil,
 		func(context.Context) ([]unstructured.Unstructured, error) { return rows, nil })
 	t.Cleanup(cache.Close)
+	cache.countFromEpoch()
 
 	listed := cache.versionFor(context.Background())
 	w, err := cache.Watch(context.Background(), "acme", nil, nil, listed, false, false, deletedTestGVK)

@@ -1289,6 +1289,16 @@ read. What is kept is decided from the group versions the projections in the clu
 compile a projection does not withdraw the registration another is serving it through. A cluster
 object refused its name by a file declares nothing: its group is not kept for it.
 
+The label says which program wrote an `APIService`, not which installation, so kube-crisp also
+requires it to point at its own Service — `--apiservice-service-namespace` and
+`--apiservice-service-name` — before it corrects or deletes one. Two installations in one cluster
+therefore leave each other's registrations alone; for a group version both serve, whichever
+registered it first keeps it, and the other reports `GroupAlreadyServed`. Every registration an
+installation has written names its own Service, so upgrading changes nothing for it. What does
+change is moving the Service: registrations written under the old name or namespace now belong to
+somebody else as far as the server can tell, and are reported rather than rewritten. Delete them
+once the new Service is in place, and the server registers the groups again against it.
+
 Left alone is not the same as registered. An existing `APIService` for a projected group version
 that does not point at kube-crisp's Service — a CustomResourceDefinition in that group, whose
 `APIService` the kube-apiserver manages itself, or another aggregated server — routes every request

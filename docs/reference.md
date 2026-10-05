@@ -637,7 +637,9 @@ caches are driven from one timer and their queries are shared.
 `spec.cacheTTL` caches reads for a bounded time. A write drops what it could have changed — the
 object, that namespace's lists, and any cluster-wide list — while other namespaces keep their
 entries. A write with no namespace, meaning a cluster-scoped kind or a collection delete across all
-namespaces, drops everything.
+namespaces, drops everything. A read already running when the write lands is still answered, but its
+result is not cached: its rows predate the write, and storing them after the invalidation would put
+back what the write had just dropped.
 
 That invalidation reaches one replica: the one that served the write. The cache lives in the
 process and there is nothing between replicas, so with more than one — the chart deploys two — a

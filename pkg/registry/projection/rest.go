@@ -1022,6 +1022,10 @@ func (r *REST) getObject(ctx context.Context, name string, mode readMode, notOld
 		}
 	}
 
+	// Before the query, so a write that lands while it runs keeps its rows out
+	// of the cache: they describe the row as it was before that write.
+	since := r.cache.epoch()
+
 	// Without a dedicated get query, fall back to filtering the list results.
 	// This is correct but reads more rows than necessary, so a get query is
 	// recommended for any projection over a large table.
@@ -1087,7 +1091,7 @@ func (r *REST) getObject(ctx context.Context, name string, mode readMode, notOld
 	}
 
 	if mode == shared {
-		r.cache.putObject(key, namespace, obj)
+		r.cache.putObject(key, namespace, obj, since)
 	}
 	return obj, len(rows), nil
 }
@@ -1106,6 +1110,11 @@ func (r *REST) List(ctx context.Context, options *metainternalversion.ListOption
 	if cached, ok := r.cache.getList(key); ok && r.freshEnough(cached, options) {
 		return cached, nil
 	}
+
+	// Before the query, as in getObject: a write that lands while the rows are
+	// being read invalidates the cache before they arrive, and storing them
+	// afterwards would undo that for the rest of the TTL.
+	since := r.cache.epoch()
 
 	// The point a watch can resume from, taken before the rows are read rather
 	// than after.
@@ -1154,7 +1163,7 @@ func (r *REST) List(ctx context.Context, options *metainternalversion.ListOption
 	list.SetResourceVersion(version)
 
 	// The cache takes the collection; what comes back is a view over it.
-	return r.cache.putList(key, namespace, list), nil
+	return r.cache.putList(key, namespace, list, since), nil
 }
 
 // highestVersion is the newest resourceVersion among the rows in a response, or

@@ -33,10 +33,10 @@ func pollWithReadCache(t *testing.T, rows *[]unstructured.Unstructured) (*watchC
 // seedReads fills the read cache the way a set of clients listing each tenant,
 // and one listing across all of them, would leave it.
 func seedReads(reads *readCache) {
-	reads.putList(listKey("acme", nil), "acme", &unstructured.UnstructuredList{})
-	reads.putObject(objectKey("acme", "order-1"), "acme", &unstructured.Unstructured{Object: map[string]any{}})
-	reads.putList(listKey("globex", nil), "globex", &unstructured.UnstructuredList{})
-	reads.putList(listKey("", nil), "", &unstructured.UnstructuredList{})
+	reads.putList(listKey("acme", nil), "acme", &unstructured.UnstructuredList{}, reads.epoch())
+	reads.putObject(objectKey("acme", "order-1"), "acme", &unstructured.Unstructured{Object: map[string]any{}}, reads.epoch())
+	reads.putList(listKey("globex", nil), "globex", &unstructured.UnstructuredList{}, reads.epoch())
+	reads.putList(listKey("", nil), "", &unstructured.UnstructuredList{}, reads.epoch())
 }
 
 // TestAPollThatObservesAChangeDropsTheReadCache is the whole point of hooking

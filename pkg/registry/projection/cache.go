@@ -36,6 +36,31 @@ type readCache struct {
 
 	mu      sync.Mutex
 	entries map[string]cacheEntry
+
+	// Invalidation epochs, so a read can tell whether a write landed while
+	// its query was running.
+	//
+	// Dropping the entries a write made stale is only half of keeping a
+	// replica's reads after its writes: a read whose query ran before the
+	// write and whose result arrives after it would put the pre-write rows
+	// back, and every reader for the rest of the TTL was answered from them —
+	// including the client that had just been told its write succeeded. So a
+	// read takes epoch() before its query and stores only if nothing it could
+	// describe has been invalidated since.
+	//
+	// generation counts invalidations. invalidatedAt records the generation
+	// at which each namespace was last invalidated, and allInvalidatedAt the
+	// last one that named none and covered them all. Tracked per namespace,
+	// like the invalidation itself, so a busy tenant's writes do not stop
+	// every other tenant's reads from being cached.
+	generation       uint64
+	invalidatedAt    map[string]uint64
+	allInvalidatedAt uint64
+
+	// beforeStore, when set, runs as a read's result is about to be stored:
+	// after its query, before the epoch is checked. It is the seam a test uses
+	// to land a write in exactly that window.
+	beforeStore func()
 }
 
 type cacheEntry struct {
@@ -52,7 +77,43 @@ func newReadCache(ttl time.Duration, resource string) *readCache {
 	if ttl <= 0 {
 		return nil
 	}
-	return &readCache{ttl: ttl, resource: resource, entries: map[string]cacheEntry{}}
+	return &readCache{
+		ttl:           ttl,
+		resource:      resource,
+		entries:       map[string]cacheEntry{},
+		invalidatedAt: map[string]uint64{},
+	}
+}
+
+// epoch is the point a read's result is current as of, taken before its query
+// runs and handed back when the result is stored.
+func (c *readCache) epoch() uint64 {
+	if c == nil {
+		return 0
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.generation
+}
+
+// staleLocked reports whether something an entry for namespace would describe
+// was invalidated after since.
+//
+// A cluster-wide entry spans every namespace, so any invalidation at all makes
+// it stale, exactly as any invalidation drops one already held.
+//
+// The query this guards may also have been joined rather than run: a read
+// that joins a flight already in progress is answered by a query that started
+// before its own epoch was taken. That needs nothing more here, because a
+// write detaches the flights it could invalidate before it invalidates the
+// cache — a reader that took its epoch after the invalidation cannot find that
+// flight to join, and one that took it before is refused by the epoch.
+func (c *readCache) staleLocked(namespace string, since uint64) bool {
+	if namespace == "" {
+		return c.generation > since
+	}
+	return c.allInvalidatedAt > since || c.invalidatedAt[namespace] > since
 }
 
 // getObject returns a cached single object.
@@ -118,10 +179,11 @@ func (c *readCache) lookup(key string) (cacheEntry, bool) {
 	return entry, ok
 }
 
-// putObject stores a single object. Every method tolerates a nil receiver,
-// because a projection without cacheTTL has no cache and the read paths should
-// not have to ask.
-func (c *readCache) putObject(key, namespace string, obj *unstructured.Unstructured) {
+// putObject stores a single object read as of since, unless it has been
+// invalidated in the meantime. Every method tolerates a nil receiver, because a
+// projection without cacheTTL has no cache and the read paths should not have
+// to ask.
+func (c *readCache) putObject(key, namespace string, obj *unstructured.Unstructured, since uint64) {
 	if c == nil {
 		return
 	}
@@ -129,7 +191,7 @@ func (c *readCache) putObject(key, namespace string, obj *unstructured.Unstructu
 		object:    obj.DeepCopy(),
 		namespace: namespace,
 		expires:   time.Now().Add(c.ttl),
-	})
+	}, since)
 }
 
 // putList stores a collection and returns what to answer the current request
@@ -139,7 +201,11 @@ func (c *readCache) putObject(key, namespace string, obj *unstructured.Unstructu
 // afterwards, including the caller that built it, which is handed a view over
 // it instead. Without a cache configured the collection is simply passed back,
 // since there is nothing to protect it from.
-func (c *readCache) putList(key, namespace string, list *unstructured.UnstructuredList) *unstructured.UnstructuredList {
+//
+// As with putObject, a collection read as of since is not stored once
+// something it describes has been invalidated; the caller is still answered
+// with it, since it was current when its query ran.
+func (c *readCache) putList(key, namespace string, list *unstructured.UnstructuredList, since uint64) *unstructured.UnstructuredList {
 	if c == nil {
 		return list
 	}
@@ -147,18 +213,24 @@ func (c *readCache) putList(key, namespace string, list *unstructured.Unstructur
 		list:      list,
 		namespace: namespace,
 		expires:   time.Now().Add(c.ttl),
-	})
+	}, since)
 	return viewOf(list)
 }
 
-func (c *readCache) store(key string, entry cacheEntry) {
+func (c *readCache) store(key string, entry cacheEntry, since uint64) {
 	if c == nil {
 		return
+	}
+	if c.beforeStore != nil {
+		c.beforeStore()
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.staleLocked(entry.namespace, since) {
+		return
+	}
 	if len(c.entries) >= maxCacheEntries {
 		c.evictLocked()
 	}
@@ -272,6 +344,20 @@ func (c *readCache) invalidateNamespaces(namespaces []string) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Recorded before anything is dropped and under the same lock, so a read
+	// cannot store between the two and land in neither.
+	c.generation++
+	if scoped == nil {
+		c.allInvalidatedAt = c.generation
+		// Every namespace's own epoch is now older than this one, so none of
+		// them can say anything the cluster-wide epoch does not.
+		clear(c.invalidatedAt)
+	} else {
+		for namespace := range scoped {
+			c.invalidatedAt[namespace] = c.generation
+		}
+	}
 
 	if scoped == nil {
 		dropped := len(c.entries)

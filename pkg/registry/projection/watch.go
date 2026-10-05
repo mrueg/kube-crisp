@@ -198,6 +198,10 @@ type watchCache struct {
 	// delivery path, which deliberately holds no cache lock.
 	pending atomic.Int64
 
+	// epoch is where this cache's counter started: the wall clock in
+	// microseconds when the cache was built. See counterEpoch.
+	epoch int64
+
 	mu       sync.Mutex
 	items    map[string]*unstructured.Unstructured
 	version  int64
@@ -215,6 +219,7 @@ func newWatchCache(interval time.Duration, resource string, group *pollGroup, li
 		// nothing to be notified through.
 		group = newPollGroup(nil, resource)
 	}
+	epoch := counterEpoch()
 	return &watchCache{
 		group:              group,
 		list:               list,
@@ -226,8 +231,55 @@ func newWatchCache(interval time.Duration, resource string, group *pollGroup, li
 		resource:           resource,
 		items:              map[string]*unstructured.Unstructured{},
 		watchers:           map[int64]*cacheWatcher{},
-		version:            1,
+		epoch:              epoch,
+		version:            epoch,
 	}
+}
+
+// counterEpoch is where a new cache's counter starts.
+//
+// The counter is the resourceVersion of a projection that maps none, and it
+// used to start at 1 — in every process, and in every cache a process built
+// for the same projection after its spec changed. A version is a promise that
+// a watch started from it is handed everything after it, and "3" in one
+// process and "3" in the next described two different states of the table.
+// A client that reconnected after a restart with the version it last saw was
+// admitted as current, when the counter happened to be there, and never heard
+// about whatever changed while the server was down; or was a little behind it
+// and was replayed the new process's history as though it were its own.
+// Nothing on either side could tell.
+//
+// Starting from the wall clock in microseconds puts every cache's versions
+// above everything an earlier one handed out: the counter moves once per poll
+// that saw a change, which is far slower than once a microsecond, so an earlier
+// cache cannot have counted past the moment this one was built. A version
+// below this cache's start is then known to belong to another one and is
+// refused as too old — see fromAnotherEpochLocked. The value stays a plain
+// integer, so it orders against itself the way compareVersions already
+// expects, and microseconds stay well inside the range a client holding it as
+// a JSON number can represent exactly.
+//
+// A wall clock stepped backwards across a restart could put a new cache below
+// an old one's last version. That is the case left uncovered, and a projection
+// that needs better than that maps a resourceVersion column, which is also what
+// running more than one replica needs.
+func counterEpoch() int64 {
+	return time.Now().UnixMicro()
+}
+
+// fromAnotherEpochLocked reports whether a client's version is a counter value
+// handed out before this cache's counter started — by an earlier process, or
+// by an earlier cache for the same projection in this one.
+//
+// Only while the cache is answering with its counter. Once the data carries
+// versions of its own those are what a client resumes from, and they mean the
+// same thing in every process.
+func (c *watchCache) fromAnotherEpochLocked(version string) bool {
+	if c.highestVersion != "" {
+		return false
+	}
+	counter, err := strconv.ParseInt(version, 10, 64)
+	return err == nil && counter < c.epoch
 }
 
 // versionFor is what a List stamps: the cache's version, priming the cache
@@ -236,10 +288,11 @@ func newWatchCache(interval time.Duration, resource string, group *pollGroup, li
 // The priming matters. Polling starts with the first watcher, so before that
 // the cache has read nothing, and currentVersionLocked falls back to the
 // counter — which for a projection whose versions come from a column is not a
-// version at all, it is the number 1. A client that listed and then watched was
-// therefore refused with 410 every time, on every projection with a mapped
-// resourceVersion, after every restart: "too old resource version: 1 (10000)".
-// That is an informer's first sync, so it happened to everyone, always.
+// version at all; at the time it was the number 1. A client that listed and
+// then watched was therefore refused with 410 every time, on every projection
+// with a mapped resourceVersion, after every restart: "too old resource
+// version: 1 (10000)". That is an informer's first sync, so it happened to
+// everyone, always.
 //
 // One query, once per projection per process, on the first list that has no
 // watcher behind it. If it fails the caller gets "" and falls back to the rows
@@ -407,6 +460,18 @@ func (c *watchCache) Watch(ctx context.Context, namespace string, selector label
 		missed         []recordedEvent
 		databaseReplay bool
 	)
+	if !replay && c.fromAnotherEpochLocked(resourceVersion) {
+		// A counter value from before this cache's counter started names a
+		// state of some other process's history, not this one's. Neither the
+		// ring nor the database can say what happened since it, and the
+		// database must not be asked: the counter is not a value of any
+		// column a query could read forward from.
+		c.nextID--
+		c.mu.Unlock()
+		w.terminate()
+		return nil, apierrors.NewResourceExpired(fmt.Sprintf(
+			"too old resource version: %s (%s)", resourceVersion, version))
+	}
 	if !replay {
 		var resumable bool
 		missed, resumable = c.replayable(resourceVersion)

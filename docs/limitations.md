@@ -49,6 +49,11 @@ What kube-crisp does not do, or does with a condition attached, and why.
   one, each replica falls back to its own counter and must run alone. With leader election on — the
   operator saying there are peers — such a projection is reported in the log and by
   `kube_crisp_projections_unversioned`, rather than failing silently and looking like a client bug.
+  The counter also does not survive a restart: it starts from the wall clock in microseconds, so a
+  version handed out by an earlier process is below anything the next one hands out and a watch
+  resuming from it is refused with `410` and relists, rather than being admitted at a point that
+  describes a different state of the table. A wall clock stepped backwards across the restart is the
+  one case that check cannot see.
 - **`cacheTTL` is invalidated per replica, and a watch is what shortens that.** A write drops the
   entries it could have invalidated in the replica that served it and in no other, the cache being
   in process. With more than one replica — the chart deploys two — a read can be answered from an

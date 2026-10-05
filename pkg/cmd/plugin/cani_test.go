@@ -3,6 +3,7 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -220,6 +221,52 @@ func TestSubjectReviewOnlyWhenAskingAboutSomebodyElse(t *testing.T) {
 			}
 			if used != tc.verb {
 				t.Fatalf("used %s, want %s", used, tc.verb)
+			}
+		})
+	}
+}
+
+// TestSubjectReviewCarriesTheAuthenticatedGroups. A SubjectAccessReview is
+// evaluated as sent, so without the groups authentication adds, a binding to
+// system:authenticated or to a service account's namespace group would read as
+// a denial.
+func TestSubjectReviewCarriesTheAuthenticatedGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		o    caniOptions
+		want []string
+	}{
+		{"user", caniOptions{asUser: "alice"}, []string{"system:authenticated"}},
+		{"user with groups", caniOptions{asUser: "alice", asGroups: []string{"ops", "system:authenticated"}},
+			[]string{"ops", "system:authenticated"}},
+		{"service account", caniOptions{asUser: "system:serviceaccount:team-a:reporter"},
+			[]string{"system:serviceaccounts", "system:serviceaccounts:team-a", "system:authenticated"}},
+		{"anonymous", caniOptions{asUser: "system:anonymous"}, []string{"system:unauthenticated"}},
+		{"groups alone", caniOptions{asGroups: []string{"ops"}}, []string{"ops"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kube := kubefake.NewSimpleClientset()
+			var sent [][]string
+			kube.PrependReactor("create", "subjectaccessreviews",
+				func(action k8stesting.Action) (bool, runtime.Object, error) {
+					review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+					sent = append(sent, review.Spec.Groups)
+					return true, review, nil
+				})
+
+			o := tc.o
+			if _, err := o.review(context.Background(), kube,
+				[]crispv1alpha1.CustomResourceProjection{readOnlyFilms(crispv1alpha1.ClusterScoped)}); err != nil {
+				t.Fatal(err)
+			}
+
+			if len(sent) == 0 {
+				t.Fatal("no SubjectAccessReview was sent")
+			}
+			for _, groups := range sent {
+				if !slices.Equal(groups, tc.want) {
+					t.Fatalf("groups %v, want %v", groups, tc.want)
+				}
 			}
 		})
 	}

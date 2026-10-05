@@ -503,6 +503,12 @@ func New(
 		}
 		r.watch = newWatchCache(interval, r.label, shared.polls, r.listAllNamespaces)
 		r.watch.matchFields = r.matchesFields
+		// The counter is the only version a projection without a mapped
+		// resourceVersion has, so it must not repeat across processes; one
+		// that maps a version keeps starting at 1. See countFromEpoch.
+		if spec.Mapping.ResourceVersion == "" {
+			r.watch.countFromEpoch()
+		}
 
 		// With a watch query the poller reads only what changed, which is what
 		// makes watching a large table affordable.

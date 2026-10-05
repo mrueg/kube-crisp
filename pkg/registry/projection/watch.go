@@ -199,7 +199,8 @@ type watchCache struct {
 	pending atomic.Int64
 
 	// epoch is where this cache's counter started: the wall clock in
-	// microseconds when the cache was built. See counterEpoch.
+	// microseconds when the cache was built, for a projection that maps no
+	// resourceVersion, and zero for one that does. See countFromEpoch.
 	epoch int64
 
 	mu       sync.Mutex
@@ -219,7 +220,6 @@ func newWatchCache(interval time.Duration, resource string, group *pollGroup, li
 		// nothing to be notified through.
 		group = newPollGroup(nil, resource)
 	}
-	epoch := counterEpoch()
 	return &watchCache{
 		group:              group,
 		list:               list,
@@ -231,12 +231,31 @@ func newWatchCache(interval time.Duration, resource string, group *pollGroup, li
 		resource:           resource,
 		items:              map[string]*unstructured.Unstructured{},
 		watchers:           map[int64]*cacheWatcher{},
-		epoch:              epoch,
-		version:            epoch,
+		version:            1,
 	}
 }
 
-// counterEpoch is where a new cache's counter starts.
+// countFromEpoch starts the counter from the wall clock rather than from 1, for
+// a projection that maps no resourceVersion. Called while the cache is being
+// built, before anything can read the counter.
+//
+// Only for those. A projection that maps one answers with the counter only
+// until the first row arrives, and from then on with the row's own version — so
+// a counter in the quadrillions made the version a client was handed step down
+// to "3" the moment the table stopped being empty, and a resume across that
+// step was refused as being from the future. Starting at 1 keeps that handover
+// moving forward against any ordinary version column. Nor does the epoch buy
+// such a projection anything: its versions come from the data and mean the same
+// in every process, which is what fromAnotherEpochLocked already defers to.
+func (c *watchCache) countFromEpoch() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.epoch = counterEpoch()
+	c.version = c.epoch
+}
+
+// counterEpoch is where the counter of a projection that maps no
+// resourceVersion starts.
 //
 // The counter is the resourceVersion of a projection that maps none, and it
 // used to start at 1 — in every process, and in every cache a process built

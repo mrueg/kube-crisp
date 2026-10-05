@@ -53,9 +53,9 @@ func TestResolveClaimsKeepsTheProjectionThatIsServing(t *testing.T) {
 	surviving := map[string]compilation{"incumbent": claiming("bins"), "newcomer": claiming("bins")}
 	// The newcomer is older, so that only incumbency can explain the outcome.
 	created := map[string]metav1.Time{"incumbent": at(9), "newcomer": at(1)}
-	serving := map[string]compilation{"incumbent": claiming("bins")}
+	standing := map[string]claimStanding{"incumbent": standingServing}
 
-	losses := resolveClaims(surviving, created, serving)
+	losses := resolveClaims(surviving, created, standing)
 	if _, lost := losses["newcomer"]; !lost {
 		t.Errorf("resolveClaims() = %v, want the newcomer to lose", losses)
 	}
@@ -68,14 +68,16 @@ func TestResolveClaimsKeepsTheProjectionThatIsServing(t *testing.T) {
 	}
 }
 
-// Serving is decided per resource, not per projection.
+// Serving is decided for the generation in hand, not for the projection.
 //
 // A projection that already serves one resource is not the incumbent of another
 // one it is edited to claim: for that resource it is the newcomer, and the
 // projection serving it keeps it. Ranking by "was serving anything" let an
 // older projection take a working resource away from a newer one, the moment
 // somebody edited the older one -- the outage triggered by the object that was
-// just applied, and landing on the object that was not.
+// just applied, and landing on the object that was not. A status written before
+// the edit says nothing about what the edit claims, so the edited projection
+// stands as a newcomer would.
 func TestResolveClaimsRanksIncumbencyPerResource(t *testing.T) {
 	// orders came later and serves orders; items came first and serves items.
 	// Then items is edited to claim orders as well.
@@ -84,9 +86,11 @@ func TestResolveClaimsRanksIncumbencyPerResource(t *testing.T) {
 		"items":  claiming("items", "orders"),
 	}
 	created := map[string]metav1.Time{"orders": at(9), "items": at(1)}
-	serving := map[string]compilation{"orders": claiming("orders"), "items": claiming("items")}
+	// items was serving too, but its status describes the generation before
+	// the edit.
+	standing := map[string]claimStanding{"orders": standingServing}
 
-	losses := resolveClaims(surviving, created, serving)
+	losses := resolveClaims(surviving, created, standing)
 	if _, lost := losses["orders"]; lost {
 		t.Errorf("the projection serving orders lost it to one that was edited to claim it: %v", losses)
 	}
@@ -103,9 +107,11 @@ func TestResolveClaimsKeepsAResourceAgainstANewerClaimant(t *testing.T) {
 		"items":  claiming("items", "orders"),
 	}
 	created := map[string]metav1.Time{"orders": at(1), "items": at(9)}
-	serving := map[string]compilation{"orders": claiming("orders"), "items": claiming("items")}
+	// items was serving too, but its status describes the generation before
+	// the edit.
+	standing := map[string]claimStanding{"orders": standingServing}
 
-	losses := resolveClaims(surviving, created, serving)
+	losses := resolveClaims(surviving, created, standing)
 	if _, lost := losses["items"]; !lost || len(losses) != 1 {
 		t.Errorf("resolveClaims() = %v, want just the newer claimant to lose", losses)
 	}
@@ -124,13 +130,9 @@ func TestResolveClaimsDoesNotLoseToAProjectionThatLoses(t *testing.T) {
 		"crates": claiming("crates"),
 	}
 	created := map[string]metav1.Time{"bins": at(9), "middle": at(1), "crates": at(9)}
-	serving := map[string]compilation{
-		"bins":   claiming("bins"),
-		"middle": claiming("middle"),
-		"crates": claiming("crates"),
-	}
+	standing := map[string]claimStanding{"bins": standingServing, "crates": standingServing}
 
-	losses := resolveClaims(surviving, created, serving)
+	losses := resolveClaims(surviving, created, standing)
 	if _, lost := losses["middle"]; !lost || len(losses) != 1 {
 		t.Errorf("resolveClaims() = %v, want just middle to lose", losses)
 	}
@@ -145,18 +147,17 @@ func TestResolveClaimsSettlesAMutualClaim(t *testing.T) {
 		"crates": claiming("crates", "bins"),
 	}
 	created := map[string]metav1.Time{"bins": at(1), "crates": at(2)}
-	serving := map[string]compilation{"bins": claiming("bins"), "crates": claiming("crates")}
-
+	// Both edited, so neither status describes what either now claims.
 	for i := 0; i < 50; i++ {
-		losses := resolveClaims(surviving, created, serving)
+		losses := resolveClaims(surviving, created, nil)
 		if _, lost := losses["crates"]; !lost || len(losses) != 1 {
 			t.Fatalf("run %d: resolveClaims() = %v, want just the newer projection to lose", i, losses)
 		}
 	}
 }
 
-// With nobody serving yet — a cold start — the older projection wins, which
-// re-elects whoever was serving before the restart.
+// With no status to go on — both just applied, or both loaded from files — the
+// older projection wins, which is usually whoever was applied first.
 func TestResolveClaimsPrefersTheOlderProjection(t *testing.T) {
 	losses := resolveClaims(
 		map[string]compilation{"older": claiming("bins"), "newer": claiming("bins")},
@@ -196,7 +197,7 @@ func TestResolveClaimsFailsAProjectionWhole(t *testing.T) {
 	}
 	created := map[string]metav1.Time{"incumbent": at(1), "newcomer": at(2)}
 
-	losses := resolveClaims(surviving, created, map[string]compilation{"incumbent": claiming("bins")})
+	losses := resolveClaims(surviving, created, map[string]claimStanding{"incumbent": standingServing})
 	if _, lost := losses["newcomer"]; !lost {
 		t.Fatalf("resolveClaims() = %v, want the newcomer to lose", losses)
 	}
@@ -310,7 +311,7 @@ func TestResolveClaimsAcceptsOneProjectionWithSeveralVersions(t *testing.T) {
 			"crates": named("Crate", "crates", []string{"cr"}, "v1", "v1beta1"),
 		},
 		map[string]metav1.Time{"bins": at(1), "crates": at(2)},
-		map[string]compilation{"bins": named("Bin", "bins", []string{"bn"}, "v1", "v1beta1")},
+		map[string]claimStanding{"bins": standingServing},
 	)
 	if len(losses) != 0 {
 		t.Errorf("resolveClaims() reported %v, want nothing", losses)

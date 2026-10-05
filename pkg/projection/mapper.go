@@ -473,8 +473,28 @@ func validatePath(path string) error {
 	return nil
 }
 
-// Row converts one result row into a projected object.
+// Row converts one result row, scanned column by column, into a projected
+// object. RowFrom is the same for a row that came out of a JSON aggregate.
 func (m *Mapper) Row(row crispsql.Row) (*unstructured.Unstructured, error) {
+	return m.RowFrom(row, crispsql.FormatRows)
+}
+
+// RowFrom converts one result row into a projected object, given the format of
+// the statement that produced it.
+//
+// The format matters to a json field and to nothing else. Scanned column by
+// column, a json column is its document's text and has to be parsed. Out of a
+// JSON aggregate it has been parsed already — the database embedded the
+// document as JSON, and decoding the aggregate decoded it — so a document that
+// is the string "hello" arrives as the Go string hello, which is not JSON and
+// must not be read as it. It was: "hello" made the row unmappable, and "123"
+// or "true" became a number or a boolean, which a read-modify-write then
+// stored over the string. Neither the value nor its Go type can tell the two
+// apart, since a driver hands back a text column as a string too, so the
+// caller, which knows which statement it ran, says.
+func (m *Mapper) RowFrom(row crispsql.Row, format crispsql.ResultFormat) (*unstructured.Unstructured, error) {
+	decoded := format == crispsql.FormatJSONArray
+
 	obj := &unstructured.Unstructured{Object: map[string]any{}}
 	obj.SetGroupVersionKind(m.gvk)
 
@@ -683,7 +703,14 @@ func (m *Mapper) Row(row crispsql.Row) (*unstructured.Unstructured, error) {
 		}
 
 		var value any
-		if raw != nil {
+		switch {
+		case raw == nil:
+		case decoded && f.fieldType == crispv1alpha1.FieldTypeJSON:
+			value, err = normalizeJSON(raw)
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", f.column, err)
+			}
+		default:
 			value, err = coerce(raw, f.fieldType)
 			if err != nil {
 				return nil, fmt.Errorf("column %q: %w", f.column, err)
@@ -947,7 +974,10 @@ func coerce(raw any, t crispv1alpha1.FieldType) (any, error) {
 		}
 
 	case crispv1alpha1.FieldTypeJSON:
-		// The json_agg path hands back values that are already decoded.
+		// A structure is decoded already, whichever path it came by. A string
+		// is ambiguous — text to parse, or a decoded document that is a
+		// string — which is why RowFrom does not bring an aggregate's values
+		// here at all; this is the column's text.
 		switch raw.(type) {
 		case map[string]any, []any, json.Number:
 			return normalizeJSON(raw)

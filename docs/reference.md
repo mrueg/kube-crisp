@@ -1784,3 +1784,13 @@ keeping every number's digits, so an id past 2^53, which is where a float64
 starts rounding and where CockroachDB's `unique_rowid()` lives, reads as the
 integer, the name or the string it is; inside an untyped `json` value an
 integer stays exact up to the int64 range and is a float64 past it.
+
+A column mapped as `json` is read the way its statement delivered it. Scanned
+row by row it is the document's text, and is parsed. Inside a
+`resultFormat: JSONArray` aggregate the database has already embedded it as
+JSON, so it is taken as it arrives: a document that is the string `"123"` is
+served as that string under either format, not as the number its contents
+spell. That makes the aggregate responsible for embedding the document rather
+than its text — a `json` or `jsonb` column does so by itself, and a JSON
+document kept in a text column needs `json(attrs)` in SQLite, `attrs::json` in
+PostgreSQL or `CAST(attrs AS JSON)` in MySQL, or it is served as a string.

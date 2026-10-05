@@ -828,7 +828,20 @@ func (c *Controller) sync(ctx context.Context) error {
 	// Registration happens after the surface is installed: an APIService that
 	// points at a group this server does not serve yet would be marked
 	// unavailable by the aggregator.
-	unregistered, err := c.apiServices.reconcile(ctx, resources, c.apiServiceOwners(candidates, resources))
+	//
+	// What is kept is wider than what is served. A projection that failed with
+	// nothing to fall back on serves nothing here, and is still a projection
+	// that exists: a replica that has just started, or one whose first look at
+	// it hit the same blip failed() exists for, has no previous compilation to
+	// keep serving. Pruning by what is served withdrew its registration all the
+	// same -- on a single replica, the outage failed() is there to prevent; on
+	// several, a loop, since a replica still serving it from an earlier
+	// compilation recreated the APIService and each write woke the other. The
+	// group versions every live projection declares are the same on every
+	// replica, so what is pruned is too: the registrations of projections that
+	// are gone, and nothing else.
+	unregistered, err := c.apiServices.reconcile(ctx, resources,
+		c.apiServiceOwners(candidates, resources), declaredGroupVersions(candidates))
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("reconciling APIServices: %w", err))
 	}
@@ -1362,6 +1375,17 @@ func registrationError(p *crispv1alpha1.CustomResourceProjection, unregistered m
 		return nil
 	}
 
+	for _, gv := range groupVersionsOf(p) {
+		if err, ok := unregistered[gv]; ok {
+			return err
+		}
+	}
+	return nil
+}
+
+// groupVersionsOf lists the group versions a projection declares, in the order
+// its spec names them: the primary version, then each other version it serves.
+func groupVersionsOf(p *crispv1alpha1.CustomResourceProjection) []schema.GroupVersion {
 	versions := []string{p.Spec.Resource.Version}
 	for _, version := range p.Spec.Resource.Versions {
 		if version.Served != nil && !*version.Served {
@@ -1370,13 +1394,39 @@ func registrationError(p *crispv1alpha1.CustomResourceProjection, unregistered m
 		versions = append(versions, version.Name)
 	}
 
+	out := make([]schema.GroupVersion, 0, len(versions))
 	for _, version := range versions {
-		gv := schema.GroupVersion{Group: p.Spec.Resource.Group, Version: version}
-		if err, ok := unregistered[gv]; ok {
-			return err
+		if version == "" {
+			continue
+		}
+		out = append(out, schema.GroupVersion{Group: p.Spec.Resource.Group, Version: version})
+	}
+	return out
+}
+
+// declaredGroupVersions is every group version a live projection declares,
+// whether or not it compiled: the registrations prune must leave alone.
+//
+// Read from the specs rather than from what compiled, because a spec is the
+// one thing every replica sees the same way. What compiled depends on what
+// each replica happened to compile before, and on whatever failed for it this
+// time.
+//
+// A cluster object refused its name declares nothing. It serves nothing for as
+// long as the file holds the name, and keeping a registration for the group it
+// names would keep one for a group nobody serves; the file's own group versions
+// are declared by the file.
+func declaredGroupVersions(candidates []projectionCandidate) map[schema.GroupVersion]struct{} {
+	declared := make(map[schema.GroupVersion]struct{}, len(candidates))
+	for _, cand := range candidates {
+		if cand.reserved != nil {
+			continue
+		}
+		for _, gv := range groupVersionsOf(cand.projection) {
+			declared[gv] = struct{}{}
 		}
 	}
-	return nil
+	return declared
 }
 
 func (c *Controller) updateStatus(

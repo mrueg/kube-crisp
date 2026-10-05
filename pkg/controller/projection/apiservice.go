@@ -186,10 +186,16 @@ func (m *apiServiceManager) managed(ctx context.Context) ([]*unstructured.Unstru
 
 // reconcile makes the set of managed APIServices match the group versions this
 // server is currently serving.
+//
+// declared names the group versions live projections declare, served here or
+// not. Nothing is registered for them that is not also served -- an APIService
+// for a group this server does not serve would be marked unavailable -- but
+// nothing registered for them is pruned either.
 func (m *apiServiceManager) reconcile(
 	ctx context.Context,
 	resources []apidynamic.Resource,
 	owners map[schema.GroupVersion][]metav1.OwnerReference,
+	declared map[schema.GroupVersion]struct{},
 ) (map[schema.GroupVersion]error, error) {
 	if !m.options.Enabled {
 		return nil, nil
@@ -222,7 +228,14 @@ func (m *apiServiceManager) reconcile(
 		}
 	}
 
-	return unregistered, m.prune(ctx, wanted)
+	keep := make(map[string]struct{}, len(wanted)+len(declared))
+	for name := range wanted {
+		keep[name] = struct{}{}
+	}
+	for gv := range declared {
+		keep[apiServiceName(gv)] = struct{}{}
+	}
+	return unregistered, m.prune(ctx, keep)
 }
 
 // errRegistrationPending marks a registration that has not been confirmed yet
@@ -406,9 +419,13 @@ func (m *apiServiceManager) ensure(ctx context.Context, name string, gv schema.G
 	return nil
 }
 
-// prune removes managed APIServices for group versions that are no longer
-// served, so a deleted projection does not leave a dangling registration.
-func (m *apiServiceManager) prune(ctx context.Context, wanted map[string]schema.GroupVersion) error {
+// prune removes managed APIServices for group versions no projection declares
+// any more, so a deleted projection does not leave a dangling registration.
+//
+// Not "no longer served": a projection that exists and failed to compile is
+// not a deleted one, and a replica with nothing of it to keep serving is no
+// reason to withdraw it from every replica.
+func (m *apiServiceManager) prune(ctx context.Context, keep map[string]struct{}) error {
 	client := m.client.Resource(APIServiceGVR)
 
 	managed, err := m.managed(ctx)
@@ -418,7 +435,7 @@ func (m *apiServiceManager) prune(ctx context.Context, wanted map[string]schema.
 
 	for _, item := range managed {
 		name := item.GetName()
-		if _, still := wanted[name]; still {
+		if _, still := keep[name]; still {
 			continue
 		}
 		if err := client.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {

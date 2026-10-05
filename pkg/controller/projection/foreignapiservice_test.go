@@ -205,7 +205,7 @@ func TestRoutableRequiresARegistrationThatRoutesHere(t *testing.T) {
 	// And the whole reconcile reports it against the group version, which is
 	// how the projection behind it finds out.
 	unregistered, err := manager.reconcile(context.Background(),
-		[]apidynamic.Resource{{Group: "warehouse.example.com", Version: "v1alpha1", Plural: "bins"}}, nil)
+		[]apidynamic.Resource{{Group: "warehouse.example.com", Version: "v1alpha1", Plural: "bins"}}, nil, nil)
 	if err != nil {
 		t.Fatalf("reconcile() returned error: %v", err)
 	}

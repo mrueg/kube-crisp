@@ -933,18 +933,14 @@ func (p *Pool) QueryAllWith(ctx context.Context, session []SessionVariable, stmt
 	ctx, cancel := context.WithTimeout(ctx, clientDeadline(enforced, timeout))
 	defer cancel()
 
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	// A MySQL user variable belongs to the connection, not to the transaction,
+	// so neither a commit nor a rollback unsets it. finish clears it on every
+	// path, cancelled ones included, before the connection goes back.
+	tx, finish, err := p.beginTx(ctx, &sql.TxOptions{ReadOnly: true}, session)
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)
 	}
-	defer func() {
-		// A MySQL user variable belongs to the connection, not to the
-		// transaction, so a rollback does not unset it. This covers the paths
-		// that do not reach the commit; the one that does clears first, which
-		// makes this a no-op on an already-finished transaction.
-		_ = p.clearSession(ctx, tx, session)
-		_ = tx.Rollback()
-	}()
+	defer finish()
 
 	if err := p.applyStatementTimeout(ctx, tx, enforced, timeout); err != nil {
 		return nil, err
@@ -969,12 +965,6 @@ func (p *Pool) QueryAllWith(ctx context.Context, session []SessionVariable, stmt
 			return nil, err
 		}
 		out = append(out, result)
-	}
-
-	// Before the commit, so nothing is left on a connection going back to a
-	// pool every projection reaching this database shares.
-	if err := p.clearSession(ctx, tx, session); err != nil {
-		return nil, err
 	}
 
 	// A read-only transaction still has to be closed to release its snapshot.
@@ -1047,18 +1037,14 @@ func (p *Pool) transact(
 	ctx, span := p.startSpan(ctx, "transaction", last.SQL)
 	defer func() { span.endAffected(affected, err) }()
 
-	tx, err := p.db.BeginTx(ctx, nil)
+	// finish rolls back what was not committed and clears the session, because
+	// a MySQL user variable belongs to the connection rather than to the
+	// transaction and neither a commit nor a rollback leaves it unset.
+	tx, finish, err := p.beginTx(ctx, nil, session)
 	if err != nil {
 		return nil, 0, fmt.Errorf("beginning transaction: %w", err)
 	}
-	// Rollback after a successful commit is a no-op, so this needs no
-	// bookkeeping to be correct. The session is cleared alongside it, because a
-	// MySQL user variable belongs to the connection rather than to the
-	// transaction and a rollback leaves it set.
-	defer func() {
-		_ = p.clearSession(ctx, tx, session)
-		_ = tx.Rollback()
-	}()
+	defer finish()
 
 	// Before anything reads or writes, so a row-level security policy is in
 	// force for every statement in here — and so the database's own deadline
@@ -1132,11 +1118,6 @@ func (p *Pool) transact(
 		if err := verify(out, affected); err != nil {
 			return nil, 0, err
 		}
-	}
-
-	// Before the commit, for the same reason as on the read path.
-	if err := p.clearSession(ctx, tx, session); err != nil {
-		return nil, 0, err
 	}
 
 	if err := tx.Commit(); err != nil {

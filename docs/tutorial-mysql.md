@@ -131,7 +131,8 @@ incremental watch see removals without re-reading the table.
 Two are shaped differently on MySQL:
 
 - **Session variables are connection-scoped**, not transaction-scoped, so
-  kube-crisp clears them before the transaction ends. Read them with
+  kube-crisp clears them once the transaction ends, before the connection goes
+  back to the pool — or closes the connection if they cannot be. Read them with
   `@app_tenant` — a user variable cannot hold a dot, so `app.tenant` becomes
   `app_tenant`.
 - **JSON parameters** — `:userGroups`, `:label_<column>_in` — are strings holding

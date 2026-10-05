@@ -897,6 +897,14 @@ never told about a row in another namespace, whatever the replay knows about it 
 its to hold and cannot have left it — while a cluster-wide watcher is entitled to every namespace and
 is told across all of them.
 
+A name deleted and created again while the client was away is in both answers: the changed rows
+carry the new incarnation and the tombstones carry the old one. Only the `Modified` is sent. The row
+exists, and a deletion following it would have the client's informer drop a row sitting in the
+table. The live stream treats a tombstone that arrives in the same poll as the row it names the same
+way: one that carries the mapped `resourceVersion` is ignored when it is older than the row, and
+one holding only the identity columns cannot be placed at all, so it is ignored whenever the poll's
+own read returned that row.
+
 A row that leaves a watcher's selector on the live stream, or in a replay from the ring, is a
 `Deleted` to that watcher carrying the row as it last saw it, and one that arrives in the selector is
 an `Added` — the same transitions the apiserver's own cacher makes. The departure carries the version

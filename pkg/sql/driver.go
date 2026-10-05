@@ -1,11 +1,14 @@
 package sql
 
 import (
+	"crypto/tls"
 	"database/sql/driver"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // PlaceholderStyle is how a database wants bind parameters written.
@@ -229,15 +232,9 @@ func init() {
 			Placeholders:     PlaceholderQuestion,
 			SessionVariables: true,
 			Encrypted:        mysqlEncrypted,
-			// tls=true verifies the chain and the host name against the system
-			// roots, and a registered configuration name is one an operator
-			// built deliberately -- usually to carry a private CA, which is the
-			// case this must not refuse. The modes that encrypt without
-			// verifying are already refused by mysqlEncrypted by name, so for
-			// MySQL the two questions have the same answer.
-			Verified:      mysqlEncrypted,
-			PrepareDSN:    mysqlFoundRows,
-			AuthConnector: mysqlAuthConnector,
+			Verified:         mysqlVerified,
+			PrepareDSN:       mysqlFoundRows,
+			AuthConnector:    mysqlAuthConnector,
 		},
 		{
 			Name:         "sqlite",
@@ -262,52 +259,83 @@ func init() {
 //
 // Only require, verify-ca and verify-full actually insist. prefer and allow
 // fall back; disable never tries.
+//
+// The answer is read off the configuration pgx itself builds from the string,
+// not off the string. These checks used to pick sslmode out by hand, taking
+// the first match and ignoring case, while pgx takes the last and matches the
+// name exactly — so "sslmode=verify-full sslmode=disable", or a URL carrying
+// SSLMODE=verify-full ahead of sslmode=disable, was reported as verified and
+// connected in the clear. The parsed configuration is what the connection is
+// actually opened with, so there is nothing left to disagree about: TLS is
+// insisted on when the first attempt and every fallback carry a TLS
+// configuration. A string pgx cannot parse is reported as unencrypted, which
+// for a warning and a refusal alike is the safe direction.
 func postgresEncrypted(dsn string) bool {
-	switch strings.ToLower(dsnParam(dsn, "sslmode")) {
-	case "require", "verify-ca", "verify-full":
-		return true
-	default:
+	configs, ok := postgresTLSConfigs(dsn)
+	if !ok {
 		return false
 	}
+	for _, config := range configs {
+		if config == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// postgresTLSConfigs is the TLS configuration of every connection attempt pgx
+// would make for a connection string: the first, then each fallback. A nil
+// entry is an attempt made in the clear — sslmode=prefer's second try, allow's
+// first, a unix socket.
+func postgresTLSConfigs(dsn string) ([]*tls.Config, bool) {
+	config, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		return nil, false
+	}
+	configs := []*tls.Config{config.TLSConfig}
+	for _, fallback := range config.Fallbacks {
+		configs = append(configs, fallback.TLSConfig)
+	}
+	return configs, true
 }
 
 // mysqlEncrypted reports whether a MySQL connection string asks for TLS.
 //
 // The Go driver defaults to none, so an unset tls parameter is plaintext rather
-// than a negotiation.
+// than a negotiation. skip-verify encrypts but authenticates nothing, and
+// preferred — or any mode with allowFallbackToPlaintext — falls back; neither
+// is a connection anybody should be told is secured.
+//
+// Decided from the driver's own parse of the string, for the reason
+// postgresEncrypted gives: a hand reading took the first tls parameter and
+// ignored the case of its name, the driver takes the last and does not, and
+// "tls=true&tls=false" or "TLS=true" were reported as encrypted and connected in
+// the clear. A name the driver resolves to a registered configuration is
+// judged by that configuration; one nothing registered fails to parse, and the
+// driver will not connect with it at all.
 func mysqlEncrypted(dsn string) bool {
-	switch strings.ToLower(dsnParam(dsn, "tls")) {
-	case "", "false", "0", "skip-verify", "preferred":
-		// skip-verify encrypts but authenticates nothing, and preferred falls
-		// back — neither is a connection anybody should be told is secured.
+	config, err := mysql.ParseDSN(dsn)
+	if err != nil || config.TLS == nil {
 		return false
-	default:
-		return true
 	}
+	return !config.AllowFallbackToPlaintext && !config.TLS.InsecureSkipVerify
 }
 
-// dsnParam pulls one setting out of a connection string, in either of the two
-// shapes these drivers accept: a URL with a query string, or the trailing
-// ?key=value a DSN carries.
+// mysqlVerified reports whether a MySQL connection string asks for TLS that
+// establishes which server it reached.
 //
-// Deliberately forgiving. It is used to decide whether to log a warning, so a
-// connection string it cannot parse produces one — which is the safe direction
-// for something whose job is to notice an unencrypted connection.
-func dsnParam(dsn, key string) string {
-	query := dsn
-	if i := strings.IndexByte(dsn, '?'); i >= 0 {
-		query = dsn[i+1:]
-	} else if !strings.Contains(dsn, "=") {
-		return ""
+// tls=true verifies the chain and the host name against the system roots, and
+// a registered configuration name is one an operator built deliberately --
+// usually to carry a private CA, which is the case this must not refuse. What
+// is left to check beyond mysqlEncrypted is that there is a name to verify:
+// the driver fills it in from the address, and an address without a host --
+// a unix socket -- leaves nothing for the certificate to be checked against.
+func mysqlVerified(dsn string) bool {
+	if !mysqlEncrypted(dsn) {
+		return false
 	}
-
-	for _, pair := range strings.FieldsFunc(query, func(r rune) bool { return r == '&' || r == ' ' }) {
-		name, value, found := strings.Cut(pair, "=")
-		if found && strings.EqualFold(strings.TrimSpace(name), key) {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	config, err := mysql.ParseDSN(dsn)
+	return err == nil && config.TLS.ServerName != ""
 }
 
 // serverVerified reports whether a connection string asks for a TLS mode that
@@ -340,13 +368,28 @@ func serverVerified(driver, dsn string) bool {
 // sslmode is the reason this is not the same predicate as postgresEncrypted.
 // `require` encrypts and then accepts any certificate at all -- pgx sets
 // InsecureSkipVerify for it, exactly as it does for MySQL's `skip-verify`,
-// which mysqlEncrypted already refuses by name. `verify-ca` checks the chain
-// and deliberately skips the host name, so any certificate under the same
-// authority satisfies it, which for a managed database means any instance in
-// the provider's fleet. Only `verify-full` establishes that the server is the
-// one the connection string names.
+// which mysqlEncrypted already refuses. `verify-ca` checks the chain and
+// deliberately skips the host name -- pgx does that by setting
+// InsecureSkipVerify and checking the chain itself -- so any certificate under
+// the same authority satisfies it, which for a managed database means any
+// instance in the provider's fleet. Only `verify-full` establishes that the
+// server is the one the connection string names, and it is what leaves Go's
+// own verification on with the host as the name to check.
+//
+// Read off pgx's parsed configuration for the reason postgresEncrypted gives,
+// and required of every attempt pgx would make: a fallback in the clear, or one
+// that skips verification, is where the token would go.
 func postgresVerified(dsn string) bool {
-	return strings.EqualFold(dsnParam(dsn, "sslmode"), "verify-full")
+	configs, ok := postgresTLSConfigs(dsn)
+	if !ok {
+		return false
+	}
+	for _, config := range configs {
+		if config == nil || config.InsecureSkipVerify || config.ServerName == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // verificationHint says how to ask for a verified connection, per driver.

@@ -1101,6 +1101,15 @@ here, which is how a private authority is carried. `sslmode=require` is accepted
 with a stored password, where it only produces the warning above; it is refused for one that mints a
 credential.
 
+Both checks are answered from the configuration the driver itself parses out of the connection
+string, so they cannot disagree with the connection that is actually opened. A setting given twice
+counts as the driver counts it — the last one wins — and a name in the wrong case is not the setting:
+`SSLMODE=verify-full` and MySQL's `TLS=true` are passed to the server as runtime parameters and ask for
+no TLS at all. PostgreSQL's fallbacks count too, so every host a multi-host string names must be
+verified; MySQL's `allowFallbackToPlaintext` is refused like `preferred`; and a string the driver
+cannot parse — an `sslrootcert` file that is not there, a TLS configuration name nothing registered —
+is reported as neither encrypted nor verified.
+
 That refusal is what makes the MySQL side work at all: an IAM token is checked with the
 `mysql_clear_password` plugin, which the driver will not use unless it is told to, and kube-crisp
 turns it on for a data source with `auth` — safely, because it has already established that the

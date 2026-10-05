@@ -46,6 +46,21 @@ func resetMintedPasswords() {
 	mintedPasswords.seen = nil
 }
 
+// dsnParam pulls one key=value setting out of the connection strings these
+// tests hand the recording driver. Only for that: what a real driver makes of a
+// connection string is decided by the driver's own parser.
+func dsnParam(dsn, key string) string {
+	if i := strings.IndexByte(dsn, '?'); i >= 0 {
+		dsn = dsn[i+1:]
+	}
+	for _, pair := range strings.FieldsFunc(dsn, func(r rune) bool { return r == '&' || r == ' ' }) {
+		if name, value, found := strings.Cut(pair, "="); found && name == key {
+			return value
+		}
+	}
+	return ""
+}
+
 type recordingDriver struct{}
 
 // Open is the connection-string path, which a data source with no auth takes.

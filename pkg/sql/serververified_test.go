@@ -1,8 +1,11 @@
 package sql
 
 import (
+	"crypto/tls"
 	"strings"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // A bearer token may only go to a server the connection established the
@@ -40,12 +43,38 @@ func TestOnlyVerifiedModesCarryAMintedCredential(t *testing.T) {
 		{"mysql", "u@tcp(h:3306)/db?tls=preferred", false, false},
 		{"mysql", "u@tcp(h:3306)/db?tls=custom-ca", true, true},
 		{"mysql", "u@tcp(h:3306)/db", false, false},
+		// A name nothing registered is one the driver refuses to connect with
+		// at all, so there is no TLS to vouch for.
+		{"mysql", "u@tcp(h:3306)/db?tls=nonesuch", false, false},
+
+		// The driver is the authority on what a connection string says, and
+		// these are the ones a reading of the string disagreed with it about.
+		// The check took the first, case-insensitive match of a parameter;
+		// both drivers take the last one, and match its name exactly. Each of
+		// these passed, and connected without TLS.
+		{"postgres", "host=db sslmode=verify-full sslmode=disable", false, false},
+		{"postgres", "postgres://u@db/d?sslmode=verify-full&sslmode=disable", false, false},
+		// SSLMODE is not a setting pgx knows; it is sent to the server as a
+		// runtime parameter, and sslmode=disable is the one that applies.
+		{"postgres", "postgres://u@db/d?SSLMODE=verify-full&sslmode=disable", false, false},
+		// The ? is part of application_name's value, not the start of a query.
+		{"postgres", "host=db application_name=x?sslmode=verify-full sslmode=disable", false, false},
+		{"mysql", "u@tcp(db:3306)/d?tls=true&tls=false", false, false},
+		// TLS is not the tls parameter; the driver sends it to the server as a
+		// system variable and connects in the clear.
+		{"mysql", "u@tcp(db:3306)/d?TLS=true", false, false},
+		// Asks for TLS and then accepts a server that declines it.
+		{"mysql", "u@tcp(db:3306)/d?tls=true&allowFallbackToPlaintext=true", false, false},
+		// And the same rule the other way round: the last setting wins.
+		{"postgres", "host=db sslmode=disable sslmode=verify-full", true, true},
+		{"mysql", "u@tcp(db:3306)/d?tls=false&tls=true", true, true},
 
 		// A driver this build cannot reason about does not get the benefit of
 		// the doubt.
 		{"oracle", "whatever?ssl=on", false, false},
 	} {
 		t.Run(tc.driver+" "+tc.dsn, func(t *testing.T) {
+			registerMySQLTLSConfig(t, "custom-ca")
 			d, ok := Lookup(tc.driver)
 			if ok && d.Encrypted != nil {
 				if got := d.Encrypted(tc.dsn); got != tc.encrypted {
@@ -57,6 +86,18 @@ func TestOnlyVerifiedModesCarryAMintedCredential(t *testing.T) {
 			}
 		})
 	}
+}
+
+// registerMySQLTLSConfig registers a TLS configuration under name for the
+// length of a test, the way an operator's build carrying a private CA would.
+// The MySQL driver resolves the name when it parses the connection string, so
+// an unregistered one does not connect at all.
+func registerMySQLTLSConfig(t *testing.T, name string) {
+	t.Helper()
+	if err := mysql.RegisterTLSConfig(name, &tls.Config{MinVersion: tls.VersionTLS12}); err != nil {
+		t.Fatalf("registering TLS configuration %q: %v", name, err)
+	}
+	t.Cleanup(func() { mysql.DeregisterTLSConfig(name) })
 }
 
 // The two questions must not collapse back into one: every mode that verifies

@@ -90,6 +90,19 @@ func (o APIServiceOptions) groupAllowed(group string) bool {
 	return false
 }
 
+// groupRefusal says why a projection may not claim this API group, or nil when
+// it may.
+func (o APIServiceOptions) groupRefusal(group string) error {
+	if o.groupAllowed(group) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: %q is not under any of the suffixes --projection-group-suffixes allows (%s). "+
+			"An APIService routes the whole group to this server and is not given back, so the "+
+			"group a projection claims is an operator's decision rather than the projection's",
+		errGroupNotAllowed, group, strings.Join(o.AllowedGroupSuffixes, ", "))
+}
+
 // DefaultAPIServiceOptions returns options pointing at the conventional
 // in-cluster deployment.
 func DefaultAPIServiceOptions() APIServiceOptions {
@@ -225,18 +238,29 @@ func (m *apiServiceManager) reconcile(
 		return nil, nil
 	}
 
-	wanted := map[string]schema.GroupVersion{}
-	for _, res := range resources {
-		gv := res.GroupVersion()
-		wanted[apiServiceName(gv)] = gv
-	}
-
 	// One group version failing does not stop the others being registered, and
 	// the failures come back per group version so that the projections behind
 	// them can say so in their own status. Registration used to abort on the
 	// first error and report it only to the log, which left every projection
 	// claiming Ready while requests for them went nowhere.
 	unregistered := map[schema.GroupVersion]error{}
+
+	// A group outside the permitted suffixes is neither wanted nor kept, so a
+	// registration this server wrote for it before the suffixes were set is
+	// pruned. Wanted, it was kept: ensure refused to touch it and prune
+	// skipped it, and the group went on routing here for good -- the claim
+	// the suffixes exist to stop. The controller does not install such a
+	// projection at all; this is where the registration follows.
+	wanted := map[string]schema.GroupVersion{}
+	for _, res := range resources {
+		gv := res.GroupVersion()
+		if err := m.options.groupRefusal(gv.Group); err != nil {
+			unregistered[gv] = err
+			continue
+		}
+		wanted[apiServiceName(gv)] = gv
+	}
+
 	for name, gv := range wanted {
 		if err := m.ensure(ctx, name, gv, owners[gv]); err != nil {
 			// A conflict already names the APIService; wrapping it would name
@@ -257,7 +281,9 @@ func (m *apiServiceManager) reconcile(
 		keep[name] = struct{}{}
 	}
 	for gv := range declared {
-		keep[apiServiceName(gv)] = struct{}{}
+		if m.options.groupAllowed(gv.Group) {
+			keep[apiServiceName(gv)] = struct{}{}
+		}
 	}
 	return unregistered, m.prune(ctx, keep)
 }
@@ -389,12 +415,8 @@ func (m *apiServiceManager) ensure(ctx context.Context, name string, gv schema.G
 	client := m.client.Resource(APIServiceGVR)
 
 	// Before anything is created, because what would be created is the claim.
-	if !m.options.groupAllowed(gv.Group) {
-		return fmt.Errorf(
-			"%w: %q is not under any of the suffixes --projection-group-suffixes allows (%s). "+
-				"An APIService routes the whole group to this server and is not given back, so the "+
-				"group a projection claims is an operator's decision rather than the projection's",
-			errGroupNotAllowed, gv.Group, strings.Join(m.options.AllowedGroupSuffixes, ", "))
+	if err := m.options.groupRefusal(gv.Group); err != nil {
+		return err
 	}
 
 	existing, err := m.lookup(ctx, name)

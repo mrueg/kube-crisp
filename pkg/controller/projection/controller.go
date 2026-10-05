@@ -653,6 +653,20 @@ func (c *Controller) sync(ctx context.Context) error {
 		}
 		created[name] = cand.projection.CreationTimestamp
 
+		// A group the operator has not allowed is refused before anything is
+		// compiled, and not through failed(): what the projection served
+		// before is not a previous configuration to fall back on, since
+		// serving it is the thing that is not allowed. Leaving it to the
+		// registration alone kept the router answering for the group -- and,
+		// for a projection that took it before the suffixes were set, kept the
+		// APIService routing requests here -- while the projection reported
+		// itself unregistered.
+		if err := c.apiServices.options.groupRefusal(cand.projection.Spec.Resource.Group); err != nil {
+			failures[name] = err
+			klog.ErrorS(err, "projection is not servable", "projection", name)
+			continue
+		}
+
 		prepared, err := c.compiler.Prepare(ctx, cand.projection)
 		if err != nil {
 			failed(cand, err)
@@ -1298,6 +1312,9 @@ func failureReason(failure error) string {
 	var reserved *nameReservedError
 	if errors.As(failure, &reserved) {
 		return "NameReservedByFile"
+	}
+	if errors.Is(failure, errGroupNotAllowed) {
+		return "GroupNotAllowed"
 	}
 	return "CompilationFailed"
 }

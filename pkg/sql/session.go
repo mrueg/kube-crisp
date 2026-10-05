@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"strconv"
 	"strings"
@@ -128,7 +129,8 @@ func clientDeadline(enforced bool, timeout time.Duration) time.Duration {
 // that scopes the setting to the transaction, so it goes away with it; MySQL
 // has no transaction-local settings, so the same idea is a variable on the
 // connection that clearSession has to put back before the connection returns
-// to a pool every projection shares.
+// to a pool every projection shares — which is why beginTx holds that
+// connection itself.
 type sessionDialect uint8
 
 const (
@@ -194,8 +196,8 @@ func (p *Pool) applySession(ctx context.Context, tx *sql.Tx, session []SessionVa
 		case sessionUserVariable:
 			// MySQL has no transaction-local settings, so this is a user
 			// variable on the connection — and it outlives the transaction.
-			// clearSession puts it back to NULL before the transaction ends,
-			// because the connection goes back to a pool that every projection
+			// clearSession puts it back to NULL once the transaction is over,
+			// on the connection beginTx held for it, because the connection goes back to a pool that every projection
 			// reaching this database shares, and the next request on it may
 			// belong to a projection that sets nothing.
 			if _, err := tx.ExecContext(ctx,
@@ -211,8 +213,93 @@ func (p *Pool) applySession(ctx context.Context, tx *sql.Tx, session []SessionVa
 	return nil
 }
 
-// clearSession puts connection-scoped variables back before the transaction
-// ends.
+// sessionClearTimeout bounds putting a connection's variables back once the
+// request is over.
+//
+// The request's own context cannot be used for it: by then it may well be
+// cancelled or past its deadline, and that is precisely the case where the
+// clear matters most. But a clear with no deadline at all would wait on a
+// database that has stopped answering for as long as it takes, holding the
+// connection the whole time. Running out of this is a failed clear like any
+// other, and the connection is discarded.
+const sessionClearTimeout = 5 * time.Second
+
+// beginTx opens the transaction a request runs in, and returns what to defer
+// to finish with it.
+//
+// When the request sets MySQL user variables the transaction is begun on a
+// connection held explicitly, rather than on whichever one the pool hands the
+// transaction, and the connection is only given back once its variables are
+// cleared. That is the whole point. Begun on the pool, a transaction whose
+// context is cancelled while nothing is running on it is rolled back by
+// database/sql itself, and the connection goes straight back to the pool —
+// go-sql-driver/mysql can reset a session, so database/sql keeps it rather than
+// discarding it, and that reset leaves user variables alone. The clear that was
+// meant to catch it then ran with the cancelled context on a transaction that
+// was already over, failed, and was thrown away, so the next request on that
+// connection — another projection's, possibly one that sets no variables — ran
+// as the previous caller. A connection held here does not go back until this
+// says so.
+//
+// Everything else begins on the pool as it always did: set_config is scoped to
+// the transaction, so there is nothing to hold the connection for, and
+// database/sql's own retry on a dead pooled connection is worth keeping.
+func (p *Pool) beginTx(ctx context.Context, opts *sql.TxOptions, session []SessionVariable) (*sql.Tx, func(), error) {
+	if len(session) == 0 || sessionDialectFor(p.driver) != sessionUserVariable {
+		tx, err := p.db.BeginTx(ctx, opts)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Rollback after a successful commit is a no-op, so this needs no
+		// bookkeeping to be correct.
+		return tx, func() { _ = tx.Rollback() }, nil
+	}
+
+	conn, err := p.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	tx, err := conn.BeginTx(ctx, opts)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	return tx, func() {
+		// Rolled back first, so the clear runs on the connection rather than
+		// on a transaction that may already have been ended under it. A user
+		// variable outlives both a commit and a rollback, so after either is
+		// the right time.
+		_ = tx.Rollback()
+		p.releaseSession(ctx, conn, session)
+	}, nil
+}
+
+// releaseSession clears the session's variables and gives the connection back
+// to the pool — or, when they could not be cleared, makes sure it never goes
+// back.
+//
+// There is no second way to put a variable back, and the connection is shared
+// by every projection reaching the same database. Returning driver.ErrBadConn
+// from Raw is how database/sql is told a connection is unusable: it closes it
+// rather than pooling it, which is the one thing still in this server's power.
+func (p *Pool) releaseSession(ctx context.Context, conn *sql.Conn, session []SessionVariable) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionClearTimeout)
+	defer cancel()
+
+	if err := p.clearSession(ctx, conn, session); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	_ = conn.Close()
+}
+
+// sessionExecer is what clearSession runs its statements on: the connection a
+// request's transaction was begun on.
+type sessionExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// clearSession puts connection-scoped variables back once the transaction is
+// over.
 //
 // Only the user-variable dialect needs it. set_config is called with the local flag,
 // so its settings are already scoped to the transaction and disappear with it.
@@ -222,8 +309,9 @@ func (p *Pool) applySession(ctx context.Context, tx *sql.Tx, session []SessionVa
 // request, could still read.
 //
 // A failure here is reported, because a variable that could not be cleared is
-// exactly the condition this exists to prevent.
-func (p *Pool) clearSession(ctx context.Context, tx *sql.Tx, session []SessionVariable) error {
+// exactly the condition this exists to prevent; releaseSession discards the
+// connection on one.
+func (p *Pool) clearSession(ctx context.Context, conn sessionExecer, session []SessionVariable) error {
 	if sessionDialectFor(p.driver) != sessionUserVariable {
 		return nil
 	}
@@ -232,7 +320,7 @@ func (p *Pool) clearSession(ctx context.Context, tx *sql.Tx, session []SessionVa
 		if err := ValidateSessionVariableName(variable.Name); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx,
+		if _, err := conn.ExecContext(ctx,
 			fmt.Sprintf("SET @%s = NULL", mysqlVariableName(variable.Name)),
 		); err != nil {
 			return fmt.Errorf("clearing session variable %q: %w", variable.Name, err)

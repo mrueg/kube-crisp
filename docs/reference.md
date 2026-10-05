@@ -317,9 +317,12 @@ there is an object or a selector to read either from.
 The values are always bound, never interpolated, and the names are validated
 before they are used, since no driver takes a setting's name as a parameter.
 PostgreSQL scopes a setting to the transaction; MySQL has no transaction-local
-settings, so the variable is a connection one and is cleared before the
-transaction ends — the connection goes back to a pool every projection reaching
-that database shares, and a value left on it is one a later request could read.
+settings, so the variable is a connection one and is cleared once the
+transaction ends, on the connection kube-crisp held for it — the connection goes
+back to a pool every projection reaching that database shares, and a value left
+on it is one a later request could read. The clear runs even when the request
+was cancelled or timed out, and a connection it fails on is closed rather than
+returned to the pool.
 Setting any of these moves every query into a transaction — the only way a
 setting can be scoped to one request rather than left on a pooled connection for
 whoever gets it next — and folds the resolved values into the cache and

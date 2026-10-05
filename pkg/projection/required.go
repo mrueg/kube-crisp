@@ -84,8 +84,10 @@ func requiredColumns(mapping crispv1alpha1.Mapping) []crispv1alpha1.RequiredColu
 
 	for _, column := range MappingColumns(&mapping) {
 		// A column read twice keeps the first description of it. MappingColumns
-		// reports identity first, so a column that is both the name and a field
-		// is reported as identity — the half that cannot be dropped.
+		// reports identity first, so a column that is both the uid and a field
+		// is reported as identity — the half that cannot be dropped. (The name
+		// and namespace columns cannot be read twice that way: NewMapper
+		// refuses it, see checkIdentityColumns.)
 		if seen[column.Column] {
 			continue
 		}

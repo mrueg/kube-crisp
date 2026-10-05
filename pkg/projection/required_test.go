@@ -78,23 +78,28 @@ func TestRequiredSchemaGathersTheMappedColumns(t *testing.T) {
 	}
 }
 
-// TestRequiredSchemaReportsIdentityOverField: a column can be both, and the
-// half that cannot be dropped is the one worth reporting.
+// TestRequiredSchemaReportsIdentityOverField: the uid column can also be a
+// field, and the half that cannot be dropped is the one worth reporting. The
+// name and namespace columns cannot be, which NewMapper refuses.
 func TestRequiredSchemaReportsIdentityOverField(t *testing.T) {
 	spec := ordersSpec()
+	spec.Mapping.UID = "order_uid"
 	spec.Mapping.Fields = append(spec.Mapping.Fields,
-		crispv1alpha1.FieldMapping{Column: "id", Path: "spec.orderID"})
+		crispv1alpha1.FieldMapping{Column: "order_uid", Path: "spec.orderUID"})
+	if _, err := NewMapper(testResource(), spec.Mapping); err != nil {
+		t.Fatalf("NewMapper() refused the mapping this test describes: %v", err)
+	}
 
 	for _, column := range RequiredSchema(spec).Columns {
-		if column.Name != "id" {
+		if column.Name != "order_uid" {
 			continue
 		}
 		if column.UsedFor != usedForIdentity {
-			t.Errorf("id is reported as %q, want %q — it is what names the object", column.UsedFor, usedForIdentity)
+			t.Errorf("order_uid is reported as %q, want %q — it is the object's uid", column.UsedFor, usedForIdentity)
 		}
 		return
 	}
-	t.Fatal("id is not reported at all")
+	t.Fatal("order_uid is not reported at all")
 }
 
 // TestRequiredSchemaIsStable keeps a status that is rebuilt on every sync from

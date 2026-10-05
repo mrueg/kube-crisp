@@ -235,6 +235,14 @@ with field status.phase, which the write set to "shipped"
 Without that the request was answered `200`, `kubectl` reported `labeled`, and the row had not
 moved. The projection also says so once when it loads, naming the columns mapped both ways.
 
+**A column that names the object is not mapped again.** `mapping.name`, each of
+`mapping.nameColumns` and `mapping.namespace` choose the row a write lands on, so a projection that
+also maps one of those columns as a label, an annotation or a field is refused. Bound from both, the
+column would take whichever the object carried last: with `namespace: tenant` and a label
+`example.com/tenant` mapped to `tenant`, `acme/order-1` labelled `example.com/tenant=globex` was
+written into globex's row. To show the value somewhere else as well, select it a second time under
+another name — `SELECT id, id AS order_id, …` — and map that.
+
 ### Which verbs are advertised
 
 Discovery offers exactly the verbs a projection has queries for, and nothing else:

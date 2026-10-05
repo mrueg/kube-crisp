@@ -54,6 +54,7 @@ spec:
     list:
       sql: |
         SELECT lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS name,
+               lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS film,
                'store-' || i.store_id AS store_ns,
                f.film_id, f.title,
                count(*)::int AS replicas,
@@ -76,6 +77,7 @@ spec:
     get:
       sql: |
         SELECT lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS name,
+               lower(regexp_replace(f.title, '[^a-zA-Z0-9]+', '-', 'g')) AS film,
                'store-' || i.store_id AS store_ns,
                f.film_id, f.title,
                count(*)::int AS replicas,
@@ -131,7 +133,7 @@ spec:
                  generate_series(1, GREATEST(:replicas::int - (SELECT copies FROM total), 0))
             RETURNING inventory_id, last_update
         )
-        SELECT :name::text AS name, :namespace::text AS store_ns,
+        SELECT :name::text AS name, :name::text AS film, :namespace::text AS store_ns,
                (SELECT film_id FROM target) AS film_id,
                (SELECT title FROM film WHERE film_id = (SELECT film_id FROM target)) AS title,
                settled.copies AS replicas,
@@ -182,7 +184,11 @@ spec:
     resourceVersion: version
     fields:
       - {column: title,     path: spec.title}
-      - {column: name,      path: spec.film}
+      # The slug again under its own name rather than the name column on a
+      # second path: a write binds a column from everything that maps it, and
+      # :name is the film the update scales, so it may only come from the
+      # object's name.
+      - {column: film,      path: spec.film}
       # The same count under two names rather than one column on two paths:
       # a column mapped twice can only be written from one of them, and the
       # server would warn that the other is read-only. A shelf has no desired

@@ -100,6 +100,9 @@ func NewMapper(res crispv1alpha1.ProjectedResource, mapping crispv1alpha1.Mappin
 	if !namespaced && mapping.Namespace != "" {
 		return nil, fmt.Errorf("mapping.namespace must be empty for cluster-scoped projections")
 	}
+	if err := checkIdentityColumns(mapping); err != nil {
+		return nil, err
+	}
 
 	fields := make([]mappedField, 0, len(mapping.Fields))
 	for _, f := range mapping.Fields {
@@ -142,6 +145,70 @@ func NewMapper(res crispv1alpha1.ProjectedResource, mapping crispv1alpha1.Mappin
 		fields:     fields,
 		shared:     sharedColumns(mapping, fields),
 	}, nil
+}
+
+// checkIdentityColumns refuses a mapping that reads a column carrying the
+// object's identity — the name, a part of a composite name, the namespace — a
+// second time as a label, an annotation or a field.
+//
+// On the way out that is harmless: both are filled from the same column and
+// agree. On the way in it decides which row a write lands on. Params binds every
+// mapped column from the submitted object, so the column would be bound once
+// from the name the request path was checked against and once from a label,
+// annotation or field the client wrote freely, and only one of them can be the
+// value the statement sees. With namespace: tenant and a label
+// example.com/tenant mapped to tenant, acme/order-1 carrying
+// example.com/tenant=globex was written into globex's row, and without the
+// label into a row whose tenant is NULL. Unlike a label shared with a field,
+// where DroppedOnWrite can say which half was ignored and the row is still the
+// right one, there is no half of this that is safe to drop, so it is refused.
+// A query that wants the value in a field as well can select the column twice
+// under another alias.
+func checkIdentityColumns(mapping crispv1alpha1.Mapping) error {
+	identity := map[string]string{}
+	if mapping.Name != "" {
+		identity[mapping.Name] = "mapping.name"
+	}
+	for _, column := range mapping.NameColumns {
+		identity[column] = "mapping.nameColumns"
+	}
+	if mapping.Namespace != "" {
+		identity[mapping.Namespace] = "mapping.namespace"
+	}
+
+	refuse := func(column, as string) error {
+		return fmt.Errorf("column %q is %s and also %s: a write would bind it from both, "+
+			"and the object's identity has to come from its name and namespace alone, "+
+			"so select it a second time under another name to map it again",
+			column, identity[column], as)
+	}
+
+	// Sorted, so the same mapping is refused with the same message every time.
+	for _, key := range sortedKeys(mapping.Labels) {
+		if column := mapping.Labels[key]; identity[column] != "" {
+			return refuse(column, fmt.Sprintf("label %q", key))
+		}
+	}
+	for _, key := range sortedKeys(mapping.Annotations) {
+		if column := mapping.Annotations[key]; identity[column] != "" {
+			return refuse(column, fmt.Sprintf("annotation %q", key))
+		}
+	}
+	for _, f := range mapping.Fields {
+		if identity[f.Column] != "" {
+			return refuse(f.Column, "field "+f.Path)
+		}
+	}
+	return nil
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // sharedColumn is a column the projection reads twice: once through a label or
@@ -1405,16 +1472,13 @@ func (m *Mapper) Params(obj *unstructured.Unstructured) (map[string]any, error) 
 		args[column.Column] = nil
 	}
 
+	// Split before anything is bound, so a name that cannot be a row is refused
+	// before the work of encoding the rest; bound after everything else, below.
 	identity, err := m.SplitName(obj.GetName())
 	if err != nil {
 		return nil, err
 	}
-	for column, value := range identity {
-		args[column] = value
-	}
-	if m.namespaced {
-		args[m.mapping.Namespace] = obj.GetNamespace()
-	}
+
 	if col := m.mapping.UID; col != "" && obj.GetUID() != "" {
 		args[col] = string(obj.GetUID())
 	}
@@ -1509,6 +1573,17 @@ func (m *Mapper) Params(obj *unstructured.Unstructured) (map[string]any, error) 
 				strings.Join(f.path, "."), f.column, err)
 		}
 		args[f.column] = bound
+	}
+
+	// Identity last. NewMapper refuses a mapping that reads an identity column
+	// as anything else, but whatever is bound last is what the statement sees,
+	// and the one value that must never be displaced is the name and namespace
+	// the request path was checked against: they choose the row.
+	for column, value := range identity {
+		args[column] = value
+	}
+	if m.namespaced {
+		args[m.mapping.Namespace] = obj.GetNamespace()
 	}
 
 	return args, nil

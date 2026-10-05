@@ -42,6 +42,86 @@ func TestAConnectionStringIsNotEchoedBackInAnError(t *testing.T) {
 	}
 }
 
+// Taking the exact connection string back out is not enough, because a driver
+// does not always quote it exactly.
+//
+// pgx masks what it recognises as a password and quotes the rest, so the
+// string in its error is no longer the one redactDSN looks for, and everything
+// that is not called password -- a cloud key, a URL's user name, whatever else
+// the named Secret key held -- went through whole. MySQL quotes the value of a
+// parameter it could not read. What a parse failure is allowed to say is why,
+// in the driver's words, and never what it was given.
+func TestAParseFailureKeepsItsReasonAndNotItsInput(t *testing.T) {
+	for _, tc := range []struct {
+		name, driver, dsn string
+		secrets           []string
+		reason            string
+	}{
+		{
+			name:    "postgres keyword/value",
+			driver:  "postgres",
+			dsn:     "aws_secret_access_key=SECRETKEY123 password=hunter2 port=notanumber",
+			secrets: []string{"SECRETKEY123", "hunter2", "aws_secret_access_key"},
+			reason:  "invalid port",
+		},
+		{
+			name:    "postgres URL with user information",
+			driver:  "postgres",
+			dsn:     "postgres://admin-SECRETUSER:hunter2@db:notaport/store?aws_secret_access_key=SECRETKEY123",
+			secrets: []string{"SECRETKEY123", "hunter2", "SECRETUSER"},
+			reason:  "invalid port",
+		},
+		{
+			// net/url quotes its whole input too, inside pgx's own message.
+			name:    "postgres URL net/url cannot read",
+			driver:  "postgres",
+			dsn:     "postgres://admin-SECRETUSER:hunter2@db/store%zz?aws_secret_access_key=SECRETKEY123",
+			secrets: []string{"SECRETKEY123", "hunter2", "SECRETUSER"},
+			reason:  "failed to parse as URL",
+		},
+		{
+			name:    "postgres URL that parses but does not configure",
+			driver:  "postgres",
+			dsn:     "postgres://admin-SECRETUSER:hunter2@db:5432/store?target_session_attrs=SECRETKEY123",
+			secrets: []string{"SECRETKEY123", "hunter2", "SECRETUSER"},
+			reason:  "unknown target_session_attrs value",
+		},
+		{
+			name:    "mysql parameter value",
+			driver:  "mysql",
+			dsn:     "admin-SECRETUSER:hunter2@tcp(db:3306)/store?parseTime=SECRETKEY123",
+			secrets: []string{"SECRETKEY123", "hunter2", "SECRETUSER"},
+			reason:  "invalid bool value",
+		},
+		{
+			name:    "mysql shape",
+			driver:  "mysql",
+			dsn:     "admin-SECRETUSER:hunter2@tcp(db:3306)store",
+			secrets: []string{"hunter2", "SECRETUSER"},
+			reason:  "missing the slash",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, err := Open(PoolOptions{Driver: tc.driver, DSN: tc.dsn})
+			if err == nil {
+				t.Cleanup(func() { _ = pool.Close() })
+				err = pool.Ping(context.Background())
+			}
+			if err == nil {
+				t.Fatal("the connection string was accepted")
+			}
+			for _, secret := range tc.secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("the error carries %q from the connection string: %v", secret, err)
+				}
+			}
+			if !strings.Contains(err.Error(), tc.reason) {
+				t.Errorf("the error lost the driver's reason %q: %v", tc.reason, err)
+			}
+		})
+	}
+}
+
 // redactDSN itself, including the cases where it must do nothing.
 func TestRedactDSN(t *testing.T) {
 	const dsn = "postgres://user:hunter2@db:5432/store"

@@ -190,6 +190,83 @@ func IsUnavailable(err error) bool {
 	)
 }
 
+// withoutParsedInput replaces a pgx connection-string parse failure, wherever it
+// sits in err, with one that says why the string could not be read and nothing
+// of what it said.
+//
+// redactDSN takes the exact connection string out of an error, and pgx does not
+// quote it exactly: it masks what it recognises as a password and quotes the
+// rest -- "cannot parse `aws_secret_access_key=... password=xxxxx port=x`". So
+// the exact string was never found, and every other secret in it went through
+// whole to the projection's status, a 503 body and the log, along with a URL's
+// user name. Masking more of it would be another guess at what a driver
+// considers sensitive; the input is what was never supposed to be repeated,
+// so none of it is. net/url's own error, which pgx wraps, quotes the whole URL
+// too, so that goes as well.
+//
+// What is kept is pgx's reason -- "invalid port", "failed to parse as URL" --
+// which is the part that says what to fix. It is reached by quoting a copy of
+// the error that has no connection string to quote.
+func withoutParsedInput(err error) error {
+	var parseErr *pgconn.ParseConfigError
+	if !errors.As(err, &parseErr) {
+		return err
+	}
+
+	bare := *parseErr
+	bare.ConnString = ""
+	reason := strings.TrimPrefix(bare.Error(), "cannot parse ``: ")
+	safe := "cannot parse [connection string redacted]: " + parseFailureReason(reason)
+
+	message := err.Error()
+	if quoted := parseErr.Error(); strings.Contains(message, quoted) {
+		return errors.New(strings.ReplaceAll(message, quoted, safe))
+	}
+	// Wrapped by something that did not repeat it verbatim, so there is no
+	// telling which part of the message is the input. All of it goes.
+	return errors.New(safe)
+}
+
+// mysqlParseFailure reports, without any of the input, why the MySQL driver
+// cannot read a connection string -- or nil when it can.
+//
+// The driver's parse errors are plain strings, so they cannot be picked out of
+// an error chain the way pgx's can; this asks the same question the driver is
+// about to, first. It quotes the value it could not read -- "invalid bool
+// value: <whatever the Secret key held>" -- so only the reason before it is
+// kept.
+func mysqlParseFailure(dsn string) error {
+	if _, err := mysqldriver.ParseDSN(dsn); err != nil {
+		return errors.New("cannot parse [connection string redacted]: " + parseFailureReason(err.Error()))
+	}
+	return nil
+}
+
+// parseFailureReason is the part of a driver's parse error that names what is
+// wrong, without the value it was given.
+//
+// Both drivers put the reason first and the offending input after a colon, a
+// quote or an opening parenthesis: "invalid bool value: x", "unknown
+// target_session_attrs value: x", `invalid dbname "x"`, "failed to parse as URL
+// (parse "x": ...)". MySQL's own "invalid DSN: ..." sentences are fixed text and
+// are the useful part, so they are kept whole. A reason that is not a phrase --
+// "time", from time.ParseDuration's `time: invalid duration "x"` -- says
+// nothing, and is replaced by something that does.
+func parseFailureReason(message string) string {
+	if strings.HasPrefix(message, "invalid DSN: ") && !strings.ContainsAny(message, `"'`) {
+		return message
+	}
+	reason := message
+	if i := strings.IndexAny(message, `:"'(`); i >= 0 {
+		reason = message[:i]
+	}
+	reason = strings.TrimSpace(reason)
+	if !strings.Contains(reason, " ") {
+		return "a setting has a value the driver cannot read"
+	}
+	return reason
+}
+
 func containsAny(err error, needles ...string) bool {
 	if err == nil {
 		return false

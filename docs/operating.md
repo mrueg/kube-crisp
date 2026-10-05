@@ -101,7 +101,11 @@ which cannot grant a cluster-scoped resource at all.
 
 Without `--as` it checks the current user with a `SelfSubjectAccessReview`, which needs no
 permission. `--as` and `--as-group` make it a `SubjectAccessReview`, which is a privileged question
-and answered as one.
+and answered as one. A review is evaluated exactly as sent, so a user named with `--as` is sent with
+the groups authentication would have added: `system:authenticated` (`system:unauthenticated` for
+`system:anonymous`), and for `system:serviceaccount:<namespace>:<name>` also
+`system:serviceaccounts` and `system:serviceaccounts:<namespace>`. Without them a grant to one of
+those groups would read as a denial.
 
 ### Roles left behind
 

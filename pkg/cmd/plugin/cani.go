@@ -13,6 +13,8 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/authentication/serviceaccount"
+	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/client-go/kubernetes"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
@@ -71,7 +73,10 @@ func NewCommandCanI(out, errOut io.Writer) *cobra.Command {
 			"With no arguments it reads the projections in the cluster. Named arguments select\n" +
 			"projections by name; -f reads manifests instead — though the cluster is still\n" +
 			"asked, since it is the one that decides.\n\n" +
-			"Checks the current user unless --as is given.",
+			"Checks the current user unless --as is given. A user named with --as is checked\n" +
+			"with the groups authentication would give it as well: system:authenticated\n" +
+			"(system:unauthenticated for system:anonymous), and a service account's\n" +
+			"system:serviceaccounts groups.",
 		Args:         cobra.ArbitraryArgs,
 		SilenceUsage: true,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -246,7 +251,7 @@ func (o *caniOptions) allowed(
 		Spec: authorizationv1.SubjectAccessReviewSpec{
 			ResourceAttributes: attributes,
 			User:               o.asUser,
-			Groups:             o.asGroups,
+			Groups:             o.reviewGroups(),
 		},
 	}
 	result, err := kube.AuthorizationV1().SubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
@@ -254,6 +259,40 @@ func (o *caniOptions) allowed(
 		return false, fmt.Errorf("checking %s on %s for %s: %w", verb, resource, o.subject(), err)
 	}
 	return result.Status.Allowed, nil
+}
+
+// reviewGroups is the groups the subject would have had the cluster
+// authenticated it.
+//
+// A SubjectAccessReview is evaluated exactly as sent, so the groups the
+// kube-apiserver's authenticators add to every request are missing unless they
+// are spelled out — and a binding to system:authenticated, or to a service
+// account's namespace group, would answer no for a subject that is in fact
+// allowed. Only for a named user: groups alone describe no identity a request
+// could arrive with, so there is nothing to add to them.
+func (o *caniOptions) reviewGroups() []string {
+	if o.asUser == "" {
+		return o.asGroups
+	}
+	groups := append([]string(nil), o.asGroups...)
+	if namespace, _, err := serviceaccount.SplitUsername(o.asUser); err == nil {
+		groups = append(groups, serviceaccount.MakeGroupNames(namespace)...)
+	}
+	if o.asUser == user.Anonymous {
+		groups = append(groups, user.AllUnauthenticated)
+	} else {
+		groups = append(groups, user.AllAuthenticated)
+	}
+
+	seen := sets.New[string]()
+	unique := groups[:0]
+	for _, group := range groups {
+		if !seen.Has(group) {
+			seen.Insert(group)
+			unique = append(unique, group)
+		}
+	}
+	return unique
 }
 
 // subject names who was asked about, for the header and for errors.

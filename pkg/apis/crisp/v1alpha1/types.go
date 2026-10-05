@@ -997,8 +997,11 @@ type Mapping struct {
 	// +optional
 	NameColumns []string `json:"nameColumns,omitempty"`
 
-	// NameSeparator joins the parts of a composite name. Defaults to "-", and
-	// must be legal in an object name.
+	// NameSeparator joins the parts of a composite name. Defaults to "-". It
+	// must be a single character legal in an object name: a longer separator
+	// can form across the boundary between two parts, so two different rows
+	// would produce the same name.
+	// +kubebuilder:validation:MaxLength=1
 	// +optional
 	NameSeparator string `json:"nameSeparator,omitempty"`
 

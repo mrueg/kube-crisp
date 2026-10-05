@@ -529,8 +529,11 @@ spec:
                     type: array
                   nameSeparator:
                     description: |-
-                      NameSeparator joins the parts of a composite name. Defaults to "-", and
-                      must be legal in an object name.
+                      NameSeparator joins the parts of a composite name. Defaults to "-". It
+                      must be a single character legal in an object name: a longer separator
+                      can form across the boundary between two parts, so two different rows
+                      would produce the same name.
+                    maxLength: 1
                     type: string
                   namespace:
                     description: |-
@@ -2290,8 +2293,11 @@ spec:
                               type: array
                             nameSeparator:
                               description: |-
-                                NameSeparator joins the parts of a composite name. Defaults to "-", and
-                                must be legal in an object name.
+                                NameSeparator joins the parts of a composite name. Defaults to "-". It
+                                must be a single character legal in an object name: a longer separator
+                                can form across the boundary between two parts, so two different rows
+                                would produce the same name.
+                              maxLength: 1
                               type: string
                             namespace:
                               description: |-

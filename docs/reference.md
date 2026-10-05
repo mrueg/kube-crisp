@@ -366,7 +366,10 @@ Requests split it back into its parts and bind each under its own column name,
 so a query reads `WHERE region = :region AND order_no = :order_no`. A value
 carrying the separator is refused rather than escaped, because two different
 rows would otherwise produce one name; `generateName` is refused for the same
-reason, since a random suffix does not split into the identity columns.
+reason, since a random suffix does not split into the identity columns. The
+separator is a single character for that reason too: a longer one can form
+across the boundary between two parts, so with `--` the rows `("x-", "y")` and
+`("x", "-y")` would both be named `x---y`.
 
 A name is held on write to the rule every read applies — a DNS-1123 subdomain
 that can stand in a request path — and so are label values, annotation keys,

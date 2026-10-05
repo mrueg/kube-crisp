@@ -61,7 +61,17 @@ func NewMapper(res crispv1alpha1.ProjectedResource, mapping crispv1alpha1.Mappin
 		return nil, fmt.Errorf("set either mapping.name or mapping.nameColumns, not both")
 	}
 
+	// One character, because that is what makes a composite name reversible. A
+	// part may not contain the separator, but a longer one can still form across
+	// the boundary between two parts: with "--", ("x-", "y") and ("x", "-y") both
+	// name "x---y", SplitName can give that name to only one of them, and a get,
+	// update or delete of the other row reaches the first. A single character
+	// cannot straddle a boundary, so every occurrence of it in a name is one.
 	separator := mapping.NameSeparator
+	if len(separator) > 1 {
+		return nil, fmt.Errorf("mapping.nameSeparator %q must be a single character: "+
+			"a longer one can form across two parts, and two rows would then share a name", separator)
+	}
 	if len(mapping.NameColumns) > 0 {
 		if separator == "" {
 			separator = DefaultNameSeparator

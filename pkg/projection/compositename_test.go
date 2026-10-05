@@ -84,3 +84,32 @@ func TestACompositeNameStillRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+// TestNewMapperRefusesASeparatorLongerThanOneCharacter. A part may not contain
+// the separator, but a longer one can still form across the boundary between
+// two parts: with "--", ("x-", "y") and ("x", "-y") both name "x---y", and
+// SplitName hands that name to one of them, so a get, update or delete of the
+// other row reached the first. A single character cannot straddle anything.
+func TestNewMapperRefusesASeparatorLongerThanOneCharacter(t *testing.T) {
+	res := crispv1alpha1.ProjectedResource{
+		Group: "store.example.com", Version: "v1alpha1", Kind: "Shipment",
+		Plural: "shipments", Scope: crispv1alpha1.ClusterScoped,
+	}
+
+	for _, separator := range []string{"--", "-.", "x-"} {
+		_, err := NewMapper(res, crispv1alpha1.Mapping{
+			NameColumns: []string{"a", "b"}, NameSeparator: separator,
+		})
+		if err == nil {
+			t.Errorf("NewMapper() accepted nameSeparator %q", separator)
+		}
+	}
+
+	for _, separator := range []string{"-", ".", "x"} {
+		if _, err := NewMapper(res, crispv1alpha1.Mapping{
+			NameColumns: []string{"a", "b"}, NameSeparator: separator,
+		}); err != nil {
+			t.Errorf("NewMapper() refused nameSeparator %q: %v", separator, err)
+		}
+	}
+}

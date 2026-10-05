@@ -45,7 +45,7 @@ func TestAGroupOutsideThePermittedSuffixesIsNotRegistered(t *testing.T) {
 	}
 	// Per-group-version, so the projection behind it reports the refusal in its
 	// own Registered condition rather than one failure stopping the others.
-	unregistered, err := manager.reconcile(context.Background(), resources, nil)
+	unregistered, err := manager.reconcile(context.Background(), resources, nil, nil)
 	if err != nil {
 		t.Fatalf("reconcile() returned error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestAGroupUnderAPermittedSuffixIsRegistered(t *testing.T) {
 			resources := []apidynamic.Resource{{Group: group, Version: "v1alpha1", Plural: "orders"}}
 			// Nothing reports availability behind a fake client, so a pending
 			// registration is expected; what must not appear is a refusal.
-			unregistered, err := manager.reconcile(context.Background(), resources, nil)
+			unregistered, err := manager.reconcile(context.Background(), resources, nil, nil)
 			if err != nil {
 				t.Fatalf("reconcile() returned error: %v", err)
 			}
@@ -99,7 +99,7 @@ func TestASuffixIsMatchedOnALabelBoundary(t *testing.T) {
 	resources := []apidynamic.Resource{
 		{Group: "example.com.evil.test", Version: "v1", Plural: "orders"},
 	}
-	unregistered, err := manager.reconcile(context.Background(), resources, nil)
+	unregistered, err := manager.reconcile(context.Background(), resources, nil, nil)
 	if err != nil {
 		t.Fatalf("reconcile() returned error: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestNoPermittedSuffixesAllowsAnyGroup(t *testing.T) {
 	resources := []apidynamic.Resource{
 		{Group: "cert-manager.io", Version: "v1", Plural: "certificates"},
 	}
-	unregistered, err := manager.reconcile(context.Background(), resources, nil)
+	unregistered, err := manager.reconcile(context.Background(), resources, nil, nil)
 	if err != nil {
 		t.Fatalf("reconcile() returned error with no suffixes configured: %v", err)
 	}

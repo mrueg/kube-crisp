@@ -625,7 +625,7 @@ func TestAPIServiceReconcileReadsThroughTheCache(t *testing.T) {
 	)
 
 	resources := []apidynamic.Resource{{Group: "store.example.com", Version: "v1alpha1", Plural: "orders"}}
-	if _, err := manager.reconcile(context.Background(), resources, nil); err != nil {
+	if _, err := manager.reconcile(context.Background(), resources, nil, nil); err != nil {
 		t.Fatalf("reconcile() returned error: %v", err)
 	}
 
@@ -678,7 +678,7 @@ func TestAPIServiceReconcileLeavesForeignRegistrationsAlone(t *testing.T) {
 	)
 
 	resources := []apidynamic.Resource{{Group: "store.example.com", Version: "v1alpha1", Plural: "orders"}}
-	unregistered, err := manager.reconcile(context.Background(), resources, nil)
+	unregistered, err := manager.reconcile(context.Background(), resources, nil, nil)
 	if err != nil {
 		t.Fatalf("reconcile() returned error: %v", err)
 	}

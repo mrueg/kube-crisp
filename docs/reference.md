@@ -1242,6 +1242,14 @@ drifts, and deletes it when the last projection in that group goes away. Objects
 are never adopted — it only touches APIServices labelled `app.kubernetes.io/managed-by: kube-crisp` —
 so an existing registration is left exactly as it is.
 
+"Goes away" means the projection is gone, not that it stopped compiling. A projection that exists
+and fails to compile keeps its group's registration even when there is nothing of it to go on
+serving — a replica that has just started, say, and whose first attempt hit a Secret it could not
+read. What is kept is decided from the group versions the projections in the cluster and in
+`--projection-dir` declare, which every replica reads the same way, so one replica that cannot
+compile a projection does not withdraw the registration another is serving it through. A cluster
+object refused its name by a file declares nothing: its group is not kept for it.
+
 Left alone is not the same as registered. An existing `APIService` for a projected group version
 that does not point at kube-crisp's Service — a CustomResourceDefinition in that group, whose
 `APIService` the kube-apiserver manages itself, or another aggregated server — routes every request

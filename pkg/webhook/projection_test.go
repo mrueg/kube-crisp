@@ -434,3 +434,91 @@ type checkerFunc func(context.Context, *crispv1alpha1.CustomResourceProjection) 
 func (f checkerFunc) Check(ctx context.Context, p *crispv1alpha1.CustomResourceProjection) error {
 	return f(ctx, p)
 }
+
+// updateFor is an UPDATE from old to updated, as the kube-apiserver sends it.
+func updateFor(t *testing.T, old, updated *crispv1alpha1.CustomResourceProjection) *admissionv1.AdmissionRequest {
+	t.Helper()
+
+	request := requestFor(t, updated, admissionv1.Update)
+	raw, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("encoding the old projection: %v", err)
+	}
+	request.OldObject = runtime.RawExtension{Raw: raw}
+	return request
+}
+
+// TestAnUpdateThatLeavesTheSpecAloneIsAllowed. A label, an annotation, or a
+// finalizer changes nothing the check reads, and checking anyway refused it
+// whenever the database had moved on since: a projection whose table was
+// dropped could not be relabelled by GitOps, nor have a finalizer removed.
+func TestAnUpdateThatLeavesTheSpecAloneIsAllowed(t *testing.T) {
+	checker := &stubChecker{err: errors.New(`relation "orders" does not exist`)}
+	old := validProjection("orders")
+	updated := validProjection("orders")
+	updated.Labels = map[string]string{"team": "billing"}
+	updated.Annotations = map[string]string{"argocd.argoproj.io/tracking-id": "orders"}
+	updated.Finalizers = []string{"example.com/cleanup"}
+
+	response := review(t, allowingHandler(checker), updateFor(t, old, updated))
+
+	if !response.Allowed {
+		t.Errorf("an update to metadata alone was refused: %v", response.Result)
+	}
+	if checker.seen != "" {
+		t.Error("the checker was consulted about a spec that did not change")
+	}
+}
+
+// TestAnUpdateToATerminatingProjectionIsAllowed. Removing the last finalizer
+// is an update, and refusing it leaves the projection Terminating for good.
+func TestAnUpdateToATerminatingProjectionIsAllowed(t *testing.T) {
+	checker := &stubChecker{err: errors.New(`relation "orders" does not exist`)}
+	old := validProjection("orders")
+	old.Finalizers = []string{"example.com/cleanup"}
+	updated := validProjection("orders")
+	now := metav1.Now()
+	updated.DeletionTimestamp = &now
+	// Changed too, so it is the deletion that lets it through: the object is
+	// on its way out, and nothing it says will be compiled again.
+	updated.Spec.Queries.List.SQL = "SELECT id, tenant FROM orders_v2 WHERE tenant = :namespace"
+
+	response := review(t, allowingHandler(checker), updateFor(t, old, updated))
+
+	if !response.Allowed {
+		t.Errorf("an update to a projection being deleted was refused: %v", response.Result)
+	}
+	if checker.seen != "" {
+		t.Error("the checker was consulted about a projection being deleted")
+	}
+}
+
+// TestAnUpdateThatChangesTheSpecIsChecked, since skipping the unchanged ones
+// must not skip the ones the webhook is for.
+func TestAnUpdateThatChangesTheSpecIsChecked(t *testing.T) {
+	checker := &stubChecker{err: errors.New(`relation "orders_v2" does not exist`)}
+	old := validProjection("orders")
+	updated := validProjection("orders")
+	updated.Spec.Queries.List.SQL = "SELECT id, tenant FROM orders_v2 WHERE tenant = :namespace"
+
+	response := review(t, allowingHandler(checker), updateFor(t, old, updated))
+
+	if response.Allowed {
+		t.Error("an update to a spec the database cannot prepare was accepted")
+	}
+	if checker.seen != "orders" {
+		t.Errorf("the checker was given %q, want the updated projection", checker.seen)
+	}
+}
+
+// TestAnUpdateWithoutAnOldObjectIsChecked: with nothing to compare against,
+// the spec is treated as changed rather than waved through.
+func TestAnUpdateWithoutAnOldObjectIsChecked(t *testing.T) {
+	checker := &stubChecker{err: errors.New(`relation "orders" does not exist`)}
+
+	response := review(t, allowingHandler(checker), projectionRequest(t, "orders", admissionv1.Update))
+
+	if response.Allowed {
+		t.Error("an update with no old object to compare against was accepted unchecked")
+	}
+}

@@ -1149,16 +1149,40 @@ func (c *watchCache) applyLocked(
 			// The tombstone's own row when the cache is holding a trimmed
 			// entry: it is a whole object, so a field selector over a mapped
 			// column still matches, which a trimmed one could not answer.
-			if c.lightweight && identity.object != nil {
-				previous, existed = identity.object, true
+			//
+			// Only for a key the cache holds. This used to stand in for the
+			// cached entry whether there was one or not, which made every
+			// tombstone a deletion of something present — including one the
+			// previous poll had already applied.
+			if existed && c.lightweight && identity.object != nil {
+				previous = identity.object
 			}
 
 			if !existed {
 				// Not in the cache. With a tombstone that describes the row
-				// this is still a deletion worth reporting — a row created and
-				// removed between two polls, which a cache-only path drops
+				// this can still be a deletion worth reporting — a row created
+				// and removed between two polls, which a cache-only path drops
 				// silently.
-				if identity.object != nil {
+				//
+				// But only when the row it describes is one this cache could
+				// not have seen: its last version is past the mark the poll
+				// started from. A tombstone at or below that mark names a row
+				// the cache did see, and the reason it is not here is that an
+				// earlier poll already reported it gone. The deletion query is
+				// read forward from the same mark, but what it filters on need
+				// not be the version the tombstone carries — the tutorial's
+				// filters on deleted_at and maps the row's last updated_at,
+				// which nothing ever raises the mark past. That tombstone comes
+				// back on every poll for as long as it is kept, and reporting
+				// it each time handed every watcher the same removal on every
+				// interval and filled the history ring with copies of it,
+				// pushing out the changes a resuming client needed.
+				//
+				// The created-and-removed row still clears this: it was written
+				// after the last poll, so its version is past the mark, and the
+				// first poll that reports it also raises the mark to that
+				// version, so the next one does not.
+				if identity.object != nil && movesForward(watermark, identity.object.GetResourceVersion()) {
 					events = append(events, deleted(identity.object))
 				}
 				continue

@@ -172,6 +172,7 @@ func TestOrphanedRolesKeepsARoleWhileTheServerRestarts(t *testing.T) {
 		generatedRole("kube-crisp:gone.example.com:view", "gone.example.com"),
 		roleBinding("films-view", "store-1", restarting),
 		clusterBinding("films-view", restarting),
+		apiServerService(),
 	)
 	dyn := fakeDynamic(apiService("files.example.com", "v1alpha1", true, boolPtr(false)))
 
@@ -196,9 +197,13 @@ func TestOrphanedRolesKeepsARoleWhileTheServerRestarts(t *testing.T) {
 		t.Fatalf("a role for a group whose registration exists was reported orphaned:\n%s", out.String())
 	}
 	if !strings.Contains(errOut.String(), "v1alpha1.files.example.com") ||
-		!strings.Contains(errOut.String(), "restarting") ||
-		!strings.Contains(errOut.String(), "--apiservices") {
-		t.Fatalf("stderr does not say why the group is kept, or how to release it:\n%s", errOut.String())
+		!strings.Contains(errOut.String(), "restarting") {
+		t.Fatalf("stderr does not say why the group is kept:\n%s", errOut.String())
+	}
+	// Its Service is still there, so removing the registration is not the
+	// remedy, and recommending it is how the outage gets started by hand.
+	if strings.Contains(errOut.String(), "--apiservices") {
+		t.Fatalf("stderr recommends removing the registration of a server that may be restarting:\n%s", errOut.String())
 	}
 
 	// And not deleted, together with any binding on it.
@@ -221,6 +226,70 @@ func TestOrphanedRolesKeepsARoleWhileTheServerRestarts(t *testing.T) {
 	}
 	if _, err := kube.RbacV1().ClusterRoles().Get(context.Background(), "kube-crisp:gone.example.com:view", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("the role for the group nothing registers was not removed: %v", err)
+	}
+}
+
+// TestTheDocumentedOrderKeepsBindingsWhileTheServerRestarts runs both halves
+// the way the help says to, `--apiservices --delete` and then `--delete`,
+// against a file-backed group whose server is restarting. The registration is
+// unavailable and nothing claims it, which used to be enough to remove it;
+// the group then counted as unserved, and the second run took its roles and
+// every tenant's binding on them. The server registers the group again when
+// it comes back, and nothing recreates the bindings.
+func TestTheDocumentedOrderKeepsBindingsWhileTheServerRestarts(t *testing.T) {
+	const restarting = "kube-crisp:files.example.com:view"
+
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset(
+		generatedRole(restarting, "files.example.com"),
+		roleBinding("films-view", "store-1", restarting),
+		clusterBinding("films-view", restarting),
+		apiServerService(),
+	)
+	dyn := fakeDynamic(apiService("files.example.com", "v1alpha1", true, boolPtr(false)))
+
+	var out, errOut bytes.Buffer
+	o := &pruneOptions{apiServices: true, delete: true}
+	if err := o.pruneAPIServices(context.Background(), crisp, kube, dyn, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	o = &pruneOptions{delete: true}
+	if err := o.prune(context.Background(), crisp, kube, dyn, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() == "delete" {
+			t.Fatalf("deleted %s, whose Service still exists", action.(k8stesting.DeleteAction).GetName())
+		}
+	}
+	for _, action := range kube.Actions() {
+		if action.GetVerb() == "delete" {
+			t.Fatalf("deleted %s %s, which a restarting server's group still needs",
+				action.GetResource().Resource, action.(k8stesting.DeleteAction).GetName())
+		}
+	}
+}
+
+// TestAStrandedRegistrationIsPointedAtApiservices: once the Service is gone
+// the server is not coming back, and the registration is what is keeping its
+// roles. Saying which run removes it is the point of naming it.
+func TestAStrandedRegistrationIsPointedAtApiservices(t *testing.T) {
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset(
+		generatedRole("kube-crisp:files.example.com:view", "files.example.com"),
+	)
+	dyn := fakeDynamic(apiService("files.example.com", "v1alpha1", true, boolPtr(false)))
+
+	var out, errOut bytes.Buffer
+	o := &pruneOptions{}
+	if err := o.prune(context.Background(), crisp, kube, dyn, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut.String(), "v1alpha1.files.example.com is stranded") ||
+		!strings.Contains(errOut.String(), "kube-crisp/kube-crisp-apiserver does not exist") ||
+		!strings.Contains(errOut.String(), "prune --apiservices --delete") {
+		t.Fatalf("stderr does not name the stranded registration and how to remove it:\n%s", errOut.String())
 	}
 }
 

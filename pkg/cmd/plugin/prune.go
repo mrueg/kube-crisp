@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -20,9 +21,10 @@ import (
 )
 
 type pruneOptions struct {
-	client      clientFlags
-	delete      bool
-	apiServices bool
+	client             clientFlags
+	delete             bool
+	apiServices        bool
+	includeUnavailable bool
 }
 
 // NewCommandPrune builds the `prune` subcommand.
@@ -54,12 +56,20 @@ func NewCommandPrune(out, errOut io.Writer) *cobra.Command {
 			"`--apiservices` looks for the other thing a projection leaves behind: the\n" +
 			"registration that routed its group here. Those are owned by the projection and go\n" +
 			"with it, except for a group served from `--projection-dir`, which has no object\n" +
-			"whose deletion could collect it — so stopping the server without first removing\n" +
+			"whose deletion could collect it — so uninstalling the server without first removing\n" +
 			"the files strands one. A stranded registration is a cluster-scoped object the\n" +
 			"aggregation layer goes on dialling, and it degrades `kubectl api-resources` for\n" +
 			"the whole cluster rather than only for that group. It also keeps its group counted\n" +
 			"as served, so the order that finds everything is `--apiservices --delete` first,\n" +
 			"then a plain `--delete` for the roles the removed registrations were holding up.\n\n" +
+			"A registration is stranded when nothing claims it, the aggregation layer reports it\n" +
+			"unavailable, and the Service it routes to does not exist. Unavailable alone is not\n" +
+			"enough: a group served only from --projection-dir looks exactly like that while its\n" +
+			"server restarts, crashloops or is upgraded, and removing its registration then\n" +
+			"would let the plain run delete its roles and every binding on them, which nothing\n" +
+			"recreates when the server comes back. `--include-unavailable` takes those as well,\n" +
+			"for a server stopped for good whose Service was left behind. Telling the cases\n" +
+			"apart needs get on services in the namespace each registration routes to.\n\n" +
 			"Prints what it would remove. Pass --delete to remove it.",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
@@ -77,6 +87,10 @@ func NewCommandPrune(out, errOut io.Writer) *cobra.Command {
 	cmd.Flags().BoolVar(&o.apiServices, "apiservices", false,
 		"Look for stranded APIServices instead of orphaned ClusterRoles. One kind of leftover "+
 			"per run, so that what --delete would remove is never two things at once.")
+	cmd.Flags().BoolVar(&o.includeUnavailable, "include-unavailable", false,
+		"With --apiservices, also take unclaimed registrations that are unavailable while the "+
+			"Service they route to still exists. That is what a restarting server looks like, so "+
+			"pass it only for a server that is not coming back.")
 	o.client.bind(cmd)
 
 	return cmd
@@ -90,18 +104,18 @@ func (o *pruneOptions) run(ctx context.Context, out, errOut io.Writer) error {
 
 	// Both halves read the APIServices: one to find the stranded ones, the
 	// other because a registration is the only trace a file-backed projection
-	// leaves in the cluster.
+	// leaves in the cluster. Both read Services as well, since whether the one
+	// a registration routes to exists is what tells stranded from restarting.
 	dyn, err := o.client.dynamic()
 	if err != nil {
 		return err
 	}
-	if o.apiServices {
-		return o.pruneAPIServices(ctx, crisp, dyn, out, errOut)
-	}
-
 	kube, err := o.client.kube()
 	if err != nil {
 		return err
+	}
+	if o.apiServices {
+		return o.pruneAPIServices(ctx, crisp, kube, dyn, out, errOut)
 	}
 	return o.prune(ctx, crisp, kube, dyn, out, errOut)
 }
@@ -121,16 +135,25 @@ func (o *pruneOptions) prune(
 		return err
 	}
 
-	// Said whether or not anything was found. A role kept because a stranded
-	// registration still names its group is indistinguishable, from the
-	// outside, from one this command missed — and the way to release it is a
-	// different run.
-	for _, stranded := range held {
+	// Said whether or not anything was found. A role kept because an
+	// unavailable registration still names its group is indistinguishable,
+	// from the outside, from one this command missed. Only a stranded one is
+	// pointed at --apiservices: for the rest the likely cause is a server that
+	// is restarting, and removing its registration is the outage this half
+	// exists to avoid, one run later.
+	for _, unavailable := range held {
+		if unavailable.gone {
+			_, _ = fmt.Fprintf(errOut,
+				"%s is stranded: nothing claims it and Service %s does not exist. Its group counts as "+
+					"served while it exists; `prune --apiservices --delete` removes it, and then the roles "+
+					"for that group can be pruned.\n",
+				unavailable.name, unavailable.service)
+			continue
+		}
 		_, _ = fmt.Fprintf(errOut,
-			"%s is unavailable and nothing claims it, and its group counts as served while it exists: "+
-				"the server may be restarting, or the registration is stranded. `prune --apiservices` "+
-				"tells which, and removing it is what lets the roles for that group be pruned.\n",
-			stranded.name)
+			"%s is unavailable and nothing claims it, but %s. Its group counts as served while it "+
+				"exists, so its roles are kept, and nothing needs doing if the server is coming back.\n",
+			unavailable.name, unavailable.note)
 	}
 
 	if len(orphans) == 0 {
@@ -275,7 +298,7 @@ func bindingsTo(ctx context.Context, kube kubernetes.Interface, roles sets.Set[s
 }
 
 // orphanedRoles returns the generated roles whose group nothing serves any
-// more, and the stranded registrations whose groups are being kept on their
+// more, and the unavailable registrations whose groups are being kept on their
 // account, so that the command can say why a role it might have been expected
 // to find is not in the list.
 //
@@ -307,7 +330,7 @@ func orphanedRoles(
 	kube kubernetes.Interface,
 	dyn dynamic.Interface,
 ) ([]rbacv1.ClusterRole, []strandedAPIService, error) {
-	survey, err := surveyAPIServices(ctx, crisp, dyn)
+	survey, err := surveyAPIServices(ctx, crisp, kube, dyn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot tell which groups are served, so no role is orphaned: %w", err)
 	}
@@ -341,15 +364,16 @@ func orphanedRoles(
 		}
 	}
 
-	// Only the stranded registrations that are holding a role up are worth
-	// naming; one for a group nobody generated a role for keeps nothing
-	// from this half, and is --apiservices's alone.
+	// Only the unavailable registrations that are holding a role up are worth
+	// naming, stranded or not; one for a group nobody generated a role for
+	// keeps nothing from this half, and is --apiservices's alone.
 	var held []strandedAPIService
-	for _, stranded := range survey.stranded {
-		if group, _, _ := strings.Cut(stranded.groupVersion, "/"); granted.Has(group) {
-			held = append(held, stranded)
+	for _, unavailable := range slices.Concat(survey.stranded, survey.unavailable) {
+		if group, _, _ := strings.Cut(unavailable.groupVersion, "/"); granted.Has(group) {
+			held = append(held, unavailable)
 		}
 	}
+	sort.Slice(held, func(i, j int) bool { return held[i].name < held[j].name })
 
 	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Name < orphans[j].Name })
 	return orphans, held, nil

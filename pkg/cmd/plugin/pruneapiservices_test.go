@@ -3,15 +3,19 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
 	crispv1alpha1 "github.com/mrueg/kube-crisp/pkg/apis/crisp/v1alpha1"
@@ -27,7 +31,11 @@ func apiService(group, version string, managed bool, available *bool) *unstructu
 		"metadata": map[string]any{
 			"name": version + "." + group,
 		},
-		"spec": map[string]any{"group": group, "version": version},
+		"spec": map[string]any{
+			"group":   group,
+			"version": version,
+			"service": map[string]any{"namespace": "kube-crisp", "name": "kube-crisp-apiserver"},
+		},
 	}}
 	if managed {
 		object.SetLabels(map[string]string{managedByLabel: managedByKubeCris})
@@ -65,14 +73,22 @@ func fakeDynamic(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	)
 }
 
-// The case this exists for: a projection was deleted from --projection-dir
-// while the server was down, so nothing collected the registration and the
-// aggregation layer is still dialling it.
+// apiServerService is the Service the registrations above route to, for the
+// cases where the server behind them is installed and only stopped.
+func apiServerService() *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "kube-crisp", Name: "kube-crisp-apiserver"},
+	}
+}
+
+// The case this exists for: the server was uninstalled with a group still
+// served from --projection-dir, so nothing collected the registration and the
+// aggregation layer is still dialling a Service that is gone.
 func TestAStrandedRegistrationIsFound(t *testing.T) {
 	crisp := crispfake.NewSimpleClientset()
 	dyn := fakeDynamic(apiService("gone.example.com", "v1alpha1", true, boolPtr(false)))
 
-	survey, err := surveyAPIServices(context.Background(), crisp, dyn)
+	survey, err := surveyAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn)
 	if err != nil {
 		t.Fatalf("surveyAPIServices() returned error: %v", err)
 	}
@@ -81,6 +97,9 @@ func TestAStrandedRegistrationIsFound(t *testing.T) {
 	}
 	if survey.stranded[0].groupVersion != "gone.example.com/v1alpha1" {
 		t.Errorf("groupVersion = %q, want it read from the spec", survey.stranded[0].groupVersion)
+	}
+	if survey.stranded[0].service != "kube-crisp/kube-crisp-apiserver" {
+		t.Errorf("service = %q, want the missing Service named", survey.stranded[0].service)
 	}
 	// Stranded for this half, and still served for the other: the group is
 	// counted for as long as the registration exists, since from here an
@@ -91,6 +110,111 @@ func TestAStrandedRegistrationIsFound(t *testing.T) {
 	}
 }
 
+// The case that must not be found. A group served only from --projection-dir
+// has no projection to claim it, so while its server restarts, crashloops or
+// is upgraded its registration is unclaimed and unavailable — and removing it
+// then would let the plain run take its roles and every binding on them. The
+// Service it routes to still existing is what says the server is installed.
+func TestAnUnavailableRegistrationWhoseServiceExistsIsLeftAlone(t *testing.T) {
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset(apiServerService())
+	dyn := fakeDynamic(apiService("files.example.com", "v1alpha1", true, boolPtr(false)))
+
+	survey, err := surveyAPIServices(context.Background(), crisp, kube, dyn)
+	if err != nil {
+		t.Fatalf("surveyAPIServices() returned error: %v", err)
+	}
+	if len(survey.stranded) != 0 {
+		t.Fatalf("stranded = %+v, want none: the Service it routes to still exists", survey.stranded)
+	}
+	if len(survey.unavailable) != 1 || survey.unavailable[0].name != "v1alpha1.files.example.com" {
+		t.Fatalf("unavailable = %+v, want the registration kept aside", survey.unavailable)
+	}
+
+	var out, errOut bytes.Buffer
+	o := &pruneOptions{delete: true}
+	if err := o.pruneAPIServices(context.Background(), crisp, kube, dyn, &out, &errOut); err != nil {
+		t.Fatalf("pruneAPIServices() returned error: %v", err)
+	}
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() == "delete" {
+			t.Fatal("deleted the registration of a server that may only be restarting")
+		}
+	}
+	if !strings.Contains(errOut.String(), "v1alpha1.files.example.com") ||
+		!strings.Contains(errOut.String(), "still exists") ||
+		!strings.Contains(errOut.String(), "--include-unavailable") {
+		t.Errorf("stderr = %q, want the registration named, why it was kept, and how to take it", errOut.String())
+	}
+}
+
+// --include-unavailable is the way to remove a registration whose server was
+// stopped for good with its Service left in place.
+func TestIncludeUnavailableTakesThemToo(t *testing.T) {
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset(apiServerService())
+	dyn := fakeDynamic(
+		apiService("files.example.com", "v1alpha1", true, boolPtr(false)),
+		apiService("serving.example.com", "v1alpha1", true, boolPtr(true)),
+	)
+
+	var out, errOut bytes.Buffer
+	o := &pruneOptions{delete: true, includeUnavailable: true}
+	if err := o.pruneAPIServices(context.Background(), crisp, kube, dyn, &out, &errOut); err != nil {
+		t.Fatalf("pruneAPIServices() returned error: %v", err)
+	}
+	var deleted []string
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() == "delete" {
+			deleted = append(deleted, action.(k8stesting.DeleteAction).GetName())
+		}
+	}
+	if len(deleted) != 1 || deleted[0] != "v1alpha1.files.example.com" {
+		t.Fatalf("deleted %v, want only the unavailable registration", deleted)
+	}
+}
+
+// A Service that cannot be read says nothing about whether the server is gone,
+// and the caller commonly may not read Services in the server's namespace.
+// Treating that as gone would be guessing, with every binding on the group's
+// roles as the stake.
+func TestAServiceThatCannotBeReadIsNotEvidence(t *testing.T) {
+	crisp := crispfake.NewSimpleClientset()
+	kube := kubefake.NewSimpleClientset()
+	kube.PrependReactor("get", "services", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(corev1.Resource("services"), "kube-crisp-apiserver",
+			errors.New(`User "dev" cannot get resource "services"`))
+	})
+	dyn := fakeDynamic(apiService("files.example.com", "v1alpha1", true, boolPtr(false)))
+
+	survey, err := surveyAPIServices(context.Background(), crisp, kube, dyn)
+	if err != nil {
+		t.Fatalf("surveyAPIServices() returned error: %v", err)
+	}
+	if len(survey.stranded) != 0 || len(survey.unavailable) != 1 {
+		t.Fatalf("survey = %+v, want the registration kept aside rather than stranded", survey)
+	}
+	if !strings.Contains(survey.unavailable[0].note, "could not be read") {
+		t.Errorf("note = %q, want the unreadable Service named as the reason", survey.unavailable[0].note)
+	}
+}
+
+// A registration that routes to no Service leaves nothing to look for, so
+// nothing says its server is gone.
+func TestARegistrationWithNoServiceIsNotStranded(t *testing.T) {
+	object := apiService("local.example.com", "v1alpha1", true, boolPtr(false))
+	unstructured.RemoveNestedField(object.Object, "spec", "service")
+
+	survey, err := surveyAPIServices(context.Background(),
+		crispfake.NewSimpleClientset(), kubefake.NewSimpleClientset(), fakeDynamic(object))
+	if err != nil {
+		t.Fatalf("surveyAPIServices() returned error: %v", err)
+	}
+	if len(survey.stranded) != 0 || len(survey.unavailable) != 1 {
+		t.Fatalf("survey = %+v, want the registration kept aside rather than stranded", survey)
+	}
+}
+
 // A registration a projection still claims is in use, whatever the aggregation
 // layer currently says about it — a database outage makes a live projection
 // unavailable and is not a reason to unregister it.
@@ -98,7 +222,7 @@ func TestARegistrationAProjectionClaimsIsNeverACandidate(t *testing.T) {
 	crisp := crispfake.NewSimpleClientset(projectionFor("bins", "live.example.com", "v1alpha1"))
 	dyn := fakeDynamic(apiService("live.example.com", "v1alpha1", true, boolPtr(false)))
 
-	survey, err := surveyAPIServices(context.Background(), crisp, dyn)
+	survey, err := surveyAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn)
 	if err != nil {
 		t.Fatalf("surveyAPIServices() returned error: %v", err)
 	}
@@ -117,7 +241,7 @@ func TestAnAvailableRegistrationIsLeftAloneAndSaidSo(t *testing.T) {
 	crisp := crispfake.NewSimpleClientset()
 	dyn := fakeDynamic(apiService("files.example.com", "v1alpha1", true, boolPtr(true)))
 
-	survey, err := surveyAPIServices(context.Background(), crisp, dyn)
+	survey, err := surveyAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn)
 	if err != nil {
 		t.Fatalf("surveyAPIServices() returned error: %v", err)
 	}
@@ -132,7 +256,7 @@ func TestAnAvailableRegistrationIsLeftAloneAndSaidSo(t *testing.T) {
 	// indistinguishable from one the command failed to notice.
 	var out, errOut bytes.Buffer
 	o := &pruneOptions{}
-	if err := o.pruneAPIServices(context.Background(), crisp, dyn, &out, &errOut); err != nil {
+	if err := o.pruneAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn, &out, &errOut); err != nil {
 		t.Fatalf("pruneAPIServices() returned error: %v", err)
 	}
 	if !strings.Contains(errOut.String(), "--projection-dir") {
@@ -146,7 +270,7 @@ func TestAnUnjudgedRegistrationIsLeftAlone(t *testing.T) {
 	crisp := crispfake.NewSimpleClientset()
 	dyn := fakeDynamic(apiService("new.example.com", "v1alpha1", true, nil))
 
-	survey, err := surveyAPIServices(context.Background(), crisp, dyn)
+	survey, err := surveyAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn)
 	if err != nil {
 		t.Fatalf("surveyAPIServices() returned error: %v", err)
 	}
@@ -165,7 +289,7 @@ func TestAnUnlabelledRegistrationIsNeverConsidered(t *testing.T) {
 	crisp := crispfake.NewSimpleClientset()
 	dyn := fakeDynamic(apiService("someone.example.com", "v1", false, boolPtr(false)))
 
-	survey, err := surveyAPIServices(context.Background(), crisp, dyn)
+	survey, err := surveyAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn)
 	if err != nil {
 		t.Fatalf("surveyAPIServices() returned error: %v", err)
 	}
@@ -182,7 +306,7 @@ func TestPrintingRemovesNothing(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	o := &pruneOptions{}
-	if err := o.pruneAPIServices(context.Background(), crisp, dyn, &out, &errOut); err != nil {
+	if err := o.pruneAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn, &out, &errOut); err != nil {
 		t.Fatalf("pruneAPIServices() returned error: %v", err)
 	}
 
@@ -210,7 +334,7 @@ func TestDeleteRemovesOnlyTheStrandedOnes(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	o := &pruneOptions{delete: true}
-	if err := o.pruneAPIServices(context.Background(), crisp, dyn, &out, &errOut); err != nil {
+	if err := o.pruneAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn, &out, &errOut); err != nil {
 		t.Fatalf("pruneAPIServices() returned error: %v", err)
 	}
 
@@ -241,7 +365,7 @@ func TestADisappearingRegistrationIsNotAFailure(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	o := &pruneOptions{delete: true}
-	if err := o.pruneAPIServices(context.Background(), crisp, dyn, &out, &errOut); err != nil {
+	if err := o.pruneAPIServices(context.Background(), crisp, kubefake.NewSimpleClientset(), dyn, &out, &errOut); err != nil {
 		t.Fatalf("pruneAPIServices() returned error: %v", err)
 	}
 }
@@ -257,7 +381,7 @@ func TestARegistrationWithNoGroupInItsSpecIsIgnored(t *testing.T) {
 	}}
 	object.SetLabels(map[string]string{managedByLabel: managedByKubeCris})
 
-	survey, err := surveyAPIServices(context.Background(), crispfake.NewSimpleClientset(), fakeDynamic(object))
+	survey, err := surveyAPIServices(context.Background(), crispfake.NewSimpleClientset(), kubefake.NewSimpleClientset(), fakeDynamic(object))
 	if err != nil {
 		t.Fatalf("surveyAPIServices() returned error: %v", err)
 	}
@@ -270,7 +394,7 @@ func TestNothingStrandedSaysSo(t *testing.T) {
 	var out, errOut bytes.Buffer
 	o := &pruneOptions{}
 	err := o.pruneAPIServices(context.Background(),
-		crispfake.NewSimpleClientset(), fakeDynamic(), &out, &errOut)
+		crispfake.NewSimpleClientset(), kubefake.NewSimpleClientset(), fakeDynamic(), &out, &errOut)
 	if err != nil {
 		t.Fatalf("pruneAPIServices() returned error: %v", err)
 	}

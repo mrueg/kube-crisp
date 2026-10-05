@@ -1333,9 +1333,13 @@ controllers only manage APIServices carrying the `kube-aggregator.kubernetes.io/
 so a projection that claims `cert-manager.io/v1` before cert-manager is installed keeps it, and
 nothing hands it back when the real operator arrives.
 
-A group outside the permitted set fails that projection's registration and says so in its `Ready`
-and `Registered` conditions. Other projections are unaffected, the same way any other single
-registration failure is.
+A projection in a group outside the permitted set is not served at all: it is not compiled, the
+server does not answer for it, and it reports `Ready` false with reason `GroupNotAllowed`, naming
+the group and the permitted suffixes. Unlike a projection that fails to compile, it does not go on
+serving what it compiled to before, since serving the group is what is not allowed. An `APIService`
+kube-crisp wrote for that group — one a projection took before the suffixes were set — is deleted
+on the next sync, which is what hands the group back. Other projections are unaffected. The bound
+applies whether or not `--manage-apiservices` is on.
 
 ### Two projections claiming one resource
 

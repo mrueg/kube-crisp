@@ -487,7 +487,9 @@ answering — requests work, and the spec answering them is not the spec you
 applied. `Ready` false with reason `NameReservedByFile` means a projection loaded
 from `--projection-dir` has the object's name: the file is serving, the object is
 not, and it will be once the file is removed. The name is the operator's,
-whichever of the two came first.
+whichever of the two came first. `Ready` false with reason `GroupNotAllowed` means
+the projection's group is outside `--projection-group-suffixes`; it is not served,
+and any registration kube-crisp wrote for the group is withdrawn.
 
 `Registered` is about the aggregation layer rather than about this server.
 Compiling a projection and installing its handlers is only half of serving it:
@@ -705,7 +707,8 @@ shows its query breakdown in the log without a collector deployed at all.
 ## Events
 
 A projection records an Event when its state changes: `Serving`, `CompilationFailed`,
-`ServingPreviousConfiguration`, `NameReservedByFile`, `NotRouted`, `GroupAlreadyServed`.
+`ServingPreviousConfiguration`, `NameReservedByFile`, `GroupNotAllowed`, `NotRouted`,
+`GroupAlreadyServed`.
 Conditions say what the state
 is now, which is what a controller reconciling against it needs; an Event says that it changed and
 when, which is what `kubectl describe` shows and what anything watching for failures reacts to.

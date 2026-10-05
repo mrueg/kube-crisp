@@ -1519,6 +1519,11 @@ by default), so a client that reconnects is handed what it missed rather than be
 over. An unset or `"0"` version replays the current contents first, as it does for any other
 resource.
 
+A client can be cut off between any two events of one poll, so the version of the last event it
+received has to say how far in it got. Events of a full poll are delivered in the order of their
+mapped `resourceVersion`, with deletions last; a projection that maps none gives each event its own
+counter value rather than one for the whole poll.
+
 Beyond that window there is nothing to replay, and the answer is `410 Gone` so the client relists —
 which is also what happens for a version the cache has never reached. `resourceVersionMatch=NotOlderThan`
 is always satisfiable because every read goes to the database; `Exact` is refused, since a table's

@@ -101,11 +101,14 @@ What kube-crisp does not do, or does with a condition attached, and why.
   were served whatever the object pointed at.
 - **A watched projection holds its whole collection in memory** and needs `maxRows` set above the
   row count, since the periodic full resync reads all of it. A projection that maps a
-  `resourceVersion` and has a `deletedQuery` keeps only keys and versions instead — the diff needs
-  the version, and the tombstone describes what was deleted — and reads a new watcher's initial
-  state rather than remembering it. Measured at 1.83x less held per row — the identity, the
-  version, the kind and the labels are kept, because a watch event has to carry a kind and a label
-  selector filters deletions on labels.
+  `resourceVersion` and has a `deletedQuery` whose tombstones carry every mapped column keeps only
+  keys and versions instead — the diff needs the version, and the tombstone describes what was
+  deleted — and reads a new watcher's initial state rather than remembering it. Measured at 1.83x
+  less held per row — the identity, the version, the kind and the labels are kept, because a watch
+  event has to carry a kind and a label selector filters deletions on labels. That saves memory
+  only: the first poll and a watcher asking for the collection still read the whole table, so
+  `maxRows` has to exceed the row count all the same. The cache switches once it has seen a
+  tombstone map in full; with identity-only tombstones it keeps whole objects.
 - **Rows that cannot be mapped are skipped** by default, with a warning on the response and a count
   in `kube_crisp_query_rows_unmappable_total`, rather than failing the whole collection. Set
   `mapping.onUnmappableRow: Fail` where a partial answer is worse than none — a collection that

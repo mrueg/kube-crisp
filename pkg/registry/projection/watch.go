@@ -135,9 +135,15 @@ type watchCache struct {
 	// carrying the mapped columns removes the second reason, and then the
 	// collection does not have to be held in memory at all.
 	//
-	// Set by the caller only when both hold, because getting it wrong means
-	// deletions that name a row and describe nothing.
+	// Set only when both hold, because getting it wrong means deletions that
+	// name a row and describe nothing. Guarded by mu, except that a poll may
+	// read it under pollMu: it is only ever set by a poll, holding both.
 	lightweight bool
+
+	// mayLighten says the projection could run lightweight — it maps a
+	// resourceVersion and has a deletedQuery — and lightweight is then turned
+	// on by the first poll that sees a tombstone map in full. See lighten.
+	mayLighten bool
 
 	// history is a ring of recent changes, oldest first, so a client that
 	// reconnects can be handed what it missed rather than being told to start
@@ -762,6 +768,7 @@ func (c *watchCache) poll(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
+	c.lightenLocked(removed)
 	events, targets := c.applyLocked(items, full, watermark, removed)
 	c.polled = true
 	reads := c.reads
@@ -815,6 +822,47 @@ func (c *watchCache) poll(ctx context.Context) error {
 	c.emitBookmarksLocked()
 	c.mu.Unlock()
 	return nil
+}
+
+// lightenLocked turns a cache that may run lightweight into one that does, once
+// a tombstone has shown it carries every mapped column.
+//
+// A deletedQuery alone was taken as the promise that tombstones describe the
+// rows they remove, and it is not one: the documented minimum returns the
+// identity columns and nothing else, and a query that leaves out a single
+// mapped column — the resourceVersion one is the easy one to forget — maps no
+// row at all. Either way every deletion was answered from a trimmed entry, with
+// no spec, no status and nothing for a field selector to match, while the
+// reference promised that such a projection keeps its objects.
+//
+// Whether the columns are there is a property of the statement, and nothing
+// short of running it says what it returns. So the first tombstone that maps
+// is the answer: the same statement maps the next one the same way. Until one
+// is seen the cache keeps whole objects, which is exactly the behaviour of a
+// projection with an identity-only tombstone and costs nothing but memory. On
+// the switch the entries already held are trimmed as well, so every entry means
+// the same thing to trimmed and to the diff.
+func (c *watchCache) lightenLocked(removed []cacheIdentity) {
+	if !c.mayLighten || c.lightweight {
+		return
+	}
+	described := false
+	for _, identity := range removed {
+		if identity.object != nil {
+			described = true
+			break
+		}
+	}
+	if !described {
+		return
+	}
+
+	c.lightweight = true
+	for key, item := range c.items {
+		c.items[key] = c.retain(item)
+	}
+	klog.V(2).InfoS("tombstones describe the rows they remove; the watch cache now keeps only keys and versions",
+		"resource", c.resource)
 }
 
 // resyncFailed records that a periodic full resync did not complete, and
@@ -2033,8 +2081,12 @@ func (c *watchCache) tombstone(
 	gvk schema.GroupVersionKind,
 ) *unstructured.Unstructured {
 	// The tombstone's own row first when the cache keeps only keys and
-	// versions, since what it holds cannot describe anything.
-	if c.lightweight && identity.object != nil {
+	// versions, since what it holds cannot describe anything. Read under the
+	// lock, since a poll can turn lightweight on while a replay is built.
+	c.mu.Lock()
+	lightweight := c.lightweight
+	c.mu.Unlock()
+	if lightweight && identity.object != nil {
 		return identity.object
 	}
 
@@ -2076,8 +2128,10 @@ func (c *watchCache) tombstone(
 // a tombstone that carries the mapped columns.
 //
 // The saving is the point. A watched projection otherwise holds its whole
-// collection in memory and needs maxRows above the row count, which is the
-// ceiling on how large a table can be watched at all.
+// collection in memory. It is memory only: the first poll still reads the
+// whole table under watch.query's maxRows, and a watcher asking for the
+// collection reads it under queries.list's, so both still have to exceed the
+// row count.
 func (c *watchCache) retain(item *unstructured.Unstructured) *unstructured.Unstructured {
 	if !c.lightweight {
 		return item

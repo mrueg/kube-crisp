@@ -1412,6 +1412,12 @@ single column to page on, so it has to be named.
 Define `queries.count` and a paged list also reports `remainingItemCount`; the count only runs when
 a client actually pages.
 
+A page never asks for more rows than the list query's `maxRows` allows. Reading a page takes one row
+past it, to tell whether another page follows, so a limit at or above `maxRows` is served as a page
+of `maxRows - 1` with a continue token — `kubectl --chunk-size=5000` against the default `maxRows`
+gets pages of 4,999 rather than an error. The API allows a shorter page than the limit, and clients
+page on the token rather than on the count.
+
 A continue token sent without a limit is a request in its own right, as it is against etcd: the read
 resumes where the token points and returns everything left, in one answer and with no further token.
 

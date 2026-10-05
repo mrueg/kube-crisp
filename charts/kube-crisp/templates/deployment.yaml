@@ -1,3 +1,6 @@
+{{- if and .Values.crisp.caBundle (not .Values.crisp.servingCertSecret) }}
+{{- fail "crisp.caBundle needs crisp.servingCertSecret: without a serving certificate the bundle signs, the server presents a self-signed one, and every APIService trusting the bundle reports Available=False" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,10 +47,17 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --secure-port=6443
+            {{- if .Values.crisp.servingCertSecret }}
+            # Read from the mounted Secret and reloaded when it changes, so a
+            # renewed certificate takes effect without a restart.
+            - --tls-cert-file=/etc/kube-crisp/serving/tls.crt
+            - --tls-private-key-file=/etc/kube-crisp/serving/tls.key
+            {{- else }}
             # Self-signed serving certificates are written here at startup, so
             # the directory has to be writable even though the root filesystem
-            # is not. Supply --tls-cert-file instead for real certificates.
+            # is not. Set crisp.servingCertSecret for a real certificate.
             - --cert-dir=/var/run/kube-crisp/certificates
+            {{- end }}
             - --watch-projections={{ .Values.crisp.watchProjections }}
             - --manage-apiservices={{ .Values.crisp.manageAPIServices }}
             - --apiservice-service-name={{ include "kube-crisp.fullname" . }}
@@ -100,8 +110,14 @@ spec:
               containerPort: 6443
               protocol: TCP
           volumeMounts:
+            {{- if .Values.crisp.servingCertSecret }}
+            - name: serving-certificate
+              mountPath: /etc/kube-crisp/serving
+              readOnly: true
+            {{- else }}
             - name: certificates
               mountPath: /var/run/kube-crisp/certificates
+            {{- end }}
             {{- if .Values.crisp.caBundle }}
             - name: ca-bundle
               mountPath: /etc/kube-crisp/ca
@@ -138,8 +154,14 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
+        {{- if .Values.crisp.servingCertSecret }}
+        - name: serving-certificate
+          secret:
+            secretName: {{ .Values.crisp.servingCertSecret }}
+        {{- else }}
         - name: certificates
           emptyDir: {}
+        {{- end }}
         {{- if .Values.crisp.caBundle }}
         - name: ca-bundle
           configMap:

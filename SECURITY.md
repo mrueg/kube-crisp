@@ -84,7 +84,10 @@ The shipped manifests favour a working first deployment. Before production:
 
 - Replace `insecureSkipTLSVerify` on the `APIService` with a real `caBundle`,
   and give the server a serving certificate rather than the self-signed one it
-  generates (`--tls-cert-file`, `--tls-private-key-file`).
+  generates (`--tls-cert-file`, `--tls-private-key-file`). With the Helm chart
+  that is `crisp.servingCertSecret` and `crisp.caBundle`, set together: the
+  chart refuses the bundle alone, since it would be trusting a certificate the
+  server never presents.
 - Keep data source Secrets in a namespace of their own. The `secrets` rule in
   `manifests/20-rbac.yaml` is a `Role` bound only in the namespaces named by
   `--datasource-namespaces`, and that set of namespaces is what narrows it: the

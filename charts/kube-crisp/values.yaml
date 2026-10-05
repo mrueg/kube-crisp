@@ -133,10 +133,22 @@ crisp:
   # every projected group.
   shutdownDelayDuration: 15s
 
-  # PEM CA bundle verifying this server's serving certificate, used in the
-  # APIServices it creates. Empty means the created APIServices set
-  # insecureSkipTLSVerify, matching the self-signed certificate generated at
-  # startup. Supply a real certificate and this bundle in production.
+  # Name of an existing kubernetes.io/tls Secret in the release namespace whose
+  # tls.crt and tls.key the server presents instead of the self-signed
+  # certificate it otherwise generates at startup. The certificate must be valid
+  # for <fullname>.<namespace>.svc, the name the aggregation layer and the
+  # ServiceMonitor verify. A cert-manager Certificate is the usual source; the
+  # server reloads it when the Secret is renewed.
+  servingCertSecret: ""
+
+  # PEM CA bundle verifying the certificate in servingCertSecret, used in the
+  # APIServices the server creates and by the ServiceMonitor. Requires
+  # servingCertSecret: a bundle trusting a certificate the server does not
+  # present would leave every APIService unavailable, so the chart refuses to
+  # render that. Empty means the created APIServices set insecureSkipTLSVerify,
+  # matching the self-signed certificate. Supply both in production. The bundle
+  # is mounted at /etc/kube-crisp/ca/ca.crt, so a projection webhook enabled
+  # through extraArgs can use it with --projection-webhook-ca-bundle-file.
   caBundle: ""
 
   # Extra flags, for anything this chart does not model.

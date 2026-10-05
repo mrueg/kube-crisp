@@ -152,6 +152,10 @@ type watchCache struct {
 	history     []recordedEvent
 	historySize int
 
+	// forgotStalled is the newest version at which the ring has dropped a
+	// deletion that did not move the version. See record.
+	forgotStalled string
+
 	// resource labels this cache's metrics.
 	resource string
 
@@ -1007,6 +1011,18 @@ func (c *watchCache) applyLocked(
 				events = append(events, deleted(item))
 			}
 		}
+
+		// The diff above walks maps, so its events came out in no order at all.
+		// A client resumes from the version of the last event it was handed,
+		// and one cut off after b@9 but before a@8 resumed from 9 and never
+		// heard about a. In version order it cannot hold a version without
+		// everything below it. Deletions go last: each carries the version
+		// its row last had, which says nothing about where in the poll it
+		// belongs, and a row that is still there must not be held back
+		// behind one that is not.
+		if c.highestVersion != "" {
+			sortByVersion(events)
+		}
 	} else {
 		// Only the rows that moved came back, so the rest of the cache stands.
 		for i := range items {
@@ -1074,9 +1090,26 @@ func (c *watchCache) applyLocked(
 		return nil, nil
 	}
 
+	// On the counter, every event takes a value of its own rather than the poll
+	// sharing one.
+	//
+	// A client resumes from the version of the last event it was handed, and a
+	// poll's events are delivered one at a time — a slow consumer can be cut off
+	// by the broadcast between any two of them. With one value for the whole
+	// poll, a client that took the first event and lost the rest resumed from
+	// the version the poll ended at, was told it was current, and never heard
+	// about the others. With a value each, the version it holds says exactly
+	// how far into the poll it got, and the ring records each event as its own
+	// step, so a trim that falls inside a poll leaves an oldest entry that
+	// claims only what it covers.
+	//
+	// A projection with mapped versions has nothing to count: its events carry
+	// the rows' own versions, and the poll is recorded at the mark it reached.
+	counted := c.highestVersion == ""
 	previous := c.currentVersionLocked()
 	c.version++
 	version := c.currentVersionLocked()
+	steps := make([]recordedEvent, 0, len(events))
 
 	// Stamping every object with the snapshot version lets a client resume from
 	// the version its last event carried. Done before the events are recorded
@@ -1096,16 +1129,20 @@ func (c *watchCache) applyLocked(
 	// when it was the event, and from here it is only ever matched against a
 	// selector, never sent.
 	for i, event := range events {
-		obj, ok := event.Object.(*unstructured.Unstructured)
-		if !ok || obj.GetResourceVersion() != "" {
-			continue
+		if counted && i > 0 {
+			previous = version
+			c.version++
+			version = c.currentVersionLocked()
 		}
-		stamped := obj.DeepCopy()
-		stamped.SetResourceVersion(version)
-		events[i].Object = stamped
+		if obj, ok := event.Object.(*unstructured.Unstructured); ok && obj.GetResourceVersion() == "" {
+			stamped := obj.DeepCopy()
+			stamped.SetResourceVersion(version)
+			events[i].Object = stamped
+		}
+		steps = append(steps, recordedEvent{from: previous, version: version, event: events[i]})
 	}
 
-	c.record(previous, version, events)
+	c.record(steps)
 
 	for _, event := range events {
 		crispmetrics.WatchEvents.WithLabelValues(c.resource, string(event.Type)).Inc()
@@ -1120,6 +1157,38 @@ func (c *watchCache) applyLocked(
 		targets = append(targets, w)
 	}
 	return events, targets
+}
+
+// sortByVersion orders a full poll's events by the version each one carries,
+// with every deletion after every other event.
+//
+// Two versions that cannot be compared keep the order they were in, which is
+// the best a sort can do with them and no worse than not sorting.
+func sortByVersion(events []cacheEvent) {
+	slices.SortStableFunc(events, func(a, b cacheEvent) int {
+		aGone, bGone := a.Type == watch.Deleted, b.Type == watch.Deleted
+		switch {
+		case aGone && bGone:
+			return 0
+		case aGone:
+			return 1
+		case bGone:
+			return -1
+		}
+		order, ok := compareVersions(eventVersion(a), eventVersion(b))
+		if !ok {
+			return 0
+		}
+		return order
+	})
+}
+
+// eventVersion is the resourceVersion an event's object carries.
+func eventVersion(event cacheEvent) string {
+	if obj, ok := event.Object.(*unstructured.Unstructured); ok {
+		return obj.GetResourceVersion()
+	}
+	return ""
 }
 
 // changedNamespaces is the set of namespaces one poll's events touched, which
@@ -1388,15 +1457,29 @@ type recordedEvent struct {
 }
 
 // record appends to the history ring, dropping the oldest when it is full.
-func (c *watchCache) record(from, version string, events []cacheEvent) {
+//
+// Trimming by count is exact for every entry but one kind. An entry claims the
+// span from its from to its version, and the next entry starts where it ended,
+// so the oldest one kept says precisely where the ring's knowledge begins —
+// except for a deletion that did not move the version, whose span is empty.
+// Those are replayed to every client sitting at that version, since it may or
+// may not have seen them (see replayable), and dropping one leaves a client
+// there to be handed the ones that remain and admitted as caught up. So the
+// newest such version dropped is remembered, and replayable refuses a resume
+// at or below it.
+func (c *watchCache) record(steps []recordedEvent) {
 	if c.historySize <= 0 {
 		return
 	}
 
-	for _, event := range events {
-		c.history = append(c.history, recordedEvent{from: from, version: version, event: event})
-	}
+	c.history = append(c.history, steps...)
 	if overflow := len(c.history) - c.historySize; overflow > 0 {
+		for _, dropped := range c.history[:overflow] {
+			if dropped.event.Type == watch.Deleted && dropped.from == dropped.version &&
+				movesForward(c.forgotStalled, dropped.version) {
+				c.forgotStalled = dropped.version
+			}
+		}
 		c.history = append(c.history[:0], c.history[overflow:]...)
 	}
 }
@@ -1460,6 +1543,16 @@ func (c *watchCache) replayable(version string) ([]recordedEvent, bool) {
 		// Older than the ring's earliest starting point: something happened
 		// that is no longer remembered.
 		if order, ok := compareVersions(c.history[0].from, version); !ok || order > 0 {
+			return nil, false
+		}
+	}
+
+	// A client at a version whose stalled deletions the ring has started
+	// forgetting cannot be handed all of them any more, and part of them is a
+	// row it keeps with nothing to say so. Asked even at the current version,
+	// which skips the checks above: a stalled deletion sits exactly there.
+	if c.forgotStalled != "" {
+		if order, ok := compareVersions(version, c.forgotStalled); !ok || order <= 0 {
 			return nil, false
 		}
 	}

@@ -1208,6 +1208,30 @@ func pageSize(limit int64) int64 {
 	return limit + 1
 }
 
+// pageLimit is the page a client asking for limit rows is actually served,
+// which is limit unless the statement could not return it.
+//
+// A page reads one row more than it serves, and the statement refuses any
+// result set larger than its maxRows rather than truncating it. A limit at or
+// above maxRows therefore asked for a read the statement was always going to
+// refuse once the table held that many rows, and the list answered 500 —
+// kubectl --chunk-size=5000 against the default maxRows of 5000 did exactly
+// that. The API allows a server to return fewer items than the limit as long
+// as it hands back a continue token, and a client pages on the token rather
+// than on the count, so the page is shortened to the largest one whose
+// look-ahead row still fits. The token and the offset are built from this
+// value, not from the client's, so the next page starts where this one ended.
+//
+// A statement allowed a single row has no room for the look-ahead at all;
+// that page stays at one row and is refused as before once a second exists,
+// which is what an unpaged list of that table does too.
+func pageLimit(limit int64, maxRows int) int64 {
+	if ceiling := int64(maxRows) - 1; ceiling >= 1 && limit > ceiling {
+		return ceiling
+	}
+	return limit
+}
+
 func (r *REST) listObjects(ctx context.Context, namespace string, options *metainternalversion.ListOptions, mode readMode) (*unstructured.UnstructuredList, error) {
 	return r.listWith(ctx, namespace, options, mode, r.session(ctx, namespace, ""))
 }
@@ -1254,7 +1278,7 @@ func (r *REST) listWith(
 		consumed = token.Consumed
 
 		if paging {
-			limit = options.Limit
+			limit = pageLimit(options.Limit, r.list.statement.MaxRows)
 			args["limit"] = pageSize(limit)
 		} else {
 			// Resuming without a limit asks for the whole remainder in one

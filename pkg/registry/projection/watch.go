@@ -1009,9 +1009,14 @@ func (c *watchCache) applyLocked(
 		}
 	} else {
 		// Only the rows that moved came back, so the rest of the cache stands.
+		//
+		// Every key the read returned is a row that exists, which is what an
+		// identity-only tombstone below is checked against.
+		returned := make(map[string]struct{}, len(items))
 		for i := range items {
 			item := items[i]
 			key := cacheKey(&item)
+			returned[key] = struct{}{}
 			previous, existed := next[key]
 			switch {
 			case !existed:
@@ -1044,6 +1049,28 @@ func (c *watchCache) applyLocked(
 			if existed && identity.object != nil &&
 				movesForward(identity.object.GetResourceVersion(), previous.GetResourceVersion()) {
 				continue
+			}
+
+			// A tombstone with no version cannot be placed against the row at
+			// all, so the read it arrived with has to decide. A name deleted
+			// and created again inside one poll interval comes back from the
+			// forward read at its new version and from the deletion query as a
+			// bare identity, in the same pass — and applied after the row, the
+			// tombstone emitted MODIFIED and then DELETED for a row that is in
+			// the table, and dropped it from the cache. The next poll reads
+			// forward from the version that row just set, so it was never
+			// returned again.
+			//
+			// The forward read only returns rows that exist, so a key it
+			// returned is alive and the tombstone belongs to an incarnation
+			// before it. If the row was instead deleted after the read and
+			// before the deletion query ran, its tombstone is past the mark
+			// and the next poll returns it again, this time with no row
+			// beside it — one interval late rather than lost.
+			if identity.object == nil {
+				if _, alive := returned[key]; alive {
+					continue
+				}
 			}
 
 			// The tombstone's own row when the cache is holding a trimmed
@@ -2043,8 +2070,10 @@ func (c *watchCache) replayFromDatabase(
 	// deletion for a changed row in its namespace that no longer matches — see
 	// matchedBefore for why that is the direction to be wrong in — and nothing
 	// at all for a row in another namespace, which it could never have held.
+	alive := make(map[string]struct{}, len(changed))
 	for i := range changed {
 		item := changed[i]
+		alive[cacheKey(&item)] = struct{}{}
 		events = append(events, recordedEvent{
 			from:    since,
 			version: item.GetResourceVersion(),
@@ -2056,6 +2085,20 @@ func (c *watchCache) replayFromDatabase(
 	// only the identity — so the event carries the identity. That is what a
 	// client needs to drop it, and it is all that exists.
 	for _, identity := range removed {
+		// Not for a name the changed rows above still carry. Those are read
+		// from the table as it is now, so the row exists and the tombstone
+		// belongs to an incarnation before it: deleted and created again while
+		// the client was away. Every deletion is appended after every change,
+		// so a client was handed the new row and then told it was gone, and its
+		// informer dropped a row sitting in the table — with nothing after it
+		// to bring the row back until it next changed. Skipping the tombstone
+		// is what applyLocked does with a stale one, and the Modified above
+		// already carries everything the client needs: client-go turns it into
+		// an update of the old incarnation or an add, either of which leaves
+		// the store holding the row that exists.
+		if _, ok := alive[identity.key()]; ok {
+			continue
+		}
 		events = append(events, recordedEvent{
 			from:    since,
 			version: since,

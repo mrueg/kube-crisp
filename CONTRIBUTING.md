@@ -6,7 +6,7 @@ Report an incident to the maintainer at <manuel@rueg.eu>.
 Thanks for looking. This is a young project and interfaces still move, so the
 most useful contributions are the ones that tell us something we did not know:
 a projection shape that does not work, a database that behaves differently from
-the three that are tested, a number that disagrees with the ones in the README.
+the three that are tested, a number that disagrees with the ones in the docs.
 
 ## Before a pull request
 
@@ -101,7 +101,7 @@ them. `make e2e-bench-check` fails if one is orphaned.
 decision usually is not. A comment explaining why a lock is *not* held across a
 database round trip is worth more than one restating the line below it.
 
-**Measurements over assertions.** The README's performance numbers come from
+**Measurements over assertions.** The performance numbers in [docs/performance.md](docs/performance.md) come from
 `make bench`, and the claims in it are ones the suite checks. If you improve
 something, a before-and-after benchmark is the argument; if you cannot measure
 it, say so.

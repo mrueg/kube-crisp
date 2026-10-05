@@ -1064,7 +1064,7 @@ cloud's SDK linked into the binary, and kube-crisp links no dependency a given b
 the same reason a driver is a registration rather than a switch. Naming one this build does not have
 is refused when the projection is compiled, by name, with the providers it does have — the same
 place, and the same `Ready` condition, as a projection naming an unknown driver. Adding another is
-[Adding a credential provider](../README.md#adding-a-credential-provider).
+[Adding a credential provider](extending.md#adding-a-credential-provider).
 
 The image published from this repository registers two: `aws-rds-iam`, below, and `token-file`,
 which needs no SDK because it does not mint anything — the token comes from whatever already

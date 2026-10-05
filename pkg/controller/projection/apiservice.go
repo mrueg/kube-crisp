@@ -27,8 +27,9 @@ var APIServiceGVR = schema.GroupVersionResource{
 	Resource: "apiservices",
 }
 
-// managedByLabel marks the APIServices this controller owns. Anything without
-// it was created by someone else and is left alone.
+// managedByLabel marks the APIServices a kube-crisp server writes. Anything
+// without it was created by someone else and is left alone. Having it is not
+// enough to be this server's, though; see owns.
 const (
 	managedByLabel = "app.kubernetes.io/managed-by"
 	managedByValue = "kube-crisp"
@@ -166,7 +167,9 @@ func (m *apiServiceManager) managed(ctx context.Context) ([]*unstructured.Unstru
 		}
 		out := make([]*unstructured.Unstructured, 0, len(list.Items))
 		for i := range list.Items {
-			out = append(out, &list.Items[i])
+			if m.owns(&list.Items[i]) {
+				out = append(out, &list.Items[i])
+			}
 		}
 		return out, nil
 	}
@@ -176,12 +179,33 @@ func (m *apiServiceManager) managed(ctx context.Context) ([]*unstructured.Unstru
 	var out []*unstructured.Unstructured
 	for _, item := range m.indexer.List() {
 		existing, ok := item.(*unstructured.Unstructured)
-		if !ok || existing.GetLabels()[managedByLabel] != managedByValue {
+		if !ok || !m.owns(existing) {
 			continue
 		}
 		out = append(out, existing)
 	}
 	return out, nil
+}
+
+// owns reports whether an APIService is this server's to correct and to prune:
+// it carries the kube-crisp label and routes to this server's Service.
+//
+// The label alone said which program wrote it, not which installation. Two
+// kube-crisp installations in one cluster -- which the webhook and the lease
+// names are there to allow -- each read the other's registrations as their
+// own: each pruned every group the other served, and for a group version both
+// wanted, each pointed it back at itself on every sync. The Service is what
+// tells installations apart, and every registration an installation has
+// written names its own, so nothing it wrote before stops being its own.
+//
+// What does is a registration whose Service has changed under it: one an
+// installation wrote before its --apiservice-service-name or namespace changed,
+// or one somebody edited to point elsewhere. That is reported as the group
+// being served elsewhere, as any other server's registration is, rather than
+// taken back -- telling it apart from another installation's is exactly what
+// the label could not do.
+func (m *apiServiceManager) owns(existing *unstructured.Unstructured) bool {
+	return existing.GetLabels()[managedByLabel] == managedByValue && m.routesHere(existing)
 }
 
 // reconcile makes the set of managed APIServices match the group versions this
@@ -276,11 +300,9 @@ var errGroupNotAllowed = errors.New("the API group is not one this server may re
 // against the same Service does too: that is what examples/apiservice.yaml
 // produces, and a registration made by hand before management was turned on
 // is still a registration. Anything else routes the group version away from
-// here, whatever its Available condition says.
+// here, whatever its Available condition says -- including one carrying the
+// kube-crisp label, which another installation's registrations carry as well.
 func (m *apiServiceManager) routesHere(existing *unstructured.Unstructured) bool {
-	if existing.GetLabels()[managedByLabel] == managedByValue {
-		return true
-	}
 	name, _, _ := unstructured.NestedString(existing.Object, "spec", "service", "name")
 	namespace, _, _ := unstructured.NestedString(existing.Object, "spec", "service", "namespace")
 	return name != "" && name == m.options.ServiceName && namespace == m.options.ServiceNamespace
@@ -295,7 +317,11 @@ func servedElsewhere(name string, existing *unstructured.Unstructured) error {
 		target = fmt.Sprintf("Service %s/%s", namespace, service)
 	}
 	owner := "is not managed by kube-crisp"
-	if by := existing.GetLabels()[managedByLabel]; by != "" {
+	switch by := existing.GetLabels()[managedByLabel]; by {
+	case "":
+	case managedByValue:
+		owner = "belongs to another kube-crisp installation"
+	default:
 		owner = fmt.Sprintf("is managed by %q rather than by kube-crisp", by)
 	}
 	return fmt.Errorf(
@@ -392,7 +418,11 @@ func (m *apiServiceManager) ensure(ctx context.Context, name string, gv schema.G
 	// registered, though. Unless it happens to route here anyway, the group
 	// version belongs to whatever it does route to, and the projection has to
 	// say so rather than report the other API's health as its own.
-	if existing.GetLabels()[managedByLabel] != managedByValue {
+	//
+	// Another kube-crisp installation's is someone else's too, for all that it
+	// carries the same label. Rewriting it took the group version from that installation, which
+	// took it straight back on its next sync.
+	if !m.owns(existing) {
 		if !m.routesHere(existing) {
 			return servedElsewhere(name, existing)
 		}

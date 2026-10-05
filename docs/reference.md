@@ -858,15 +858,21 @@ this way.
 The same pair also decides how much the watch cache holds. A tombstone that carries the mapped
 columns describes the row it removed, so the cache no longer has to keep whole objects just to have
 something to put in a `Deleted` event — it keeps the key and the version, which is all the diff
-compares. Measured at 1.83x less held per row, and it is what removes the requirement that `maxRows`
-exceed the row count. Include the mapped columns in the tombstone query to get it:
+compares. Measured at 1.83x less held per row. It is memory only: the first poll still reads the whole
+table under `watch.query`'s `maxRows`, and a watcher asking for the collection reads it under
+`queries.list`'s, so `maxRows` still has to exceed the row count. Include every mapped column in the
+tombstone query to get it — the mapped `resourceVersion` too, since a tombstone missing any mapped
+column maps no row and counts as identity-only:
 
 ```yaml
     deletedQuery:
       sql: |
-        SELECT id, tenant, customer, total_cents, status
+        SELECT id, tenant, customer, total_cents, status, updated_at
         FROM order_tombstones WHERE deleted_at > :since
 ```
+
+The cache switches to keeping keys and versions when a poll first reads a tombstone that maps in
+full; until then, and for good with identity-only tombstones, it keeps whole objects.
 
 What is kept is the identity, the version, the kind and the labels — a watch event that carries an
 object with no kind cannot be encoded, and a watcher with a label selector filters deletions on

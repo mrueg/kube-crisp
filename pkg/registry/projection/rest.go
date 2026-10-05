@@ -512,20 +512,22 @@ func New(
 				r.watch.deleted = r.deletedSince
 
 				// Keep only keys and versions, so a watched projection no
-				// longer holds its whole collection in memory and no longer
-				// needs maxRows above the row count.
+				// longer holds its whole collection in memory.
 				//
 				// Both conditions are load-bearing. The diff compares the
 				// mapped resourceVersion, which is the only thing kept; without
 				// one it would have to compare whole objects it no longer has.
 				// And a Deleted event has to carry the row, which the tombstone
 				// describes — the cache being the only place a deleted object
-				// existed is what made it hold them in the first place.
+				// existed is what made it hold them in the first place. Only a
+				// tombstone that maps in full describes it, which the statement
+				// alone does not say, so this only allows it and the first such
+				// tombstone a poll reads turns it on. See lightenLocked.
 				//
 				// The initial state of a new watcher is then read rather than
 				// remembered, which is the trade: memory for a query per
 				// watcher that asks for it.
-				r.watch.lightweight = spec.Mapping.ResourceVersion != ""
+				r.watch.mayLighten = spec.Mapping.ResourceVersion != ""
 			}
 			if spec.Watch.FullResyncInterval != nil {
 				r.watch.fullResyncInterval = spec.Watch.FullResyncInterval.Duration

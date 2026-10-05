@@ -38,7 +38,7 @@ GOBIN="${TOOLS}" go install "sigs.k8s.io/controller-tools/cmd/controller-gen@${C
 # documentation for the API, and the CRD is the only place they reach a cluster:
 # without them `kubectl explain customresourceprojection.spec.mapping` answers
 # with nothing, and the only way to find out what a field means is to open the
-# README.
+# docs.
 #
 # It costs about 90KB — 2.5k lines against 1.2k — which is unremarkable for a
 # CRD and nowhere near the limit on an object in etcd.

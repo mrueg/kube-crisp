@@ -1975,7 +1975,7 @@ func TestCreateIsNotRatcheted(t *testing.T) {
 // compared the client's version against a version the row no longer had.
 //
 // The projection here deliberately does not bind :resourceVersion in its UPDATE.
-// That is the weaker of the two shapes the README describes, where the check is
+// That is the weaker of the two shapes docs/reference.md describes, where the check is
 // a read followed by a write rather than one atomic statement — and it is
 // exactly the shape a stale read silently defeats.
 func TestWriteBaseIsNotServedFromTheCache(t *testing.T) {

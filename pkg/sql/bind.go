@@ -151,7 +151,7 @@ func isNameChar(c byte) bool {
 // nothing, and the client is told 404 for a row that is there.
 //
 // PlaceholderStyle stays what it is. It is registry API — a driver declares it
-// and the README documents it — so the lexical rules are derived from the
+// and docs/extending.md documents it — so the lexical rules are derived from the
 // driver name here instead, the way sessionDialectFor derives the shape of a
 // session-variable statement from it.
 type lexDialect uint8
@@ -179,7 +179,7 @@ const (
 	// the author wrote as a fixed literal. Those are the quiet ones.
 	//
 	// A driver whose grammar this build should read exactly has to be named in
-	// lexDialectFor; the README says so under adding a driver.
+	// lexDialectFor; docs/extending.md says so under adding a driver.
 	lexConservative lexDialect = iota
 	lexPostgres
 	lexMySQL

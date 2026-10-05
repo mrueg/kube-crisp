@@ -19,11 +19,11 @@ func seedCache(t *testing.T) *readCache {
 	t.Helper()
 
 	c := newReadCache(time.Minute, "orders.store.example.com")
-	c.putObject("acme/order-1", "acme", &unstructured.Unstructured{Object: map[string]any{}})
-	c.putList("acme#", "acme", &unstructured.UnstructuredList{})
-	c.putObject("globex/order-9", "globex", &unstructured.Unstructured{Object: map[string]any{}})
-	c.putList("globex#", "globex", &unstructured.UnstructuredList{})
-	c.putList("#", "", &unstructured.UnstructuredList{})
+	c.putObject("acme/order-1", "acme", &unstructured.Unstructured{Object: map[string]any{}}, c.epoch())
+	c.putList("acme#", "acme", &unstructured.UnstructuredList{}, c.epoch())
+	c.putObject("globex/order-9", "globex", &unstructured.Unstructured{Object: map[string]any{}}, c.epoch())
+	c.putList("globex#", "globex", &unstructured.UnstructuredList{}, c.epoch())
+	c.putList("#", "", &unstructured.UnstructuredList{}, c.epoch())
 	return c
 }
 
@@ -64,7 +64,7 @@ func TestCacheInvalidateWithoutNamespaceDropsEverything(t *testing.T) {
 // in one pass over the cache, and the tenants outside it keep their entries.
 func TestCacheInvalidateNamespacesDropsTheWholeSetAndNothingElse(t *testing.T) {
 	c := seedCache(t)
-	c.putList("initech#", "initech", &unstructured.UnstructuredList{})
+	c.putList("initech#", "initech", &unstructured.UnstructuredList{}, c.epoch())
 
 	c.invalidateNamespaces([]string{"acme", "globex", "acme"})
 
@@ -106,8 +106,8 @@ func TestCacheInvalidateNamespacesWithAnEmptySetKeepsEverything(t *testing.T) {
 func TestCacheNilReceiverIsInert(t *testing.T) {
 	var c *readCache
 
-	c.putObject("k", "acme", &unstructured.Unstructured{})
-	c.putList("k", "acme", &unstructured.UnstructuredList{})
+	c.putObject("k", "acme", &unstructured.Unstructured{}, c.epoch())
+	c.putList("k", "acme", &unstructured.UnstructuredList{}, c.epoch())
 	c.invalidate("acme")
 
 	if _, ok := c.getObject("k"); ok {
@@ -190,7 +190,7 @@ func TestCachedListViewIsIndependentOfTheEntry(t *testing.T) {
 	}}
 	stored.SetResourceVersion("7")
 
-	first := c.putList("acme#", "acme", stored)
+	first := c.putList("acme#", "acme", stored, c.epoch())
 	first.SetResourceVersion("999")
 	first.SetContinue("token")
 	first.Items = first.Items[:1]
@@ -219,7 +219,7 @@ func TestCachedListSharesItems(t *testing.T) {
 	stored := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "order-1"}}},
 	}}
-	_ = c.putList("acme#", "acme", stored)
+	_ = c.putList("acme#", "acme", stored, c.epoch())
 
 	first, _ := c.getList("acme#")
 	second, _ := c.getList("acme#")
@@ -246,9 +246,9 @@ func TestCacheEvictsOldestRatherThanEverything(t *testing.T) {
 
 	// The entry that has to survive: stored last, so it expires last.
 	for i := 0; i < maxCacheEntries; i++ {
-		c.putObject(fmt.Sprintf("filler/%d", i), "acme", &unstructured.Unstructured{Object: map[string]any{}})
+		c.putObject(fmt.Sprintf("filler/%d", i), "acme", &unstructured.Unstructured{Object: map[string]any{}}, c.epoch())
 	}
-	c.putObject("kept", "acme", &unstructured.Unstructured{Object: map[string]any{}})
+	c.putObject("kept", "acme", &unstructured.Unstructured{Object: map[string]any{}}, c.epoch())
 
 	if got := c.Len(); got > maxCacheEntries {
 		t.Errorf("cache holds %d entries, which is past the bound of %d", got, maxCacheEntries)
@@ -272,14 +272,15 @@ func TestCacheEvictsExpiredEntriesFirst(t *testing.T) {
 			object:    &unstructured.Unstructured{Object: map[string]any{}},
 			namespace: "acme",
 			expires:   time.Now().Add(-time.Minute),
-		})
+		}, c.epoch())
+
 	}
 	for i := 0; i < maxCacheEntries/2; i++ {
-		c.putObject(fmt.Sprintf("live/%d", i), "acme", &unstructured.Unstructured{Object: map[string]any{}})
+		c.putObject(fmt.Sprintf("live/%d", i), "acme", &unstructured.Unstructured{Object: map[string]any{}}, c.epoch())
 	}
 
 	// One more insert tips it over the bound and triggers eviction.
-	c.putObject("trigger", "acme", &unstructured.Unstructured{Object: map[string]any{}})
+	c.putObject("trigger", "acme", &unstructured.Unstructured{Object: map[string]any{}}, c.epoch())
 
 	for i := 0; i < maxCacheEntries/2; i++ {
 		if _, ok := c.lookup(fmt.Sprintf("live/%d", i)); !ok {
@@ -394,8 +395,8 @@ func TestCacheReportsItsSizeAndWhyEntriesGoAway(t *testing.T) {
 	}
 
 	c := newReadCache(time.Minute, resource)
-	c.putObject("acme/order-1", "acme", &unstructured.Unstructured{Object: map[string]any{}})
-	c.putList("acme#", "acme", &unstructured.UnstructuredList{})
+	c.putObject("acme/order-1", "acme", &unstructured.Unstructured{Object: map[string]any{}}, c.epoch())
+	c.putList("acme#", "acme", &unstructured.UnstructuredList{}, c.epoch())
 
 	if got := entries(); got != 2 {
 		t.Errorf("the cache reports %v entries, want 2", got)
@@ -413,7 +414,7 @@ func TestCacheReportsItsSizeAndWhyEntriesGoAway(t *testing.T) {
 	// An entry read back after its TTL is an expiry, not a miss against an
 	// empty cache — the difference is what says the TTL is too short.
 	short := newReadCache(time.Millisecond, resource)
-	short.putObject("acme/order-2", "acme", &unstructured.Unstructured{Object: map[string]any{}})
+	short.putObject("acme/order-2", "acme", &unstructured.Unstructured{Object: map[string]any{}}, short.epoch())
 	time.Sleep(5 * time.Millisecond)
 	if _, ok := short.getObject("acme/order-2"); ok {
 		t.Fatal("an entry past its TTL was served")
@@ -435,7 +436,7 @@ func TestCacheReportsPressureSeparatelyFromExpiry(t *testing.T) {
 
 	// Long TTL, so nothing here expires: every eviction is pressure.
 	for i := range maxCacheEntries + 1 {
-		c.putList(fmt.Sprintf("page-%d", i), "acme", &unstructured.UnstructuredList{})
+		c.putList(fmt.Sprintf("page-%d", i), "acme", &unstructured.UnstructuredList{}, c.epoch())
 	}
 
 	full, err := testutil.GetCounterMetricValue(

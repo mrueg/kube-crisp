@@ -1341,8 +1341,9 @@ registration failure is.
 
 Within a group, a resource's names are its own: its plural, singular and short names, and its kind
 and list kind. Only one projection can answer to each, at any version. When two claim the same one,
-the projection already serving it keeps it and the other is failed by name, with the name that
-collided and the projection serving it in its `Ready` condition and its ClusterRole left alone.
+the projection already serving it keeps it and the other is failed by name — `Ready` false with
+reason `ResourceClaimed`, the name that collided and the projection serving it in the message, and
+its ClusterRole left alone.
 Nothing else changes: every other projection installs, and the server becomes ready as usual.
 
 The version is deliberately not part of the claim. Two projections serving `bins.example.com` at
@@ -1354,12 +1355,17 @@ would leave `kubectl` and discovery with one name and two resources behind it �
 CustomResourceDefinition is held to.
 
 Whoever is serving the name wins, because the mistake is in the object just applied and applying it
-must not take a working API group away from whichever projection had it. That is judged per
-resource: a projection edited to name a resource another one serves is the newcomer for that
-resource, however long it has been serving its own, and it is the edited object that fails. On a
-cold start nothing is serving yet, so the older projection wins instead — usually re-electing
-whoever was serving before the restart — with the name as the tie-break, so every replica settles
-on the same answer.
+must not take a working API group away from whichever projection had it. Who is serving is read
+from the projections' own status, never from what one replica happens to have compiled, so every
+replica — and a replica that has just restarted — settles on the same answer. A projection counts
+as serving when its status, written for its current generation, lists served paths or says it is
+serving its previous configuration. A status written before an edit counts for nothing: a
+projection edited to name a resource another one serves is the newcomer for that resource, however
+long it has been serving its own, and it is the edited object that fails. A projection whose status
+says it already lost (`ResourceClaimed`) ranks below every other, so it does not take the name back
+while the projection that beat it is being edited. Between two with nothing to go on — both just
+applied, or both loaded from `--projection-dir`, which have no status — the older projection wins,
+with the name as the tie-break.
 
 A projection loses whole. One claiming two names and conflicting on one of them serves neither,
 since a half-installed projection is a surface whose missing half looks exactly like a projection

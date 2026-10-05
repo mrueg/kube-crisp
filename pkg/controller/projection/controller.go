@@ -313,9 +313,17 @@ func New(opts Options) *Controller {
 		UpdateFunc: func(old, new any) {
 			// Ignore updates that only touched status, which the controller
 			// writes itself and which would otherwise loop.
+			//
+			// Except where the status changes who wins a contested resource.
+			// Claims are settled from the status every replica wrote, and a
+			// replica whose sync read the status before another's write landed
+			// would otherwise serve its own answer until something unrelated
+			// queued the next sync. A write that leaves the standing where it
+			// was queues nothing, so this cannot loop.
 			oldObj, okOld := old.(*crispv1alpha1.CustomResourceProjection)
 			newObj, okNew := new.(*crispv1alpha1.CustomResourceProjection)
-			if okOld && okNew && oldObj.Generation == newObj.Generation {
+			if okOld && okNew && oldObj.Generation == newObj.Generation &&
+				standingOf(oldObj) == standingOf(newObj) {
 				return
 			}
 			c.queue.Add(syncKey)
@@ -639,10 +647,11 @@ func (c *Controller) sync(ctx context.Context) error {
 			"projection", name)
 	}
 
-	// Creation times, for settling a resource two projections both claim. Kept
-	// here because the candidate is the only place the object itself is in
-	// hand; a compilation does not carry one.
+	// Creation times and standings, for settling a resource two projections
+	// both claim. Kept here because the candidate is the only place the object
+	// itself is in hand; a compilation does not carry either.
 	created := make(map[string]metav1.Time, len(candidates))
+	standing := make(map[string]claimStanding, len(candidates))
 
 	for _, cand := range candidates {
 		name := cand.projection.Name
@@ -652,6 +661,9 @@ func (c *Controller) sync(ctx context.Context) error {
 			continue
 		}
 		created[name] = cand.projection.CreationTimestamp
+		if cand.stored != nil {
+			standing[name] = standingOf(cand.stored)
+		}
 
 		prepared, err := c.compiler.Prepare(ctx, cand.projection)
 		if err != nil {
@@ -731,7 +743,7 @@ func (c *Controller) sync(ctx context.Context) error {
 	// Before the retirement pass below, so that a loser that was serving has
 	// its storage released rather than left polling its table with nobody
 	// reading the result.
-	for name, err := range resolveClaims(surviving, created, c.compiled) {
+	for name, err := range resolveClaims(surviving, created, standing) {
 		// A loser that compiled afresh this sync built storage that nothing
 		// routes to and that c.compiled has never held, so the pass below
 		// would not find it. Its previous compilation is found there, or was
@@ -740,6 +752,10 @@ func (c *Controller) sync(ctx context.Context) error {
 			retired = append(retired, lost.resources...)
 		}
 		delete(surviving, name)
+		// Whatever it compiled to last time is not being served either, and
+		// its status must not say it is: a projection reported as serving its
+		// previous configuration holds its claims.
+		delete(stale, name)
 		failures[name] = err
 		klog.ErrorS(err, "projection claims a resource another projection serves", "projection", name)
 	}
@@ -1299,6 +1315,10 @@ func failureReason(failure error) string {
 	if errors.As(failure, &reserved) {
 		return "NameReservedByFile"
 	}
+	var claimed *claimLostError
+	if errors.As(failure, &claimed) {
+		return reasonResourceClaimed
+	}
 	return "CompilationFailed"
 }
 
@@ -1780,6 +1800,79 @@ func claimsOf(resources []apidynamic.Resource) []resourceClaim {
 	return claims
 }
 
+// claimStanding is what a projection's persisted status says about the
+// resources it claims.
+type claimStanding int
+
+const (
+	// standingUnknown: no status for this generation yet, which is a
+	// projection just created or just edited, or one loaded from a file, or a
+	// status that says it failed for some reason other than a claim. The zero
+	// value, so a projection with no entry has it.
+	standingUnknown claimStanding = iota
+	// standingServing: the status, written for the generation in hand, says
+	// the projection is serving -- compiled and installed, or still answering
+	// from its previous configuration.
+	standingServing
+	// standingLost: the status, written for the generation in hand, says the
+	// projection lost a claim.
+	standingLost
+)
+
+// rank orders standings for resolveClaims: serving first, unknown next, a
+// projection that has already lost last.
+func (s claimStanding) rank() int {
+	switch s {
+	case standingServing:
+		return 0
+	case standingLost:
+		return 2
+	}
+	return 1
+}
+
+// reasonResourceClaimed is the Ready reason of a projection that lost a claim.
+// It is its own reason rather than CompilationFailed, because it is what
+// standingOf reads back.
+const reasonResourceClaimed = "ResourceClaimed"
+
+// standingOf reads a projection's standing from the status the server wrote
+// for it.
+//
+// Only a status written for the generation in hand counts. An edit is exactly
+// when the claims can change, and the status then describes the spec before
+// it -- which is how a projection edited to claim a resource another serves
+// comes to be the newcomer for it, however long it has been serving its own.
+func standingOf(p *crispv1alpha1.CustomResourceProjection) claimStanding {
+	if p.Status.ObservedGeneration != p.Generation {
+		return standingUnknown
+	}
+	if len(p.Status.ServedPaths) > 0 {
+		return standingServing
+	}
+	ready := apimeta.FindStatusCondition(p.Status.Conditions, crispv1alpha1.ConditionReady)
+	switch {
+	case ready == nil:
+		return standingUnknown
+	case ready.Reason == "ServingPreviousConfiguration":
+		return standingServing
+	case ready.Reason == reasonResourceClaimed:
+		return standingLost
+	}
+	return standingUnknown
+}
+
+// claimLostError is why a projection is not served when another holds a name
+// it claims.
+type claimLostError struct {
+	claim  resourceClaim
+	winner string
+}
+
+func (e *claimLostError) Error() string {
+	return fmt.Sprintf("%s is claimed by projection %q as well, which serves it", e.claim, e.winner)
+}
+
 // resolveClaims decides which projection serves a name that more than one
 // claims, and returns an error for each projection that loses.
 //
@@ -1789,127 +1882,72 @@ func claimsOf(resources []apidynamic.Resource) []resourceClaim {
 // projection should give way, so it failed the rebuild -- taking every
 // unrelated projection down with the pair that disagreed.
 //
-// Losing is decided per name, so that the answer does not move:
+// The answer has to be the same in every replica, and the same across a
+// restart, or two replicas serve one resource from two tables. So it is
+// decided only from what every replica reads the same way -- the projections'
+// own statuses and metadata -- and never from what a replica happens to have
+// compiled. Projections are ranked, and each in turn keeps what it claims
+// unless a projection ranked above it already does:
 //
-//   - A projection already serving the name keeps it. Applying a conflicting
-//     projection must not take a working API group away from the one that had
-//     it; the mistake is in the object just applied, and that is the object
-//     that should fail. Serving something else is no help here: a projection
-//     edited to claim a resource another one serves is the newcomer for that
-//     resource, however long it has been serving its own.
-//   - Otherwise the older projection wins, which on a cold start usually
-//     re-elects whoever was serving before the restart.
-//   - Then the name, so that two created in the same instant still settle the
-//     same way in every replica.
+//   - A projection whose status says it is serving comes first. Applying a
+//     conflicting projection must not take a working API group away from the
+//     one that had it; the mistake is in the object just applied, and that is
+//     the object that should fail. Only a status written for the current
+//     generation counts, so a projection edited to claim a resource another
+//     one serves is the newcomer for it, however long it has been serving
+//     its own.
+//   - A projection whose status says it already lost a claim comes last, so
+//     that it does not take the resource back while the projection that beat
+//     it has an edit the status has not caught up with.
+//   - Within either, the older projection comes first, which on a first start
+//     -- or for files, which have no status -- usually picks whoever was
+//     applied first; then the name, so that two created in the same instant
+//     still settle the same way.
 //
 // A projection loses whole. One that claims two names and conflicts on one of
 // them serves neither: half a projection is a surface whose absent half looks
 // like a projection that was never applied. It loses only to a projection that
-// is itself going to serve, though. Giving way to one that loses elsewhere
-// would withdraw a working resource in favour of nobody.
+// is itself going to serve, though, which is what taking them in rank order
+// gives: whoever it gives way to has already kept everything it claims.
 func resolveClaims(
 	surviving map[string]compilation,
 	created map[string]metav1.Time,
-	serving map[string]compilation,
+	standing map[string]claimStanding,
 ) map[string]error {
-	claims := make(map[string][]resourceClaim, len(surviving))
-	for name, compiled := range surviving {
-		claims[name] = claimsOf(compiled.resources)
+	ranked := make([]string, 0, len(surviving))
+	for name := range surviving {
+		ranked = append(ranked, name)
 	}
-	held := make(map[string]map[resourceClaim]bool, len(serving))
-	for name, compiled := range serving {
-		held[name] = map[resourceClaim]bool{}
-		for _, claim := range claimsOf(compiled.resources) {
-			held[name][claim] = true
+	sort.Slice(ranked, func(i, j int) bool {
+		a, b := ranked[i], ranked[j]
+		if ar, br := standing[a].rank(), standing[b].rank(); ar != br {
+			return ar < br
 		}
-	}
-
-	older := func(a, b string) bool {
 		at, bt := created[a], created[b]
 		if !at.Equal(&bt) {
 			return at.Before(&bt)
 		}
 		return a < b
-	}
-	// prefers reports whether a should serve claim rather than b.
-	prefers := func(a, b string, claim resourceClaim) bool {
-		if ah, bh := held[a][claim], held[b][claim]; ah != bh {
-			return ah
-		}
-		return older(a, b)
-	}
+	})
 
+	held := map[resourceClaim]string{}
 	losses := map[string]error{}
-	for {
-		// The projection each name would go to among those still standing.
-		winner := map[resourceClaim]string{}
-		standing := make([]string, 0, len(surviving))
-		for name := range surviving {
-			if _, lost := losses[name]; lost {
-				continue
-			}
-			standing = append(standing, name)
-			for _, claim := range claims[name] {
-				if other, taken := winner[claim]; !taken || prefers(name, other, claim) {
-					winner[claim] = name
-				}
-			}
-		}
-		sort.Strings(standing)
-
-		// A projection that wins every name it claims is going to serve, and
-		// whoever it beat gives way. One that wins some and loses others is
-		// not decided yet; whatever it beat waits until it is.
-		settled := func(name string) bool {
-			for _, claim := range claims[name] {
-				if winner[claim] != name {
-					return false
-				}
-			}
-			return true
-		}
-		lose := func(name string, claim resourceClaim) {
-			losses[name] = fmt.Errorf(
-				"%s is claimed by projection %q as well, which serves it", claim, winner[claim])
-		}
-
-		var undecided []string
-		lost := false
-		for _, name := range standing {
-			if settled(name) {
-				continue
-			}
-			undecided = append(undecided, name)
-			for _, claim := range claims[name] {
-				if other := winner[claim]; other != name && settled(other) {
-					lose(name, claim)
-					lost = true
-					break
-				}
-			}
-		}
-		if len(undecided) == 0 {
-			return losses
-		}
-		if lost {
-			continue
-		}
-
-		// Nobody settled beat anybody, yet somebody is undecided: two
-		// projections each hold a name the other has just been edited to
-		// claim. Both edits are the mistake; the newer object gives way, so
-		// that at least one of them keeps serving.
-		last := undecided[0]
-		for _, name := range undecided[1:] {
-			if older(last, name) {
-				last = name
-			}
-		}
-		for _, claim := range claims[last] {
-			if winner[claim] != last {
-				lose(last, claim)
+	for _, name := range ranked {
+		claims := claimsOf(surviving[name].resources)
+		var lost error
+		for _, claim := range claims {
+			if winner, taken := held[claim]; taken {
+				lost = &claimLostError{claim: claim, winner: winner}
 				break
 			}
 		}
+		if lost != nil {
+			losses[name] = lost
+			continue
+		}
+		for _, claim := range claims {
+			held[claim] = name
+		}
 	}
+	return losses
 }

@@ -325,8 +325,9 @@ deleted. PostgreSQL and MySQL only; SQLite has no session state.
 
 ## Rows that cannot be mapped
 
-A row whose name is not a valid object name, whose identity column is NULL, or whose value does not
-fit the type the mapping declares cannot become an object. It is left out of the collection rather
+A row whose name is not a valid object name, whose namespace is not a valid namespace (a DNS-1123
+label: `"Acme Corp"`, `"ACME"` and `""` are not), whose identity column is NULL, or whose value does
+not fit the type the mapping declares cannot become an object. It is left out of the collection rather
 than failing the read: one such row would otherwise make `kubectl get` return 500 for the whole
 table, with no way to see the rest of it.
 

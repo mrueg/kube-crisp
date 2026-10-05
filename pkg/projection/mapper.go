@@ -334,7 +334,29 @@ func (m *Mapper) NamespaceFrom(row crispsql.Row) (string, error) {
 	if !m.namespaced {
 		return "", nil
 	}
-	return requiredString(row, m.mapping.Namespace, "namespace")
+	return m.namespace(row)
+}
+
+// namespace reads the namespace column and holds it to the rule a namespace
+// has to meet, which is a DNS-1123 label.
+//
+// The name has always been checked against the rule its request path needs;
+// the namespace was only checked for NULL. A row whose column held "", "Acme
+// Corp" or "ACME" became an object carrying that as metadata.namespace, which
+// a list or watch across all namespaces handed out and which no request path
+// can name: it could be seen and then never fetched, updated or deleted. An
+// error here takes the same road as a name that is not one — the row is left
+// out and counted, or the read fails, as mapping.onUnmappableRow says.
+func (m *Mapper) namespace(row crispsql.Row) (string, error) {
+	ns, err := requiredString(row, m.mapping.Namespace, "namespace")
+	if err != nil {
+		return "", err
+	}
+	if !isDNS1123Label(ns) {
+		return "", fmt.Errorf("mapping.namespace column %q produced %q, which is not a valid namespace: %s",
+			m.mapping.Namespace, ns, strings.Join(validation.IsDNS1123Label(ns), "; "))
+	}
+	return ns, nil
 }
 
 // buildName assembles an object's name out of a row.
@@ -419,6 +441,17 @@ func isDNS1123Subdomain(name string) bool {
 	return !labelStart && name[len(name)-1] != '-'
 }
 
+// dns1123LabelMaxLength is what a DNS-1123 label, and so a namespace, may not
+// exceed.
+const dns1123LabelMaxLength = 63
+
+// isDNS1123Label reports whether a namespace is one Kubernetes will accept: a
+// subdomain of a single label, so the same scan with no dots and a shorter
+// limit, for the reason isDNS1123Subdomain gives.
+func isDNS1123Label(ns string) bool {
+	return len(ns) <= dns1123LabelMaxLength && !strings.Contains(ns, ".") && isDNS1123Subdomain(ns)
+}
+
 // validatePath rejects destinations that would collide with identity fields
 // that the mapping sets explicitly.
 func validatePath(path string) error {
@@ -456,7 +489,7 @@ func (m *Mapper) Row(row crispsql.Row) (*unstructured.Unstructured, error) {
 	obj.SetName(name)
 
 	if m.namespaced {
-		ns, err := requiredString(row, m.mapping.Namespace, "namespace")
+		ns, err := m.namespace(row)
 		if err != nil {
 			return nil, err
 		}

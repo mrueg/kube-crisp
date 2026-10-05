@@ -84,10 +84,16 @@ What kube-crisp does not do, or does with a condition attached, and why.
 - **`--projection-dir` reads a tree.** Every `.yaml` and `.yml` file under the directory is loaded,
   subdirectories included, so pointing it at a directory of folders works — which it did not, and a
   directory holding only folders used to load nothing and say nothing, as this repository's own
-  `examples/` did once it grew subfolders. Directories whose name starts with a dot are skipped,
-  which is what makes the flag safe to point at a mounted ConfigMap: the mount keeps its real files
-  in a timestamped `..`-prefixed directory beside the symlinks that name them, and reading both
-  would load every projection twice.
+  `examples/` did once it grew subfolders. Files and directories whose name starts with a dot are
+  skipped, which is what makes the flag safe to point at a mounted ConfigMap: the mount keeps its
+  real files in a timestamped `..`-prefixed directory beside the symlinks that name them, and
+  reading both would load every projection twice. It also keeps an editor's lock file, such as
+  emacs's dangling `.#orders.yaml`, from failing the directory while a file is being edited.
+  Symlinked directories are followed, the directory named by the flag included, so a
+  `current -> releases/42` link and a ConfigMap whose items name nested paths are both read and
+  watched; each directory is read once by where it really is, so a link back up the tree is not a
+  loop. A directory named by the flag that is a link is watched from its parent too, so swapping
+  the link to another target is picked up as promptly as an edit.
 - **`--projection-dir` is re-read while running.** A file changing is picked up the way a projection
   changing in the cluster is: the directory and everything under it is watched, and re-read on every
   sync. A file that does

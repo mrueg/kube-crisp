@@ -879,6 +879,9 @@ object with no kind cannot be encoded, and a watcher with a label selector filte
 labels. Everything the row itself holds comes from the tombstone, which is why a deletion is answered
 from it rather than from the cache when the cache is lightweight: a field selector over a mapped
 column can be matched against the tombstone's row and could not be matched against a trimmed one.
+Where only a trimmed entry or a bare identity is left to carry a deletion, whatever it cannot answer
+is taken as a match: a watcher is told about the removal when the namespace matches, and the labels
+when there are labels, since a deletion the client discards is better than a row it keeps.
 
 The trade is that a new watcher's initial state is read rather than remembered, so a watcher that
 asks for the collection costs a query. A tombstone holding only the identity columns is still

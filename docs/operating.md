@@ -533,7 +533,9 @@ out was whoever called it.
 An unreachable database is not a failed compilation. The check only runs when the
 database answered, so an outage leaves `DataSourceConnected` false and the
 resource installed, rather than withdrawing a projection because nobody was there
-to ask.
+to ask. A database that takes the connection but does not answer the ping or a
+statement within ten seconds counts as unreachable too, so one silent database
+cannot hold up every other projection's compile.
 
 ## Health
 

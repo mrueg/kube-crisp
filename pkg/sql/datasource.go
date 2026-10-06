@@ -486,7 +486,9 @@ func (p *Pool) Name() string { return p.metricLabel() }
 func (p *Pool) Driver() string { return p.driver }
 
 // Ping verifies connectivity.
-func (p *Pool) Ping(ctx context.Context) error { return redactDSN(p.dsn, p.db.PingContext(ctx)) }
+func (p *Pool) Ping(ctx context.Context) error {
+	return probe(ctx, func(ctx context.Context) error { return redactDSN(p.dsn, p.db.PingContext(ctx)) })
+}
 
 // redactDSN takes the connection string back out of an error.
 //
@@ -1430,16 +1432,58 @@ func (p *Pool) Check(ctx context.Context, statement string) error {
 		return err
 	}
 
-	prepared, err := p.db.PrepareContext(ctx, rewritten)
-	if err != nil {
-		return err
-	}
-	// Closing is cleanup; whether the database could parse and plan the
-	// statement is the answer, and it has already been given.
-	defer func() { _ = prepared.Close() }()
-
-	return nil
+	return probe(ctx, func(ctx context.Context) error {
+		prepared, err := p.db.PrepareContext(ctx, rewritten)
+		if err != nil {
+			return err
+		}
+		// Closing is cleanup; whether the database could parse and plan the
+		// statement is the answer, and it has already been given.
+		defer func() { _ = prepared.Close() }()
+		return nil
+	})
 }
+
+// probeTimeout bounds each question Ping and Check put to a database.
+//
+// Nothing above them bounds it. The controller's sync compiles every projection
+// in turn under a context that lives as long as the process, so a database
+// that takes the connection and then never answers -- one still starting, a
+// handshake stuck behind a proxy, a connection string with no timeout of its
+// own -- held the sync there indefinitely, and with it every projection queued
+// behind that one: none installed, none with a status.
+//
+// A variable so that a test does not wait it out.
+var probeTimeout = 10 * time.Second
+
+// probe asks the database one question under probeTimeout. A database that did
+// not answer in time is reported as unavailable, which is how Ping's and
+// Check's callers already treat a database they cannot ask: the projection is
+// installed and answers 503 until it recovers, and admission does not object.
+func probe(ctx context.Context, ask func(context.Context) error) error {
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	err := ask(probeCtx)
+	// The caller's own cancellation is not the database's silence, and is
+	// returned as it came.
+	if err != nil && ctx.Err() == nil && errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+		return &probeTimeoutError{after: probeTimeout, err: err}
+	}
+	return err
+}
+
+// probeTimeoutError is a database that did not answer a probe in time.
+type probeTimeoutError struct {
+	after time.Duration
+	err   error
+}
+
+func (e *probeTimeoutError) Error() string {
+	return fmt.Sprintf("the database did not answer within %s: %v", e.after, e.err)
+}
+
+func (e *probeTimeoutError) Unwrap() error { return e.err }
 
 // warnIfUnencrypted says so when a data source is reached without transport
 // encryption.

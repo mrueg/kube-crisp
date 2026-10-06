@@ -162,6 +162,11 @@ func IsUnavailable(err error) bool {
 		return true
 	}
 
+	var probeErr *probeTimeoutError
+	if errors.As(err, &probeErr) {
+		return true
+	}
+
 	var connectErr *pgconn.ConnectError
 	if errors.As(err, &connectErr) {
 		return true

@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.7.12
 	github.com/emicklei/go-restful/v3 v3.14.0
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/go-sql-driver/mysql v1.10.1
+	github.com/go-sql-driver/mysql v1.10.2
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/prometheus/client_golang v1.25.0
